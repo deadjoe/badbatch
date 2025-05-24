@@ -264,10 +264,14 @@ where
     {
         let sequence = self.sequencer.next()?;
 
-        // Get the event and translate it
-        // In a real implementation, we would need proper access to the ring buffer
-        // This is a simplified version
+        // Get the event from the ring buffer at the claimed sequence
+        // This is safe because we have exclusive access to this sequence until we publish
+        let event = unsafe { self.ring_buffer.get_mut(sequence) };
 
+        // Use the translator to populate the event with data
+        translator.translate_to(event, sequence);
+
+        // Publish the sequence to make it available to consumers
         self.sequencer.publish(sequence);
         Ok(())
     }
@@ -284,7 +288,14 @@ where
         Tr: crate::disruptor::EventTranslator<T>,
     {
         if let Some(sequence) = self.sequencer.try_next() {
-            // Translate and publish
+            // Get the event from the ring buffer at the claimed sequence
+            // This is safe because we have exclusive access to this sequence until we publish
+            let event = unsafe { self.ring_buffer.get_mut(sequence) };
+
+            // Use the translator to populate the event with data
+            translator.translate_to(event, sequence);
+
+            // Publish the sequence to make it available to consumers
             self.sequencer.publish(sequence);
             true
         } else {
