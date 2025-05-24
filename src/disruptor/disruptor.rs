@@ -476,7 +476,7 @@ where
     unsafe fn get_mut(&self, sequence: i64) -> &mut T {
         // This is unsafe but necessary for the Disruptor pattern
         // The caller must ensure exclusive access
-        self.get_mut_unchecked(sequence)
+        &mut *self.get_mut_unchecked(sequence)
     }
 }
 
