@@ -68,6 +68,9 @@ pub mod builder;
 // Thread management and CPU affinity (inspired by disruptor-rs)
 pub mod thread_management;
 
+// Elegant consumer handling (inspired by disruptor-rs)
+pub mod elegant_consumer;
+
 // Main Disruptor DSL
 pub mod disruptor;
 
