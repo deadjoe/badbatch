@@ -187,14 +187,14 @@ impl BadBatchClient {
 }
 
 // API Response Types
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: String,
     pub timestamp: String,
     pub version: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SystemMetrics {
     pub uptime_seconds: u64,
     pub memory_usage_bytes: u64,
@@ -203,7 +203,7 @@ pub struct SystemMetrics {
     pub total_events_processed: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct VersionResponse {
     pub version: String,
     pub build_date: String,
@@ -218,13 +218,13 @@ pub struct CreateDisruptorRequest {
     pub wait_strategy: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DisruptorResponse {
     pub id: String,
     pub message: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DisruptorInfo {
     pub id: String,
     pub name: String,
@@ -252,20 +252,20 @@ pub struct EventData {
     pub metadata: Option<HashMap<String, String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PublishResponse {
     pub sequence: u64,
     pub timestamp: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PublishBatchResponse {
     pub sequences: Vec<u64>,
     pub count: usize,
     pub timestamp: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DisruptorMetrics {
     pub events_processed: u64,
     pub events_per_second: f64,
@@ -275,7 +275,7 @@ pub struct DisruptorMetrics {
     pub last_sequence: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DisruptorHealth {
     pub status: String,
     pub healthy: bool,

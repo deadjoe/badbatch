@@ -8,7 +8,7 @@ use tokio::fs;
 use tokio::time::sleep;
 use serde_json::Value;
 
-use crate::bin::{EventCommands, client::BadBatchClient};
+use crate::{EventCommands, client::BadBatchClient};
 use crate::cli::{CliResult, format, utils, progress};
 
 /// Handle event commands
@@ -23,17 +23,17 @@ pub async fn handle_event_command(
             data,
             metadata,
         } => publish_event(client, &disruptor, &data, &metadata, output_format).await,
-        
+
         EventCommands::PublishFile {
             disruptor,
             file,
             batch_size,
         } => publish_file(client, &disruptor, &file, batch_size, output_format).await,
-        
+
         EventCommands::Batch { disruptor, data } => {
             publish_batch(client, &disruptor, &data, output_format).await
         }
-        
+
         EventCommands::Generate {
             disruptor,
             count,
@@ -52,7 +52,7 @@ async fn publish_event(
 ) -> CliResult<()> {
     // Parse JSON data
     let event_data = utils::validate_json(data)?;
-    
+
     // Parse metadata
     let metadata_map = if metadata.is_empty() {
         None
@@ -61,7 +61,7 @@ async fn publish_event(
     };
 
     let spinner = progress::create_spinner("Publishing event...");
-    
+
     let request = crate::client::PublishEventRequest {
         data: event_data,
         metadata: metadata_map,
@@ -85,24 +85,24 @@ async fn publish_file(
 ) -> CliResult<()> {
     // Read file content
     let content = fs::read_to_string(file).await?;
-    
+
     // Parse as JSON array
     let events: Vec<Value> = serde_json::from_str(&content)?;
-    
+
     if events.is_empty() {
         println!("No events found in file.");
         return Ok(());
     }
 
     println!("Publishing {} events from file in batches of {}...", events.len(), batch_size);
-    
+
     let total_batches = (events.len() + batch_size - 1) / batch_size;
     let progress_bar = progress::create_progress_bar(total_batches as u64, "Publishing batches");
-    
+
     let mut total_published = 0;
     let start_time = Instant::now();
 
-    for (batch_idx, chunk) in events.chunks(batch_size).enumerate() {
+    for (_batch_idx, chunk) in events.chunks(batch_size).enumerate() {
         let batch_events: Vec<crate::client::EventData> = chunk
             .iter()
             .map(|data| crate::client::EventData {
@@ -117,7 +117,7 @@ async fn publish_file(
 
         let response = client.publish_batch(disruptor, request).await?;
         total_published += response.count;
-        
+
         progress_bar.inc(1);
         progress_bar.set_message(format!("Published {} events", total_published));
     }
@@ -151,13 +151,13 @@ async fn publish_batch(
 ) -> CliResult<()> {
     // Parse JSON array
     let events: Vec<Value> = serde_json::from_str(data)?;
-    
+
     if events.is_empty() {
         return Err(crate::cli::CliError::invalid_input("Event array cannot be empty"));
     }
 
     let spinner = progress::create_spinner(&format!("Publishing {} events...", events.len()));
-    
+
     let batch_events: Vec<crate::client::EventData> = events
         .into_iter()
         .map(|data| crate::client::EventData {
@@ -171,7 +171,7 @@ async fn publish_batch(
     };
 
     let response = client.publish_batch(disruptor, request).await?;
-    spinner.finish_with_message(&format!("✓ Published {} events successfully", response.count));
+    progress::finish_progress_with_message(&spinner, &format!("Published {} events successfully", response.count));
 
     let output = format::format_output(&response, output_format)?;
     println!("{}", output);
@@ -187,10 +187,10 @@ async fn generate_events(
     size: usize,
 ) -> CliResult<()> {
     println!("Generating {} events at {} events/sec with {} bytes each...", count, rate, size);
-    
+
     let progress_bar = progress::create_progress_bar(count as u64, "Generating events");
     let start_time = Instant::now();
-    
+
     let interval = Duration::from_secs_f64(1.0 / rate as f64);
     let mut published = 0;
     let mut last_time = Instant::now();
@@ -198,7 +198,7 @@ async fn generate_events(
     for i in 0..count {
         // Generate event data
         let event_data = generate_test_event(i, size);
-        
+
         let request = crate::client::PublishEventRequest {
             data: event_data,
             metadata: None,
@@ -257,7 +257,7 @@ fn generate_test_event(index: usize, size: usize) -> Value {
     if size > base_size {
         let padding_size = size - base_size - 20; // Account for padding field overhead
         let padding = "x".repeat(padding_size.max(0));
-        
+
         serde_json::json!({
             "id": index,
             "timestamp": chrono::Utc::now().to_rfc3339(),

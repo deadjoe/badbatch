@@ -8,7 +8,7 @@ use tokio::time::sleep;
 use tabled::Tabled;
 use serde_json::Value;
 
-use crate::bin::{MonitorCommands, client::BadBatchClient};
+use crate::{MonitorCommands, client::BadBatchClient};
 use crate::cli::{CliResult, format, utils};
 
 /// Handle monitor commands
@@ -19,17 +19,17 @@ pub async fn handle_monitor_command(
 ) -> CliResult<()> {
     match command {
         MonitorCommands::System => show_system_metrics(client, output_format).await,
-        
+
         MonitorCommands::Disruptor { id } => show_disruptor_metrics(client, &id, output_format).await,
-        
+
         MonitorCommands::Cluster => show_cluster_metrics(client, output_format).await,
-        
+
         MonitorCommands::Watch {
             interval,
             monitor_type,
             target,
         } => watch_metrics(client, interval, &monitor_type, target.as_deref(), output_format).await,
-        
+
         MonitorCommands::Export { output, format } => {
             export_metrics(client, &output, &format).await
         }
@@ -78,7 +78,7 @@ async fn show_cluster_metrics(client: &BadBatchClient, output_format: &str) -> C
     // For now, show system metrics as cluster metrics
     // In a real implementation, this would fetch cluster-specific metrics
     let metrics = client.get_system_metrics().await?;
-    
+
     let cluster_metrics = serde_json::json!({
         "cluster_status": "active",
         "node_count": 1,
@@ -103,11 +103,11 @@ async fn watch_metrics(
     println!();
 
     let sleep_duration = Duration::from_secs(interval);
-    
+
     loop {
         // Clear screen
         print!("\x1B[2J\x1B[1;1H");
-        
+
         // Show timestamp
         println!("Last updated: {}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"));
         println!();
@@ -134,7 +134,10 @@ async fn watch_metrics(
             }
             _ => {
                 eprintln!("Unknown monitor type: {}", monitor_type);
-                break;
+                return Err(crate::cli::CliError::invalid_input(format!(
+                    "Unknown monitor type: {}. Supported types: system, disruptor, cluster",
+                    monitor_type
+                )));
             }
         }
 
@@ -152,7 +155,7 @@ async fn export_metrics(
     // Collect all metrics
     let system_metrics = client.get_system_metrics().await?;
     let disruptors = client.list_disruptors().await?;
-    
+
     let mut disruptor_metrics = Vec::new();
     for disruptor in &disruptors {
         if let Ok(metrics) = client.get_disruptor_metrics(&disruptor.id).await {
@@ -193,7 +196,7 @@ fn export_to_csv(data: &Value) -> CliResult<String> {
     // Simple CSV export - in a real implementation, this would be more sophisticated
     let mut csv = String::new();
     csv.push_str("metric_type,metric_name,value,timestamp\n");
-    
+
     if let Some(system_metrics) = data.get("system_metrics") {
         if let Some(uptime) = system_metrics.get("uptime_seconds") {
             csv.push_str(&format!("system,uptime_seconds,{},{}\n", uptime, data["timestamp"]));
@@ -205,28 +208,28 @@ fn export_to_csv(data: &Value) -> CliResult<String> {
             csv.push_str(&format!("system,cpu_usage_percent,{},{}\n", cpu, data["timestamp"]));
         }
     }
-    
+
     Ok(csv)
 }
 
 fn export_to_prometheus(data: &Value) -> CliResult<String> {
     // Simple Prometheus export - in a real implementation, this would be more sophisticated
     let mut prometheus = String::new();
-    
+
     if let Some(system_metrics) = data.get("system_metrics") {
         if let Some(uptime) = system_metrics.get("uptime_seconds") {
             prometheus.push_str(&format!("# HELP badbatch_uptime_seconds System uptime in seconds\n"));
             prometheus.push_str(&format!("# TYPE badbatch_uptime_seconds counter\n"));
             prometheus.push_str(&format!("badbatch_uptime_seconds {}\n", uptime));
         }
-        
+
         if let Some(memory) = system_metrics.get("memory_usage_bytes") {
             prometheus.push_str(&format!("# HELP badbatch_memory_usage_bytes Memory usage in bytes\n"));
             prometheus.push_str(&format!("# TYPE badbatch_memory_usage_bytes gauge\n"));
             prometheus.push_str(&format!("badbatch_memory_usage_bytes {}\n", memory));
         }
     }
-    
+
     Ok(prometheus)
 }
 
