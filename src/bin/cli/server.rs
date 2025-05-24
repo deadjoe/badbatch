@@ -17,7 +17,7 @@ pub async fn start_server(
 ) -> CliResult<()> {
     println!("Starting BadBatch server...");
     println!("  Bind address: {}", bind_addr);
-    
+
     if cluster_mode {
         println!("  Cluster mode: enabled");
         println!("  Cluster bind: {}", cluster_bind);
@@ -38,22 +38,28 @@ pub async fn start_server(
 
     // Create server configuration
     let mut server_config = badbatch::api::ServerConfig::default();
-    server_config.bind_addr = bind_socket;
+    server_config.host = bind_socket.ip().to_string();
+    server_config.port = bind_socket.port();
 
     // Create and start server
-    let server = badbatch::api::Server::new(server_config);
-    
-    println!("✓ BadBatch server started successfully");
+    let server = badbatch::api::ApiServer::new(server_config);
+
+    println!("✓ BadBatch server starting...");
     println!("  API endpoint: http://{}", bind_addr);
     println!("  Press Ctrl+C to stop");
 
-    // In a real implementation, this would start the actual server
-    // For now, we'll just simulate it
-    tokio::signal::ctrl_c().await.map_err(|e| {
-        crate::cli::CliError::operation(format!("Failed to listen for shutdown signal: {}", e))
+    // Start the server with graceful shutdown
+    let shutdown_signal = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to listen for shutdown signal");
+        println!("\nShutdown signal received, stopping server...");
+    };
+
+    server.start_with_shutdown(shutdown_signal).await.map_err(|e| {
+        crate::cli::CliError::operation(format!("Server error: {}", e))
     })?;
 
-    println!("\nShutting down server...");
     println!("✓ Server stopped");
 
     Ok(())

@@ -2,7 +2,7 @@
 //!
 //! Command handlers for cluster management operations.
 
-use crate::bin::{ClusterCommands, client::BadBatchClient};
+use crate::{ClusterCommands, client::BadBatchClient};
 use crate::cli::{CliResult, format};
 
 /// Handle cluster commands
@@ -70,7 +70,7 @@ async fn leave_cluster(_client: &BadBatchClient) -> CliResult<()> {
 async fn show_cluster_health(client: &BadBatchClient, output_format: &str) -> CliResult<()> {
     // Placeholder implementation using system health
     let health = client.get_health().await?;
-    
+
     let cluster_health = serde_json::json!({
         "cluster_healthy": true,
         "total_nodes": 1,

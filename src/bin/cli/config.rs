@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use crate::bin::{ConfigCommands, config::Config};
+use crate::{ConfigCommands, config::Config};
 use crate::cli::{CliResult, format};
 
 /// Handle config commands
@@ -38,10 +38,10 @@ async fn show_config(config: Option<&Config>, output_format: &str) -> CliResult<
 
 async fn validate_config_file(file: &PathBuf) -> CliResult<()> {
     println!("Validating configuration file: {:?}", file);
-    
+
     let config = crate::config::load_config(file).await?;
     crate::config::validate_config(&config)?;
-    
+
     println!("✓ Configuration is valid");
     Ok(())
 }
@@ -51,9 +51,9 @@ async fn generate_example_config(
     config_type: &str,
 ) -> CliResult<()> {
     let config = crate::config::generate_example_config(config_type)?;
-    
+
     let content = serde_yaml::to_string(&config)?;
-    
+
     match output {
         Some(path) => {
             tokio::fs::write(path, &content).await?;
