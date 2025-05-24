@@ -6,29 +6,25 @@
 
 use crate::disruptor::{Result, DisruptorError, EventFactory, is_power_of_two};
 use std::sync::Arc;
+use std::cell::UnsafeCell;
 
 /// The core ring buffer for storing events
 ///
 /// This is the heart of the Disruptor pattern. It pre-allocates all events
 /// and provides lock-free access through careful use of memory barriers and
 /// atomic operations. This follows the exact design from the original LMAX
-/// Disruptor RingBuffer.
+/// Disruptor RingBuffer with optimizations inspired by disruptor-rs.
 ///
 /// # Type Parameters
 /// * `T` - The event type stored in the buffer
 #[derive(Debug)]
-#[repr(align(64))] // Cache line alignment for performance
 pub struct RingBuffer<T> {
-    /// Cache line padding before critical fields
-    _pad1: [u8; 64],
-    /// The buffer storing all events
-    buffer: Vec<T>,
+    /// The buffer storing all events using UnsafeCell for interior mutability
+    /// Using Box<[UnsafeCell<T>]> for better memory layout than Vec<T>
+    slots: Box<[UnsafeCell<T>]>,
     /// Mask for fast modulo operations (buffer_size - 1)
-    index_mask: usize,
-    /// The size of the buffer
-    buffer_size: usize,
-    /// Cache line padding after critical fields
-    _pad2: [u8; 64],
+    /// Using i64 to match sequence type and avoid casting
+    index_mask: i64,
 }
 
 impl<T> RingBuffer<T>
@@ -54,18 +50,15 @@ where
             return Err(DisruptorError::InvalidBufferSize(buffer_size));
         }
 
-        // Pre-allocate all events
-        let mut buffer = Vec::with_capacity(buffer_size);
-        for _ in 0..buffer_size {
-            buffer.push(event_factory.new_instance());
-        }
+        // Pre-allocate all events using UnsafeCell for interior mutability
+        // Using Box<[UnsafeCell<T>]> for better memory layout than Vec<T>
+        let slots: Box<[UnsafeCell<T>]> = (0..buffer_size)
+            .map(|_| UnsafeCell::new(event_factory.new_instance()))
+            .collect();
 
         Ok(Self {
-            _pad1: [0; 64],
-            buffer,
-            index_mask: buffer_size - 1,
-            buffer_size,
-            _pad2: [0; 64],
+            slots,
+            index_mask: (buffer_size - 1) as i64,
         })
     }
 
@@ -77,8 +70,10 @@ where
     /// # Returns
     /// A reference to the event at the specified sequence
     pub fn get(&self, sequence: i64) -> &T {
-        let index = (sequence as usize) & self.index_mask;
-        &self.buffer[index]
+        let index = (sequence & self.index_mask) as usize;
+        // SAFETY: Index is within bounds - guaranteed by invariant and index mask.
+        let slot = unsafe { self.slots.get_unchecked(index) };
+        unsafe { &*slot.get() }
     }
 
     /// Get a mutable reference to the event at the specified sequence
@@ -89,25 +84,33 @@ where
     /// # Returns
     /// A mutable reference to the event at the specified sequence
     pub fn get_mut(&mut self, sequence: i64) -> &mut T {
-        let index = (sequence as usize) & self.index_mask;
-        &mut self.buffer[index]
+        let index = (sequence & self.index_mask) as usize;
+        // SAFETY: We have exclusive access to self, so this is safe
+        let slot = unsafe { self.slots.get_unchecked(index) };
+        unsafe { &mut *slot.get() }
     }
 
     /// Get a mutable reference to the event at the specified sequence (unsafe version)
+    ///
+    /// This follows the disruptor-rs pattern of returning a raw pointer for maximum performance.
+    /// Callers must ensure that only a single mutable reference or multiple immutable references
+    /// exist at any point in time.
     ///
     /// # Arguments
     /// * `sequence` - The sequence number of the event
     ///
     /// # Returns
-    /// A mutable reference to the event at the specified sequence
+    /// A raw mutable pointer to the event at the specified sequence
     ///
     /// # Safety
     /// This method is unsafe because it allows mutable access without checking
     /// for exclusive access. The caller must ensure that only one thread
     /// accesses the event mutably at a time.
-    pub unsafe fn get_mut_unchecked(&self, sequence: i64) -> &mut T {
-        let index = (sequence as usize) & self.index_mask;
-        &mut *(self.buffer.as_ptr().add(index) as *mut T)
+    pub unsafe fn get_mut_unchecked(&self, sequence: i64) -> *mut T {
+        let index = (sequence & self.index_mask) as usize;
+        // SAFETY: Index is within bounds - guaranteed by invariant and index mask.
+        let slot = self.slots.get_unchecked(index);
+        slot.get()
     }
 
     /// Get the size of the buffer
@@ -115,7 +118,15 @@ where
     /// # Returns
     /// The size of the ring buffer
     pub fn buffer_size(&self) -> usize {
-        self.buffer_size
+        self.slots.len()
+    }
+
+    /// Get the size of the buffer as i64
+    ///
+    /// # Returns
+    /// The size of the ring buffer as i64 (matching disruptor-rs pattern)
+    pub fn size(&self) -> i64 {
+        self.slots.len() as i64
     }
 
     /// Check if the buffer has available capacity
@@ -142,8 +153,22 @@ where
     /// # Returns
     /// The remaining capacity in the buffer
     pub fn remaining_capacity(&self, current_sequence: i64, next_sequence: i64) -> i64 {
-        let buffer_size = self.buffer_size as i64;
+        let buffer_size = self.size();
         buffer_size - (next_sequence - current_sequence)
+    }
+
+    /// Get the number of free slots in the buffer
+    ///
+    /// This follows the disruptor-rs pattern for capacity calculation
+    ///
+    /// # Arguments
+    /// * `producer_sequence` - The current producer sequence
+    /// * `consumer_sequence` - The current consumer sequence
+    ///
+    /// # Returns
+    /// The number of free slots available
+    pub fn free_slots(&self, producer_sequence: i64, consumer_sequence: i64) -> i64 {
+        self.size() - (producer_sequence - consumer_sequence)
     }
 }
 
