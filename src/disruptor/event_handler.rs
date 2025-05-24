@@ -50,6 +50,61 @@ pub trait EventHandler<T>: Send + Sync {
     /// ```
     fn on_event(&mut self, event: &mut T, sequence: i64, end_of_batch: bool) -> Result<()>;
 
+    /// Called when a batch of events is about to be processed
+    ///
+    /// This method is called before processing a batch of events, allowing
+    /// the handler to perform any batch-level initialization.
+    ///
+    /// # Arguments
+    /// * `batch_size` - The number of events in this batch
+    /// * `available_size` - The total number of available events
+    ///
+    /// # Returns
+    /// Result indicating success or failure
+    fn on_batch_start(&mut self, _batch_size: i64, _available_size: i64) -> Result<()> {
+        // Default implementation does nothing
+        Ok(())
+    }
+
+    /// Called when the event processor starts
+    ///
+    /// This method is called once when the event processor starts up,
+    /// allowing the handler to perform any initialization.
+    ///
+    /// # Returns
+    /// Result indicating success or failure
+    fn on_start(&mut self) -> Result<()> {
+        // Default implementation does nothing
+        Ok(())
+    }
+
+    /// Called when the event processor shuts down
+    ///
+    /// This method is called once when the event processor shuts down,
+    /// allowing the handler to perform any cleanup.
+    ///
+    /// # Returns
+    /// Result indicating success or failure
+    fn on_shutdown(&mut self) -> Result<()> {
+        // Default implementation does nothing
+        Ok(())
+    }
+
+    /// Called when a timeout occurs while waiting for events
+    ///
+    /// This method is called when the wait strategy times out while
+    /// waiting for new events to become available.
+    ///
+    /// # Arguments
+    /// * `available_sequence` - The highest available sequence at timeout
+    ///
+    /// # Returns
+    /// Result indicating success or failure
+    fn on_timeout(&mut self, _available_sequence: i64) -> Result<()> {
+        // Default implementation does nothing
+        Ok(())
+    }
+
     /// Set the sequence callback for early release (optional)
     ///
     /// This allows the handler to signal completion before the end of a batch,
