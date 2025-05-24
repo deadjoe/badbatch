@@ -6,7 +6,7 @@
 
 use crate::disruptor::{Result, DisruptorError, Sequence, WaitStrategy, is_power_of_two};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
 /// Trait for sequencers that coordinate access to the ring buffer
 ///
@@ -283,6 +283,9 @@ pub struct MultiProducerSequencer {
     available_buffer: Vec<AtomicI32>,
     /// Index mask for fast modulo operations (buffer_size - 1)
     index_mask: usize,
+    /// Cached minimum gating sequence to reduce lock contention
+    /// This is an optimization from the LMAX Disruptor to avoid frequent reads of gating sequences
+    cached_gating_sequence: AtomicI64,
 }
 
 impl MultiProducerSequencer {
@@ -312,6 +315,7 @@ impl MultiProducerSequencer {
             gating_sequences: parking_lot::RwLock::new(Vec::new()),
             available_buffer,
             index_mask: buffer_size - 1,
+            cached_gating_sequence: AtomicI64::new(crate::disruptor::INITIAL_CURSOR_VALUE),
         }
     }
 
@@ -359,11 +363,20 @@ impl Sequencer for MultiProducerSequencer {
             let current = self.cursor.get();
             let next_sequence = current + 1;
             let wrap_point = next_sequence - self.buffer_size as i64;
-            let cached_gating_sequence = self.get_minimum_sequence();
+
+            // Use cached gating sequence first for performance
+            let mut cached_gating_sequence = self.cached_gating_sequence.load(Ordering::Acquire);
 
             // Check if we would wrap around and overtake consumers
             if wrap_point > cached_gating_sequence {
-                return Err(DisruptorError::InsufficientCapacity);
+                // Cache miss - get the actual minimum sequence
+                cached_gating_sequence = self.get_minimum_sequence();
+                self.cached_gating_sequence.store(cached_gating_sequence, Ordering::Release);
+
+                // Check again with the fresh value
+                if wrap_point > cached_gating_sequence {
+                    return Err(DisruptorError::InsufficientCapacity);
+                }
             }
 
             // Try to claim the next sequence using CAS

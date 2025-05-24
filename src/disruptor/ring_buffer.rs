@@ -17,13 +17,18 @@ use std::sync::Arc;
 /// # Type Parameters
 /// * `T` - The event type stored in the buffer
 #[derive(Debug)]
+#[repr(align(64))] // Cache line alignment for performance
 pub struct RingBuffer<T> {
+    /// Cache line padding before critical fields
+    _pad1: [u8; 64],
     /// The buffer storing all events
     buffer: Vec<T>,
     /// Mask for fast modulo operations (buffer_size - 1)
     index_mask: usize,
     /// The size of the buffer
     buffer_size: usize,
+    /// Cache line padding after critical fields
+    _pad2: [u8; 64],
 }
 
 impl<T> RingBuffer<T>
@@ -56,9 +61,11 @@ where
         }
 
         Ok(Self {
+            _pad1: [0; 64],
             buffer,
             index_mask: buffer_size - 1,
             buffer_size,
+            _pad2: [0; 64],
         })
     }
 
