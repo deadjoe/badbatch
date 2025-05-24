@@ -9,20 +9,18 @@
 
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use crossbeam_utils::CachePadded;
 use crate::disruptor::INITIAL_CURSOR_VALUE;
 
 /// A sequence counter that provides atomic operations with memory ordering guarantees.
 ///
 /// This is equivalent to the Sequence class in the original LMAX Disruptor.
-/// It uses padding to prevent false sharing between sequence values and provides
-/// atomic operations with appropriate memory barriers.
-#[repr(align(64))] // Cache line alignment to prevent false sharing
+/// It uses crossbeam_utils::CachePadded to prevent false sharing between sequence values
+/// and provides atomic operations with appropriate memory barriers.
 #[derive(Debug)]
 pub struct Sequence {
-    /// The actual sequence value
-    value: AtomicI64,
-    /// Padding to prevent false sharing (cache line is typically 64 bytes)
-    _padding: [u8; 56], // 64 - 8 = 56 bytes padding
+    /// The actual sequence value with cache padding to prevent false sharing
+    value: CachePadded<AtomicI64>,
 }
 
 impl Sequence {
@@ -35,8 +33,7 @@ impl Sequence {
     /// A new Sequence instance
     pub fn new(initial_value: i64) -> Self {
         Self {
-            value: AtomicI64::new(initial_value),
-            _padding: [0; 56],
+            value: CachePadded::new(AtomicI64::new(initial_value)),
         }
     }
 
