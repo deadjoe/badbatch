@@ -4,9 +4,11 @@
 //! Sequencers manage the allocation of sequence numbers and ensure that producers don't
 //! overwrite events that haven't been consumed yet.
 
-use crate::disruptor::{Result, DisruptorError, Sequence, WaitStrategy, is_power_of_two};
+use crate::disruptor::{Result, DisruptorError, Sequence, WaitStrategy, is_power_of_two, INITIAL_CURSOR_VALUE};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
+use std::sync::RwLock;
+use crossbeam_utils::CachePadded;
 
 /// Trait for sequencers that coordinate access to the ring buffer
 ///
@@ -322,16 +324,17 @@ impl Sequencer for SingleProducerSequencer {
     }
 }
 
-/// Multi producer sequencer
+/// Multi producer sequencer with bitmap optimization
 ///
 /// This sequencer supports multiple threads publishing events concurrently.
-/// It uses complex algorithms to handle coordination between producers, following
-/// the exact design from the original LMAX Disruptor MultiProducerSequencer.
+/// It uses optimized algorithms inspired by both LMAX Disruptor and disruptor-rs,
+/// combining the best of both approaches for maximum performance.
 ///
 /// Key features:
-/// - availableBuffer array to track slot availability
-/// - CAS-based coordination between producers
-/// - getHighestPublishedSequence() for consumer coordination
+/// - Bitmap-based availability tracking (inspired by disruptor-rs)
+/// - CAS-based coordination between producers (LMAX Disruptor)
+/// - Optimized batch publishing support
+/// - Cache-friendly memory layout
 /// - ABA problem prevention
 #[derive(Debug)]
 pub struct MultiProducerSequencer {
@@ -339,18 +342,24 @@ pub struct MultiProducerSequencer {
     wait_strategy: Arc<dyn WaitStrategy>,
     cursor: Arc<Sequence>,
     gating_sequences: parking_lot::RwLock<Vec<Arc<Sequence>>>,
-    /// Array tracking availability of each slot in the ring buffer
-    /// Each element represents whether the corresponding slot is available for consumption
-    available_buffer: Vec<AtomicI32>,
+    /// Bitmap tracking availability of slots using AtomicU64 arrays
+    /// Each bit represents whether a slot was published in an even or odd round
+    /// This is inspired by disruptor-rs's innovative bitmap approach
+    available_bitmap: Box<[AtomicU64]>,
     /// Index mask for fast modulo operations (buffer_size - 1)
     index_mask: usize,
+    /// Shift amount for calculating round numbers (log2 of buffer_size)
+    index_shift: usize,
     /// Cached minimum gating sequence to reduce lock contention
     /// This is an optimization from the LMAX Disruptor to avoid frequent reads of gating sequences
-    cached_gating_sequence: AtomicI64,
+    cached_gating_sequence: CachePadded<AtomicI64>,
+    /// Legacy available buffer for backward compatibility
+    /// This maintains compatibility with existing LMAX-style availability checking
+    available_buffer: Vec<AtomicI32>,
 }
 
 impl MultiProducerSequencer {
-    /// Create a new multi producer sequencer
+    /// Create a new multi producer sequencer with optional bitmap optimization
     ///
     /// # Arguments
     /// * `buffer_size` - The size of the ring buffer (must be a power of 2)
@@ -364,20 +373,42 @@ impl MultiProducerSequencer {
     pub fn new(buffer_size: usize, wait_strategy: Arc<dyn WaitStrategy>) -> Self {
         assert!(is_power_of_two(buffer_size), "Buffer size must be a power of 2");
 
-        // Initialize available buffer with -1 (unavailable) for all slots
+        // Initialize legacy available buffer with -1 (unavailable) for all slots
         let available_buffer: Vec<AtomicI32> = (0..buffer_size)
             .map(|_| AtomicI32::new(-1))
             .collect();
+
+        // Initialize bitmap for availability tracking if buffer is large enough
+        // For smaller buffers, we'll use an empty bitmap and fall back to legacy method
+        let (available_bitmap, index_shift) = if buffer_size >= 64 {
+            let bitmap_size = buffer_size / 64; // Each AtomicU64 tracks 64 slots
+            let bitmap: Box<[AtomicU64]> = (0..bitmap_size)
+                .map(|_| AtomicU64::new(!0_u64)) // Initialize with all 1's (nothing published initially)
+                .collect();
+            let shift = Self::log2(buffer_size);
+            (bitmap, shift)
+        } else {
+            // For small buffers, use empty bitmap and fall back to legacy method
+            let empty_bitmap: Box<[AtomicU64]> = Box::new([]);
+            (empty_bitmap, 0)
+        };
 
         Self {
             buffer_size,
             wait_strategy,
             cursor: Arc::new(Sequence::new_with_initial_value()),
             gating_sequences: parking_lot::RwLock::new(Vec::new()),
-            available_buffer,
+            available_bitmap,
             index_mask: buffer_size - 1,
-            cached_gating_sequence: AtomicI64::new(crate::disruptor::INITIAL_CURSOR_VALUE),
+            index_shift,
+            cached_gating_sequence: CachePadded::new(AtomicI64::new(crate::disruptor::INITIAL_CURSOR_VALUE)),
+            available_buffer,
         }
+    }
+
+    /// Calculate log2 of a number (inspired by disruptor-rs)
+    fn log2(i: usize) -> usize {
+        std::mem::size_of::<usize>() * 8 - (i.leading_zeros() as usize) - 1
     }
 
     /// Calculate the index in the available buffer for a given sequence
@@ -392,12 +423,49 @@ impl MultiProducerSequencer {
         (sequence >> self.buffer_size.trailing_zeros()) as i32
     }
 
-    /// Set a sequence as available for consumption
-    /// This matches the LMAX Disruptor setAvailable method
+    /// Calculate availability indices for bitmap (inspired by disruptor-rs)
+    fn calculate_availability_indices(&self, sequence: i64) -> (usize, usize) {
+        let slot_index = (sequence as usize) & self.index_mask;
+        let availability_index = slot_index >> 6; // Divide by 64
+        let bit_index = slot_index - availability_index * 64;
+        (availability_index, bit_index)
+    }
+
+    /// Calculate availability flag for bitmap (inspired by disruptor-rs)
+    fn calculate_bitmap_availability_flag(&self, sequence: i64) -> u64 {
+        let round = (sequence >> self.index_shift) as u64;
+        round & 1
+    }
+
+    /// Get availability bitmap at index (inspired by disruptor-rs)
+    fn availability_at(&self, index: usize) -> &AtomicU64 {
+        // SAFETY: Index is always calculated with calculate_availability_indices and is within bounds
+        unsafe { self.available_bitmap.get_unchecked(index) }
+    }
+
+    /// Set a sequence as available for consumption using both methods
+    /// This maintains compatibility while adding bitmap optimization
     fn set_available(&self, sequence: i64) {
+        // Legacy LMAX method (always used for compatibility)
         let index = self.calculate_index(sequence);
         let flag = self.calculate_availability_flag(sequence);
         self.available_buffer[index].store(flag, Ordering::Release);
+
+        // New bitmap method (inspired by disruptor-rs) - only for large buffers
+        if self.buffer_size >= 64 && !self.available_bitmap.is_empty() {
+            self.publish_bitmap(sequence);
+        }
+    }
+
+    /// Publish using bitmap method (inspired by disruptor-rs)
+    fn publish_bitmap(&self, sequence: i64) {
+        let (availability_index, bit_index) = self.calculate_availability_indices(sequence);
+        if availability_index < self.available_bitmap.len() {
+            let availability = self.availability_at(availability_index);
+            let mask = 1 << bit_index;
+            // XOR operation flips the bit to encode even/odd round publication
+            availability.fetch_xor(mask, Ordering::Release);
+        }
     }
 
     /// Check if a sequence is available for consumption
