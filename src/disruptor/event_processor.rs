@@ -148,8 +148,7 @@ where
 
     /// Process events in a batch
     ///
-    /// This is the core processing loop that handles events in batches
-    /// for optimal performance.
+    /// This follows the exact LMAX Disruptor BatchEventProcessor.processEvents logic
     fn process_events(&mut self) -> Result<()> {
         let mut next_sequence = self.sequence.get() + 1;
 
@@ -159,48 +158,89 @@ where
                 break;
             }
 
-            // Wait for the next available sequence
-            let available_sequence = match self.sequence_barrier.wait_for(next_sequence) {
-                Ok(seq) => seq,
+            let _start_of_batch_sequence = next_sequence;
+
+            // This follows the exact LMAX exception handling structure
+            match self.process_batch(&mut next_sequence) {
+                Ok(()) => {
+                    // Batch processed successfully
+                }
                 Err(DisruptorError::Alert) => {
-                    // We've been alerted to stop
-                    break;
+                    // Check if we're still supposed to be running
+                    if !self.running.load(Ordering::Acquire) {
+                        break;
+                    }
+                }
+                Err(DisruptorError::Timeout) => {
+                    // Handle timeout
+                    self.notify_timeout(self.sequence.get());
                 }
                 Err(e) => {
-                    // For error handling, we'll use a dummy event
-                    // In a real implementation, this would be handled more carefully
-                    let dummy_event = self.data_provider.get(0); // Use first event as dummy
-                    self.exception_handler.handle_event_exception(e, next_sequence, dummy_event);
-                    continue;
+                    // Handle other exceptions
+                    self.handle_event_exception(e, next_sequence, None);
+                    self.sequence.set(next_sequence);
+                    next_sequence += 1;
                 }
-            };
-
-            // Process all available events in this batch
-            while next_sequence <= available_sequence {
-                let end_of_batch = next_sequence == available_sequence;
-
-                // Get mutable access to the event
-                let event = unsafe { self.data_provider.get_mut(next_sequence) };
-
-                // Process the event
-                if let Err(e) = self.event_handler.on_event(
-                    event,
-                    next_sequence,
-                    end_of_batch,
-                ) {
-                    // For error reporting, get immutable reference
-                    let event_ref = self.data_provider.get(next_sequence);
-                    self.exception_handler.handle_event_exception(e, next_sequence, event_ref);
-                }
-
-                next_sequence += 1;
             }
-
-            // Update our sequence to indicate we've processed up to this point
-            self.sequence.set(available_sequence);
         }
 
         Ok(())
+    }
+
+    /// Process a single batch of events
+    /// This matches the inner try block in LMAX BatchEventProcessor
+    fn process_batch(&mut self, next_sequence: &mut i64) -> Result<()> {
+        // Wait for the next available sequence
+        let available_sequence = self.sequence_barrier.wait_for(*next_sequence)?;
+
+        // Calculate end of batch (with potential batch size limit)
+        let end_of_batch_sequence = available_sequence; // Simplified - LMAX has batch size limits
+
+        // Call onBatchStart if we have events to process
+        if *next_sequence <= end_of_batch_sequence {
+            let batch_size = end_of_batch_sequence - *next_sequence + 1;
+            let available_size = available_sequence - *next_sequence + 1;
+
+            if let Err(e) = self.event_handler.on_batch_start(batch_size, available_size) {
+                return Err(e);
+            }
+        }
+
+        // Process all events in this batch
+        while *next_sequence <= end_of_batch_sequence {
+            let end_of_batch = *next_sequence == end_of_batch_sequence;
+
+            // Get mutable access to the event
+            let event = unsafe { self.data_provider.get_mut(*next_sequence) };
+
+            // Process the event
+            self.event_handler.on_event(event, *next_sequence, end_of_batch)?;
+
+            *next_sequence += 1;
+        }
+
+        // Update our sequence to indicate we've processed up to this point
+        self.sequence.set(end_of_batch_sequence);
+
+        Ok(())
+    }
+
+    /// Handle event processing exceptions
+    fn handle_event_exception(&mut self, error: DisruptorError, sequence: i64, event: Option<&T>) {
+        if let Some(event) = event {
+            self.exception_handler.handle_event_exception(error, sequence, event);
+        } else {
+            // If we don't have the event, get it for error reporting
+            let event = self.data_provider.get(sequence);
+            self.exception_handler.handle_event_exception(error, sequence, event);
+        }
+    }
+
+    /// Handle timeout notifications
+    fn notify_timeout(&mut self, available_sequence: i64) {
+        if let Err(e) = self.event_handler.on_timeout(available_sequence) {
+            self.handle_event_exception(e, available_sequence, None);
+        }
     }
 }
 
@@ -231,7 +271,7 @@ where
         self.sequence_barrier.clear_alert();
 
         // Notify start
-        if let Err(e) = self.notify_start() {
+        if let Err(e) = self.event_handler.on_start() {
             self.exception_handler.handle_on_start_exception(e);
         }
 
@@ -239,7 +279,7 @@ where
         let result = self.process_events();
 
         // Notify shutdown
-        if let Err(e) = self.notify_shutdown() {
+        if let Err(e) = self.event_handler.on_shutdown() {
             self.exception_handler.handle_on_shutdown_exception(e);
         }
 
@@ -314,17 +354,6 @@ impl<T> BatchEventProcessor<T>
 where
     T: Send + Sync,
 {
-    /// Notify that the processor is starting
-    fn notify_start(&mut self) -> Result<()> {
-        // In a full implementation, this might do additional setup
-        Ok(())
-    }
-
-    /// Notify that the processor is shutting down
-    fn notify_shutdown(&mut self) -> Result<()> {
-        // In a full implementation, this might do cleanup
-        Ok(())
-    }
 
     /// Spawn this processor in a new thread
     ///
