@@ -44,6 +44,9 @@ pub mod sequencer;
 // Wait strategies
 pub mod wait_strategy;
 
+// Simplified wait strategies (inspired by disruptor-rs)
+pub mod simple_wait_strategy;
+
 // Event processing
 pub mod event_processor;
 
