@@ -89,6 +89,11 @@ pub use exception_handler::{ExceptionHandler, DefaultExceptionHandler};
 pub use producer_type::ProducerType;
 pub use disruptor::Disruptor;
 
+// Re-export builder functions and producer types (inspired by disruptor-rs)
+pub use builder::{build_single_producer, build_multi_producer, CloneableProducer};
+pub use producer::{Producer, SimpleProducer, RingBufferFull, MissingFreeSlots};
+pub use elegant_consumer::ElegantConsumer;
+
 /// The initial cursor value for sequences (matches LMAX Disruptor)
 pub const INITIAL_CURSOR_VALUE: i64 = -1;
 

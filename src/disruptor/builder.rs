@@ -294,6 +294,24 @@ where
         let mut producer = self.create_producer();
         producer.publish(update)
     }
+
+    /// Try to publish a batch of events
+    pub fn try_batch_publish<F>(&self, n: usize, update: F) -> std::result::Result<i64, crate::disruptor::producer::MissingFreeSlots>
+    where
+        F: for<'a> FnOnce(crate::disruptor::ring_buffer::BatchIterMut<'a, E>),
+    {
+        let mut producer = self.create_producer();
+        producer.try_batch_publish(n, update)
+    }
+
+    /// Publish a batch of events, spinning until space is available
+    pub fn batch_publish<F>(&self, n: usize, update: F)
+    where
+        F: for<'a> FnOnce(crate::disruptor::ring_buffer::BatchIterMut<'a, E>),
+    {
+        let mut producer = self.create_producer();
+        producer.batch_publish(n, update)
+    }
 }
 
 /// Wrapper for closures to implement EventHandler trait
