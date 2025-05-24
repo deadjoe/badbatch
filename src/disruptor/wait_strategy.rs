@@ -132,45 +132,43 @@ impl WaitStrategy for BlockingWaitStrategy {
         cursor: Arc<Sequence>,
         dependent_sequences: &[Arc<Sequence>],
     ) -> Result<i64> {
-        let mut available_sequence = cursor.get();
+        // This follows the exact LMAX Disruptor BlockingWaitStrategy.waitFor logic
+        let mut available_sequence;
 
-        if available_sequence < sequence {
-            // Check dependent sequences
-            let minimum_sequence = Sequence::get_minimum_sequence(dependent_sequences);
-            if minimum_sequence < sequence {
-                return Err(DisruptorError::InsufficientCapacity);
-            }
+        // First check: wait for cursor to advance if needed
+        if cursor.get() < sequence {
+            let mut guard = self.mutex.lock().map_err(|_| DisruptorError::Alert)?;
 
-            // Real blocking implementation using condvar with proper exception handling
-            let mut guard = self.mutex.lock().map_err(|_| DisruptorError::InvalidSequence(-1))?;
-
-            // Increment waiting thread count
-            guard.waiting_threads += 1;
-
-            while {
-                // Check for alert state first
+            while cursor.get() < sequence {
+                // Check for alert state (equivalent to barrier.checkAlert() in LMAX)
                 if guard.alerted {
-                    guard.waiting_threads -= 1;
-                    return Err(DisruptorError::InvalidSequence(-1)); // Interrupted
+                    return Err(DisruptorError::Alert);
                 }
 
-                available_sequence = cursor.get();
-                available_sequence < sequence
-            } {
-                // Wait for signal from producers with timeout for robustness
-                let result = self.condvar.wait_timeout(guard, Duration::from_millis(10))
-                    .map_err(|_| DisruptorError::InvalidSequence(-1))?;
-                guard = result.0; // Get the guard back from wait_timeout
+                // Wait for signal from producers (equivalent to mutex.wait() in LMAX)
+                guard = self.condvar.wait(guard).map_err(|_| DisruptorError::Alert)?;
+            }
+        }
 
-                // Check for timeout and alert again
-                if guard.alerted {
-                    guard.waiting_threads -= 1;
-                    return Err(DisruptorError::InvalidSequence(-1)); // Interrupted
-                }
+        // Second check: spin wait for dependent sequences (equivalent to LMAX spin wait)
+        loop {
+            available_sequence = if dependent_sequences.is_empty() {
+                cursor.get()
+            } else {
+                Sequence::get_minimum_sequence(dependent_sequences)
+            };
+
+            if available_sequence >= sequence {
+                break;
             }
 
-            // Decrement waiting thread count before returning
-            guard.waiting_threads -= 1;
+            // Check for alert state again
+            if self.is_alerted() {
+                return Err(DisruptorError::Alert);
+            }
+
+            // Equivalent to Thread.onSpinWait() in LMAX
+            std::hint::spin_loop();
         }
 
         Ok(available_sequence)
@@ -184,64 +182,63 @@ impl WaitStrategy for BlockingWaitStrategy {
         timeout: Duration,
     ) -> Result<i64> {
         let start_time = std::time::Instant::now();
-        let mut available_sequence = cursor.get();
 
-        if available_sequence < sequence {
-            // Check dependent sequences
-            let minimum_sequence = Sequence::get_minimum_sequence(dependent_sequences);
-            if minimum_sequence < sequence {
-                return Err(DisruptorError::InsufficientCapacity);
-            }
+        // First check: wait for cursor to advance if needed (with timeout)
+        if cursor.get() < sequence {
+            let mut guard = self.mutex.lock().map_err(|_| DisruptorError::Alert)?;
 
-            // Real blocking implementation with explicit timeout handling
-            let mut guard = self.mutex.lock().map_err(|_| DisruptorError::InvalidSequence(-1))?;
-
-            // Increment waiting thread count
-            guard.waiting_threads += 1;
-
-            while {
-                // Check for timeout first
+            while cursor.get() < sequence {
+                // Check for timeout
                 if start_time.elapsed() >= timeout {
-                    guard.waiting_threads -= 1;
-                    return Err(DisruptorError::InsufficientCapacity); // Timeout
+                    return Err(DisruptorError::Timeout);
                 }
 
                 // Check for alert state
                 if guard.alerted {
-                    guard.waiting_threads -= 1;
-                    return Err(DisruptorError::InvalidSequence(-1)); // Interrupted
+                    return Err(DisruptorError::Alert);
                 }
 
-                available_sequence = cursor.get();
-                available_sequence < sequence
-            } {
                 // Calculate remaining timeout
-                let elapsed = start_time.elapsed();
-                if elapsed >= timeout {
-                    guard.waiting_threads -= 1;
-                    return Err(DisruptorError::InsufficientCapacity); // Timeout
+                let remaining = timeout.saturating_sub(start_time.elapsed());
+                if remaining.is_zero() {
+                    return Err(DisruptorError::Timeout);
                 }
 
-                let remaining_timeout = timeout - elapsed;
-                let wait_timeout = std::cmp::min(remaining_timeout, Duration::from_millis(10));
+                // Wait with timeout
+                let (new_guard, timeout_result) = self.condvar.wait_timeout(guard, remaining)
+                    .map_err(|_| DisruptorError::Alert)?;
+                guard = new_guard;
 
-                // Wait for signal from producers with remaining timeout
-                let result = self.condvar.wait_timeout(guard, wait_timeout)
-                    .map_err(|_| DisruptorError::InvalidSequence(-1))?;
-                guard = result.0; // Get the guard back from wait_timeout
-
-                // Check for alert again after wait
-                if guard.alerted {
-                    guard.waiting_threads -= 1;
-                    return Err(DisruptorError::InvalidSequence(-1)); // Interrupted
+                if timeout_result.timed_out() {
+                    return Err(DisruptorError::Timeout);
                 }
             }
-
-            // Decrement waiting thread count before returning
-            guard.waiting_threads -= 1;
         }
 
-        Ok(available_sequence)
+        // Second check: spin wait for dependent sequences (with timeout)
+        loop {
+            let available_sequence = if dependent_sequences.is_empty() {
+                cursor.get()
+            } else {
+                Sequence::get_minimum_sequence(dependent_sequences)
+            };
+
+            if available_sequence >= sequence {
+                return Ok(available_sequence);
+            }
+
+            // Check for timeout
+            if start_time.elapsed() >= timeout {
+                return Err(DisruptorError::Timeout);
+            }
+
+            // Check for alert state
+            if self.is_alerted() {
+                return Err(DisruptorError::Alert);
+            }
+
+            std::hint::spin_loop();
+        }
     }
 
     fn signal_all_when_blocking(&self) {
