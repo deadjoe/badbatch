@@ -1,19 +1,84 @@
-# Rust
+# Rust build artifacts
 /target/
+/target_*/
 **/*.rs.bk
 *.pdb
 
 # Cargo
-Cargo.lock
+# Keep Cargo.lock for applications, ignore for libraries
+# Since BadBatch is an application, we keep Cargo.lock tracked
+# For libraries, uncomment the next line:
+# Cargo.lock
 
-# IDE
+# Cargo build cache
+.cargo/
+
+# Rust analyzer cache
+.rust-analyzer/
+
+# Rustfmt backup files
+**/*.rs.bk
+
+# Clippy cache
+.clippy.toml
+
+# Rust-specific build artifacts
+**/*.rlib
+**/*.rmeta
+**/*.so
+**/*.dylib
+**/*.dll
+**/*.a
+
+# Incremental compilation
+**/target/debug/incremental/
+**/target/release/incremental/
+
+# LLVM IR files
+**/*.ll
+**/*.bc
+
+# IDE and Editor files
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.#*
+#*#
+*.orig
+*.rej
+*.bak
+.project
+.settings/
+.classpath
+*.iml
+*.ipr
+*.iws
 
-# OS
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# Vim
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
+Session.vim
+Sessionx.vim
+.netrwhist
+tags
+[._]*.un~
+
+# OS generated files
 .DS_Store
 .DS_Store?
 ._*
@@ -21,28 +86,146 @@ Cargo.lock
 .Trashes
 ehthumbs.db
 Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
 
-# Logs
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.stackdump
+
+# Logs and debugging
 *.log
 logs/
+*.out
+*.err
+debug/
+*.dmp
+*.stackdump
 
-# Performance reports
+# Performance and profiling
 criterion/
-*.html
+flamegraph.svg
+perf.data*
+*.prof
+*.profraw
+
+# Benchmark results
+benchmark_results/
+bench_*.txt
+
+# Testing artifacts
+test_results/
+test_output/
+*.test
+*.gcda
+*.gcno
+
+# Coverage reports
+tarpaulin-report.html
+tarpaulin-report.json
+cobertura.xml
+lcov.info
+coverage/
+*.profdata
+
+# Documentation build
+/doc/
+/docs/book/
+/docs/target/
+mdbook-linkcheck.md
+
+# Environment and configuration
+.env
+.env.local
+.env.*.local
+.envrc
+config.toml
+config.yaml
+config.yml
+secrets.toml
 
 # Temporary files
 *.tmp
 *.temp
+*.bak
+*.backup
+*.old
+*.save
+.#*
+#*#
 
-# Environment
-.env
-.env.local
-.env.*.local
+# Lock files (except Cargo.lock for applications)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
 
-# Coverage
-tarpaulin-report.html
-cobertura.xml
-lcov.info
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
 
-# Documentation
-/doc/
+# Binary releases and executables
+/releases/
+*.tar.gz
+*.zip
+*.deb
+*.rpm
+*.dmg
+*.pkg
+
+# Rust binary executables (without extension on Unix)
+/benchmark_disruptor
+/badbatch
+/client
+/config
+**/target/debug/badbatch*
+**/target/release/badbatch*
+**/target/debug/benchmark_disruptor*
+**/target/release/benchmark_disruptor*
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Kubernetes
+*.kubeconfig
+
+# Cloud and deployment
+.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+
+# Security
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+private_key*
+public_key*
+
+# Misc
+.cache/
+.local/
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
