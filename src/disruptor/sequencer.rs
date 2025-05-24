@@ -346,6 +346,24 @@ impl MultiProducerSequencer {
         let flag = self.calculate_availability_flag(sequence);
         self.available_buffer[index].load(Ordering::Acquire) == flag
     }
+
+    /// Check if there's available capacity for the required number of sequences
+    /// This matches the LMAX Disruptor hasAvailableCapacity method
+    fn has_available_capacity_internal(&self, gating_sequences: &[Arc<Sequence>], required_capacity: usize, cursor_value: i64) -> bool {
+        let wrap_point = (cursor_value + required_capacity as i64) - self.buffer_size as i64;
+        let cached_gating_sequence = self.cached_gating_sequence.load(Ordering::Acquire);
+
+        if wrap_point > cached_gating_sequence || cached_gating_sequence > cursor_value {
+            let min_sequence = Sequence::get_minimum_sequence(gating_sequences);
+            self.cached_gating_sequence.store(min_sequence, Ordering::Release);
+
+            if wrap_point > min_sequence {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 impl Sequencer for MultiProducerSequencer {
@@ -358,53 +376,65 @@ impl Sequencer for MultiProducerSequencer {
     }
 
     fn next(&self) -> Result<i64> {
-        // Real multi-producer implementation following LMAX Disruptor design
-        loop {
-            let current = self.cursor.get();
-            let next_sequence = current + 1;
-            let wrap_point = next_sequence - self.buffer_size as i64;
-
-            // Use cached gating sequence first for performance
-            let mut cached_gating_sequence = self.cached_gating_sequence.load(Ordering::Acquire);
-
-            // Check if we would wrap around and overtake consumers
-            if wrap_point > cached_gating_sequence {
-                // Cache miss - get the actual minimum sequence
-                cached_gating_sequence = self.get_minimum_sequence();
-                self.cached_gating_sequence.store(cached_gating_sequence, Ordering::Release);
-
-                // Check again with the fresh value
-                if wrap_point > cached_gating_sequence {
-                    return Err(DisruptorError::InsufficientCapacity);
-                }
-            }
-
-            // Try to claim the next sequence using CAS
-            if self.cursor.compare_and_set(current, next_sequence) {
-                return Ok(next_sequence);
-            }
-            // If CAS failed, another producer claimed this sequence, try again
-        }
+        self.next_n(1)
     }
 
     fn next_n(&self, n: i64) -> Result<i64> {
-        let next_sequence = self.cursor.add_and_get(n);
-        let wrap_point = next_sequence - self.buffer_size as i64;
-        let cached_gating_sequence = self.get_minimum_sequence();
+        if n < 1 || n > self.buffer_size as i64 {
+            return Err(DisruptorError::InvalidSequence(n));
+        }
 
-        if wrap_point > cached_gating_sequence {
-            return Err(DisruptorError::InsufficientCapacity);
+        // This is the key difference from the original implementation:
+        // Use getAndAdd to atomically claim the sequences
+        let current = self.cursor.get_and_add(n);
+        let next_sequence = current + n;
+        let wrap_point = next_sequence - self.buffer_size as i64;
+        let cached_gating_sequence = self.cached_gating_sequence.load(Ordering::Acquire);
+
+        // Check if we would wrap around and overtake consumers
+        if wrap_point > cached_gating_sequence || cached_gating_sequence > current {
+            // Get the actual minimum sequence from gating sequences
+            let mut gating_sequence;
+            while {
+                gating_sequence = self.get_minimum_sequence();
+                wrap_point > gating_sequence
+            } {
+                // Wait briefly before checking again (equivalent to LockSupport.parkNanos(1L))
+                std::thread::sleep(std::time::Duration::from_nanos(1));
+            }
+
+            // Update the cached gating sequence
+            self.cached_gating_sequence.store(gating_sequence, Ordering::Release);
         }
 
         Ok(next_sequence)
     }
 
     fn try_next(&self) -> Option<i64> {
-        self.next().ok()
+        self.try_next_n(1)
     }
 
     fn try_next_n(&self, n: i64) -> Option<i64> {
-        self.next_n(n).ok()
+        if n < 1 {
+            return None;
+        }
+
+        // This follows the LMAX Disruptor tryNext implementation
+        loop {
+            let current = self.cursor.get();
+            let next = current + n;
+
+            // Check if we have available capacity
+            if !self.has_available_capacity_internal(&self.gating_sequences.read(), n as usize, current) {
+                return None; // Insufficient capacity
+            }
+
+            // Try to claim the sequences using CAS
+            if self.cursor.compare_and_set(current, next) {
+                return Some(next);
+            }
+            // If CAS failed, another producer claimed this sequence, try again
+        }
     }
 
     fn publish(&self, sequence: i64) {

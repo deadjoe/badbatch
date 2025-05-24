@@ -8,8 +8,9 @@ use crate::disruptor::{
     Result, DisruptorError, EventFactory, EventHandler, ProducerType,
     RingBuffer, Sequencer, SingleProducerSequencer, MultiProducerSequencer, WaitStrategy,
     BlockingWaitStrategy, EventProcessor, BatchEventProcessor, Sequence,
-    DataProvider, is_power_of_two,
+    is_power_of_two,
 };
+use crate::disruptor::event_processor::DataProvider;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
