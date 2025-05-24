@@ -33,6 +33,11 @@ pub trait EventHandler<T>: Send + Sync {
     /// ```
     /// use badbatch::disruptor::{EventHandler, Result};
     ///
+    /// #[derive(Default)]
+    /// struct MyEvent {
+    ///     data: i32,
+    /// }
+    ///
     /// struct MyEventHandler;
     ///
     /// impl EventHandler<MyEvent> for MyEventHandler {

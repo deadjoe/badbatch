@@ -324,7 +324,6 @@ impl std::hash::Hash for Node {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
 
     #[test]
     fn test_node_id_generation() {

@@ -8,20 +8,20 @@ use crate::disruptor::DisruptorError;
 use std::fmt::Debug;
 
 /// Handler for exceptions that occur during event processing
-/// 
+///
 /// This trait allows custom handling of exceptions that occur during
 /// event processing. It follows the exact design from the original
 /// LMAX Disruptor ExceptionHandler interface.
-/// 
+///
 /// # Type Parameters
 /// * `T` - The event type being processed
 pub trait ExceptionHandler<T>: Send + Sync {
     /// Handle an exception that occurred during event processing
-    /// 
+    ///
     /// This method is called when an event handler throws an exception.
     /// The implementation can decide how to handle the error - log it,
     /// retry processing, or take other recovery actions.
-    /// 
+    ///
     /// # Arguments
     /// * `error` - The error that occurred
     /// * `sequence` - The sequence number of the event that caused the error
@@ -29,30 +29,30 @@ pub trait ExceptionHandler<T>: Send + Sync {
     fn handle_event_exception(&self, error: DisruptorError, sequence: i64, event: &T);
 
     /// Handle an exception that occurred during the event processing loop startup
-    /// 
+    ///
     /// This method is called when an exception occurs during the startup
     /// of an event processor.
-    /// 
+    ///
     /// # Arguments
     /// * `error` - The error that occurred during startup
     fn handle_on_start_exception(&self, error: DisruptorError);
 
     /// Handle an exception that occurred during the event processing loop shutdown
-    /// 
+    ///
     /// This method is called when an exception occurs during the shutdown
     /// of an event processor.
-    /// 
+    ///
     /// # Arguments
     /// * `error` - The error that occurred during shutdown
     fn handle_on_shutdown_exception(&self, error: DisruptorError);
 }
 
 /// Default exception handler that logs errors
-/// 
+///
 /// This is a simple exception handler that logs all exceptions.
 /// It's suitable for development and testing, but production systems
 /// may want to implement more sophisticated error handling.
-/// 
+///
 /// # Type Parameters
 /// * `T` - The event type being processed
 #[derive(Debug, Default)]
@@ -90,12 +90,12 @@ where
 }
 
 /// Exception handler that ignores all exceptions
-/// 
+///
 /// This handler silently ignores all exceptions. Use with caution,
 /// as it can make debugging difficult. It's mainly useful for
 /// performance testing where you want to measure overhead without
 /// error handling.
-/// 
+///
 /// # Type Parameters
 /// * `T` - The event type being processed
 #[derive(Debug, Default)]
@@ -130,10 +130,10 @@ where
 }
 
 /// Exception handler that panics on any exception
-/// 
+///
 /// This handler panics when any exception occurs. It's useful for
 /// development and testing when you want to fail fast on any error.
-/// 
+///
 /// # Type Parameters
 /// * `T` - The event type being processed
 #[derive(Debug, Default)]
@@ -171,9 +171,9 @@ where
 }
 
 /// Closure-based exception handler
-/// 
+///
 /// This provides a flexible way to create exception handlers using closures.
-/// 
+///
 /// # Type Parameters
 /// * `T` - The event type
 /// * `F` - The closure type for event exceptions
@@ -198,7 +198,7 @@ where
     H: Fn(DisruptorError) + Send + Sync,
 {
     /// Create a new closure-based exception handler
-    /// 
+    ///
     /// # Arguments
     /// * `event_handler` - Closure for handling event processing exceptions
     /// * `start_handler` - Closure for handling startup exceptions
@@ -238,6 +238,7 @@ mod tests {
     use super::*;
 
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     struct TestEvent {
         value: i64,
     }
@@ -246,7 +247,7 @@ mod tests {
     fn test_default_exception_handler() {
         let handler = DefaultExceptionHandler::<TestEvent>::new();
         let event = TestEvent { value: 42 };
-        
+
         // These should not panic, just log to stderr
         handler.handle_event_exception(DisruptorError::BufferFull, 1, &event);
         handler.handle_on_start_exception(DisruptorError::Shutdown);
@@ -257,7 +258,7 @@ mod tests {
     fn test_ignore_exception_handler() {
         let handler = IgnoreExceptionHandler::<TestEvent>::new();
         let event = TestEvent { value: 42 };
-        
+
         // These should do nothing
         handler.handle_event_exception(DisruptorError::BufferFull, 1, &event);
         handler.handle_on_start_exception(DisruptorError::Shutdown);
@@ -266,10 +267,10 @@ mod tests {
 
     #[test]
     fn test_closure_exception_handler() {
-        let mut event_called = false;
-        let mut start_called = false;
-        let mut shutdown_called = false;
-        
+        let _event_called = false;
+        let _start_called = false;
+        let _shutdown_called = false;
+
         let handler = ClosureExceptionHandler::new(
             |_error, _sequence, _event| {
                 // In a real test, we'd use a shared state mechanism
@@ -282,7 +283,7 @@ mod tests {
                 // Shutdown handler
             },
         );
-        
+
         let event = TestEvent { value: 42 };
         handler.handle_event_exception(DisruptorError::BufferFull, 1, &event);
         handler.handle_on_start_exception(DisruptorError::Shutdown);

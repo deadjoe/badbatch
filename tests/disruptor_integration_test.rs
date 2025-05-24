@@ -5,7 +5,7 @@
 
 use badbatch::disruptor::{
     Disruptor, ProducerType, BlockingWaitStrategy, DefaultEventFactory,
-    EventTranslator, NoOpEventHandler,
+    EventTranslator,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -66,18 +66,18 @@ fn test_multi_producer_coordination() {
     for producer_id in 0..4 {
         let disruptor_clone = Arc::clone(&disruptor);
         let counter_clone = Arc::clone(&counter);
-        
+
         let handle = thread::spawn(move || {
-            for i in 0..100 {
+            for _i in 0..100 {
                 let value = counter_clone.fetch_add(1, Ordering::SeqCst);
-                let translator = TestEventTranslator { 
-                    value, 
-                    producer_id 
+                let translator = TestEventTranslator {
+                    value,
+                    producer_id
                 };
-                
+
                 // This should not fail with proper multi-producer coordination
                 disruptor_clone.publish_event(translator).unwrap();
-                
+
                 // Small delay to increase contention
                 thread::sleep(Duration::from_micros(1));
             }
@@ -104,8 +104,6 @@ fn test_wait_strategy_blocking() {
         Box::new(BlockingWaitStrategy::new()),
     ).unwrap());
 
-    let disruptor_clone = Arc::clone(&disruptor);
-    
     // Fill up the buffer
     for i in 0..16 {
         let translator = TestEventTranslator { value: i, producer_id: 1 };
@@ -115,11 +113,11 @@ fn test_wait_strategy_blocking() {
     // This should work without the 1-nanosecond polling issue
     let start = std::time::Instant::now();
     let translator = TestEventTranslator { value: 999, producer_id: 1 };
-    
+
     // This might block briefly but should not consume 100% CPU
-    let result = disruptor.try_publish_event(translator);
+    let _result = disruptor.try_publish_event(translator);
     let elapsed = start.elapsed();
-    
+
     // The operation should complete quickly (not hang in busy loop)
     assert!(elapsed < Duration::from_millis(10));
 }

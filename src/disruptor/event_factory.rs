@@ -160,9 +160,17 @@ impl<T: Clone + Send + Sync> EventFactory<T> for CloneEventFactory<T> {
 ///
 /// # Examples
 /// ```
-/// use badbatch::disruptor::event_factory;
+/// use badbatch::disruptor::event_factory::event_factory;
+/// use badbatch::disruptor::EventFactory;
+///
+/// #[derive(Default)]
+/// struct MyEvent {
+///     data: i32,
+/// }
 ///
 /// let factory = event_factory(|| MyEvent { data: 42 });
+/// let event = factory.new_instance();
+/// assert_eq!(event.data, 42);
 /// ```
 pub fn event_factory<T, F>(factory_fn: F) -> ClosureEventFactory<T, F>
 where

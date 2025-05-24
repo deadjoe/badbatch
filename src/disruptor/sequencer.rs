@@ -577,7 +577,7 @@ mod tests {
         let sequencer = MultiProducerSequencer::new(8, wait_strategy);
 
         // Publish sequences 0, 1, 2
-        for i in 0..3 {
+        for _i in 0..3 {
             let seq = sequencer.next().unwrap();
             sequencer.publish(seq);
         }

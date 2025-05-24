@@ -5,12 +5,11 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::cluster::{NodeId, ClusterError, ClusterResult};
-use crate::cluster::config::{ReplicationConfig, ConsistencyLevel};
+use crate::cluster::{NodeId, ClusterResult};
+use crate::cluster::config::ReplicationConfig;
 
 /// Replication event
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +137,8 @@ impl EventReplicator {
 mod tests {
     use super::*;
     use crate::cluster::NodeId;
+    use crate::cluster::config::ConsistencyLevel;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_event_replicator() {
@@ -149,14 +150,14 @@ mod tests {
         };
 
         let replicator = EventReplicator::new(config).await.unwrap();
-        
+
         let event_id = "event-123".to_string();
         let data = serde_json::json!({"message": "test"});
         let source_node = NodeId::generate();
         let target_nodes = vec![NodeId::generate(), NodeId::generate()];
 
         replicator.replicate_event(event_id.clone(), data, source_node, target_nodes).await.unwrap();
-        
+
         let status = replicator.get_replication_status(&event_id).await;
         assert_eq!(status, Some(ReplicationStatus::Pending));
     }

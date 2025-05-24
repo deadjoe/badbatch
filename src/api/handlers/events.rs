@@ -14,7 +14,7 @@ use crate::api::{
     ApiResponse,
     models::{
         PublishEventRequest, PublishEventResponse, PublishBatchRequest,
-        PublishBatchResponse, EventData, ListDisruptorsQuery,
+        PublishBatchResponse, EventData,
     },
     handlers::{ApiResult, ApiError},
 };

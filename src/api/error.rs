@@ -9,7 +9,6 @@ use axum::{
     Json,
 };
 use serde_json::json;
-use std::fmt;
 
 /// API-specific errors
 #[derive(Debug, thiserror::Error)]
@@ -217,7 +216,7 @@ pub fn validation_errors(errors: Vec<ValidationError>) -> ApiError {
         .iter()
         .map(|e| format!("{}: {}", e.field, e.message))
         .collect();
-    
+
     ApiError::InvalidRequest {
         message: format!("Validation failed: {}", messages.join(", ")),
     }

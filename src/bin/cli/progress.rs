@@ -38,6 +38,7 @@ pub fn create_progress_bar(total: u64, message: &str) -> ProgressBar {
 }
 
 /// Create a progress bar with custom styling for data transfer
+#[allow(dead_code)]
 pub fn create_transfer_progress_bar(total: u64, message: &str) -> ProgressBar {
     let progress_bar = ProgressBar::new(total);
     progress_bar.set_style(
@@ -55,6 +56,7 @@ pub fn create_transfer_progress_bar(total: u64, message: &str) -> ProgressBar {
 }
 
 /// Create a progress bar for batch operations
+#[allow(dead_code)]
 pub fn create_batch_progress_bar(total: u64, message: &str) -> ProgressBar {
     let progress_bar = ProgressBar::new(total);
     progress_bar.set_style(
@@ -72,6 +74,7 @@ pub fn create_batch_progress_bar(total: u64, message: &str) -> ProgressBar {
 }
 
 /// Create a simple progress bar without ETA
+#[allow(dead_code)]
 pub fn create_simple_progress_bar(total: u64, message: &str) -> ProgressBar {
     let progress_bar = ProgressBar::new(total);
     progress_bar.set_style(
@@ -86,6 +89,7 @@ pub fn create_simple_progress_bar(total: u64, message: &str) -> ProgressBar {
 }
 
 /// Create a multi-progress container for multiple progress bars
+#[allow(dead_code)]
 pub fn create_multi_progress() -> indicatif::MultiProgress {
     indicatif::MultiProgress::new()
 }
@@ -100,6 +104,7 @@ pub fn finish_progress_with_message(progress_bar: &ProgressBar, message: &str) {
 }
 
 /// Finish a progress bar with an error message
+#[allow(dead_code)]
 pub fn finish_progress_with_error(progress_bar: &ProgressBar, message: &str) {
     progress_bar.set_style(
         ProgressStyle::with_template("{msg}")
@@ -109,6 +114,7 @@ pub fn finish_progress_with_error(progress_bar: &ProgressBar, message: &str) {
 }
 
 /// Create a progress bar for monitoring operations
+#[allow(dead_code)]
 pub fn create_monitor_progress_bar(message: &str) -> ProgressBar {
     let progress_bar = ProgressBar::new_spinner();
     progress_bar.set_style(
@@ -124,6 +130,7 @@ pub fn create_monitor_progress_bar(message: &str) -> ProgressBar {
 }
 
 /// Create a progress bar for server operations
+#[allow(dead_code)]
 pub fn create_server_progress_bar(message: &str) -> ProgressBar {
     let progress_bar = ProgressBar::new_spinner();
     progress_bar.set_style(
@@ -139,21 +146,25 @@ pub fn create_server_progress_bar(message: &str) -> ProgressBar {
 }
 
 /// Update progress bar message
+#[allow(dead_code)]
 pub fn update_progress_message(progress_bar: &ProgressBar, message: &str) {
     progress_bar.set_message(message.to_string());
 }
 
 /// Increment progress bar by one
+#[allow(dead_code)]
 pub fn increment_progress(progress_bar: &ProgressBar) {
     progress_bar.inc(1);
 }
 
 /// Set progress bar position
+#[allow(dead_code)]
 pub fn set_progress_position(progress_bar: &ProgressBar, position: u64) {
     progress_bar.set_position(position);
 }
 
 /// Clear and hide progress bar
+#[allow(dead_code)]
 pub fn clear_progress(progress_bar: &ProgressBar) {
     progress_bar.finish_and_clear();
 }
@@ -161,7 +172,6 @@ pub fn clear_progress(progress_bar: &ProgressBar) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn test_create_spinner() {

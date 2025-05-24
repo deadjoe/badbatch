@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc, broadcast};
 use tokio::time::{interval, Duration};
 
-use crate::cluster::{Node, NodeId, NodeInfo, NodeState, ClusterError, ClusterResult};
+use crate::cluster::{Node, NodeId, NodeInfo, NodeState, ClusterResult};
 
 /// Membership events
 #[derive(Debug, Clone)]
@@ -70,7 +70,7 @@ impl ClusterMembership {
         self.running.store(true, std::sync::atomic::Ordering::SeqCst);
 
         // Start membership maintenance task
-        let maintenance_task = {
+        let _maintenance_task = {
             let members = self.members.clone();
             let event_tx = self.event_tx.clone();
             let running = self.running.clone();
@@ -320,11 +320,22 @@ impl ClusterMembership {
 mod tests {
     use super::*;
     use crate::cluster::NodeId;
+    use std::net::TcpListener;
+
+    /// 获取一个可用的端口
+    fn get_available_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
 
     #[tokio::test]
     async fn test_membership_creation() {
         let node_id = NodeId::generate();
-        let addr = "127.0.0.1:7946".parse().unwrap();
+        let port = get_available_port();
+        let addr = format!("127.0.0.1:{}", port).parse().unwrap();
         let node = Arc::new(RwLock::new(Node::new(node_id.clone(), addr, addr)));
 
         let membership = ClusterMembership::new(node).await;
@@ -337,14 +348,16 @@ mod tests {
     #[tokio::test]
     async fn test_add_remove_member() {
         let node_id = NodeId::generate();
-        let addr = "127.0.0.1:7946".parse().unwrap();
+        let port1 = get_available_port();
+        let addr = format!("127.0.0.1:{}", port1).parse().unwrap();
         let node = Arc::new(RwLock::new(Node::new(node_id.clone(), addr, addr)));
 
         let membership = ClusterMembership::new(node).await.unwrap();
 
         // Add a new member
         let new_node_id = NodeId::generate();
-        let new_addr = "127.0.0.1:7947".parse().unwrap();
+        let port2 = get_available_port();
+        let new_addr = format!("127.0.0.1:{}", port2).parse().unwrap();
         let new_node_info = NodeInfo::new(new_node_id.clone(), new_addr);
 
         membership.add_member(new_node_info).await.unwrap();
@@ -358,7 +371,8 @@ mod tests {
     #[tokio::test]
     async fn test_membership_events() {
         let node_id = NodeId::generate();
-        let addr = "127.0.0.1:7946".parse().unwrap();
+        let port1 = get_available_port();
+        let addr = format!("127.0.0.1:{}", port1).parse().unwrap();
         let node = Arc::new(RwLock::new(Node::new(node_id.clone(), addr, addr)));
 
         let membership = ClusterMembership::new(node).await.unwrap();
@@ -366,7 +380,8 @@ mod tests {
 
         // Add a new member
         let new_node_id = NodeId::generate();
-        let new_addr = "127.0.0.1:7947".parse().unwrap();
+        let port2 = get_available_port();
+        let new_addr = format!("127.0.0.1:{}", port2).parse().unwrap();
         let new_node_info = NodeInfo::new(new_node_id.clone(), new_addr);
 
         membership.add_member(new_node_info).await.unwrap();
