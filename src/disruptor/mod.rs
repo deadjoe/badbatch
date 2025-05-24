@@ -61,7 +61,7 @@ pub mod disruptor;
 
 // Re-export core types for convenience
 pub use sequence::Sequence;
-pub use core_interfaces::{Cursored, Sequenced, DataProvider, EventSink};
+// pub use core_interfaces::{Cursored, Sequenced, DataProvider, EventSink}; // Temporarily disabled
 pub use ring_buffer::RingBuffer;
 pub use event_handler::{EventHandler, NoOpEventHandler};
 pub use event_factory::{EventFactory, DefaultEventFactory};
