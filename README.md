@@ -1,5 +1,6 @@
-<div align="center">
-  <img src="badbatch.png" alt="BadBatch Logo" width="200" height="200">
+<p align="center">
+  <img src="badbatch.png" alt="Badbatch Logo" width="200"/>
+</p>
 
   # BadBatch Disruptor Engine
 
