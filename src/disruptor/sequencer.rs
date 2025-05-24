@@ -136,12 +136,23 @@ pub trait Sequencer: Send + Sync + std::fmt::Debug {
 /// This sequencer is optimized for scenarios where only one thread will be
 /// publishing events. It provides the best performance when you can guarantee
 /// single-threaded publishing.
+///
+/// Key optimizations from LMAX Disruptor:
+/// - nextValue: tracks the next sequence to be claimed (not published yet)
+/// - cachedValue: cached minimum gating sequence for performance
+/// - No atomic operations needed since only one producer thread
 #[derive(Debug)]
 pub struct SingleProducerSequencer {
     buffer_size: usize,
     wait_strategy: Arc<dyn WaitStrategy>,
     cursor: Arc<Sequence>,
     gating_sequences: parking_lot::RwLock<Vec<Arc<Sequence>>>,
+    /// Next sequence value to be claimed (equivalent to LMAX nextValue)
+    /// Using AtomicI64 for Rust thread safety, but logically only one thread accesses it
+    next_value: AtomicI64,
+    /// Cached minimum gating sequence (equivalent to LMAX cachedValue)
+    /// Using AtomicI64 for Rust thread safety, but logically only one thread accesses it
+    cached_value: AtomicI64,
 }
 
 impl SingleProducerSequencer {
@@ -159,7 +170,33 @@ impl SingleProducerSequencer {
             wait_strategy,
             cursor: Arc::new(Sequence::new_with_initial_value()),
             gating_sequences: parking_lot::RwLock::new(Vec::new()),
+            next_value: AtomicI64::new(crate::disruptor::INITIAL_CURSOR_VALUE),
+            cached_value: AtomicI64::new(crate::disruptor::INITIAL_CURSOR_VALUE),
         }
+    }
+
+    /// Check if there's available capacity for the required number of sequences
+    /// This matches the LMAX Disruptor SingleProducerSequencer.hasAvailableCapacity method
+    fn has_available_capacity_internal(&self, required_capacity: usize, do_store: bool) -> bool {
+        let next_value = self.next_value.load(Ordering::Relaxed);
+        let wrap_point = (next_value + required_capacity as i64) - self.buffer_size as i64;
+        let cached_gating_sequence = self.cached_value.load(Ordering::Relaxed);
+
+        if wrap_point > cached_gating_sequence || cached_gating_sequence > next_value {
+            if do_store {
+                // StoreLoad fence (equivalent to cursor.setVolatile in LMAX)
+                self.cursor.set_volatile(next_value);
+            }
+
+            let min_sequence = self.get_minimum_sequence();
+            self.cached_value.store(min_sequence, Ordering::Relaxed);
+
+            if wrap_point > min_sequence {
+                return false;
+            }
+        }
+
+        true
     }
 }
 
@@ -173,40 +210,63 @@ impl Sequencer for SingleProducerSequencer {
     }
 
     fn next(&self) -> Result<i64> {
-        let next_sequence = self.cursor.get() + 1;
-        let wrap_point = next_sequence - self.buffer_size as i64;
-        let cached_gating_sequence = self.get_minimum_sequence();
-
-        if wrap_point > cached_gating_sequence {
-            return Err(DisruptorError::InsufficientCapacity);
-        }
-
-        // Update the cursor to claim this sequence
-        self.cursor.set(next_sequence);
-        Ok(next_sequence)
+        self.next_n(1)
     }
 
     fn next_n(&self, n: i64) -> Result<i64> {
-        let current = self.cursor.get();
-        let next_sequence = current + n;
-        let wrap_point = next_sequence - self.buffer_size as i64;
-        let cached_gating_sequence = self.get_minimum_sequence();
-
-        if wrap_point > cached_gating_sequence {
-            return Err(DisruptorError::InsufficientCapacity);
+        if n < 1 || n > self.buffer_size as i64 {
+            return Err(DisruptorError::InvalidSequence(n));
         }
 
-        // Update the cursor to claim these sequences
-        self.cursor.set(next_sequence);
+        // This follows the exact LMAX Disruptor SingleProducerSequencer.next(int n) logic
+        let next_value = self.next_value.load(Ordering::Relaxed);
+        let next_sequence = next_value + n;
+        let wrap_point = next_sequence - self.buffer_size as i64;
+        let cached_gating_sequence = self.cached_value.load(Ordering::Relaxed);
+
+        if wrap_point > cached_gating_sequence || cached_gating_sequence > next_value {
+            // Set cursor with volatile semantics (equivalent to cursor.setVolatile in LMAX)
+            self.cursor.set_volatile(next_value);
+
+            // Wait for consumers to catch up
+            let mut min_sequence;
+            while {
+                min_sequence = self.get_minimum_sequence();
+                wrap_point > min_sequence
+            } {
+                // Wait briefly (equivalent to LockSupport.parkNanos(1L))
+                std::thread::sleep(std::time::Duration::from_nanos(1));
+            }
+
+            // Update cached value
+            self.cached_value.store(min_sequence, Ordering::Relaxed);
+        }
+
+        // Update next_value (equivalent to this.nextValue = nextSequence in LMAX)
+        self.next_value.store(next_sequence, Ordering::Relaxed);
+
         Ok(next_sequence)
     }
 
     fn try_next(&self) -> Option<i64> {
-        self.next().ok()
+        self.try_next_n(1)
     }
 
     fn try_next_n(&self, n: i64) -> Option<i64> {
-        self.next_n(n).ok()
+        if n < 1 {
+            return None;
+        }
+
+        // This follows the exact LMAX Disruptor SingleProducerSequencer.tryNext(int n) logic
+        if !self.has_available_capacity_internal(n as usize, true) {
+            return None; // Insufficient capacity
+        }
+
+        // Update next_value and return the sequence (equivalent to this.nextValue += n)
+        let next_sequence = self.next_value.load(Ordering::Relaxed) + n;
+        self.next_value.store(next_sequence, Ordering::Relaxed);
+
+        Some(next_sequence)
     }
 
     fn publish(&self, sequence: i64) {
@@ -255,7 +315,8 @@ impl Sequencer for SingleProducerSequencer {
     }
 
     fn remaining_capacity(&self) -> i64 {
-        let next_value = self.cursor.get() + 1;
+        // This follows the exact LMAX Disruptor SingleProducerSequencer.remainingCapacity logic
+        let next_value = self.next_value.load(Ordering::Relaxed);
         let consumed = self.get_minimum_sequence();
         self.buffer_size as i64 - (next_value - consumed)
     }
