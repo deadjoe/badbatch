@@ -222,6 +222,9 @@ docker-compose.override.yml
 private_key*
 public_key*
 
+# Examples and reference implementations
+examples/
+
 # Misc
 .cache/
 .local/
