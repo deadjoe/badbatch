@@ -65,6 +65,9 @@ pub mod producer;
 // Builder API (inspired by disruptor-rs)
 pub mod builder;
 
+// Thread management and CPU affinity (inspired by disruptor-rs)
+pub mod thread_management;
+
 // Main Disruptor DSL
 pub mod disruptor;
 
