@@ -1,6 +1,5 @@
-<p align="center">
-  <img src="badbatch.png" alt="Badbatch Logo" width="200"/>
-</p>
+<div align="center">
+  <img src="badbatch.png" alt="BadBatch Logo" width="200"/>
 
   # BadBatch Disruptor Engine
 
@@ -95,11 +94,6 @@ BadBatch follows a modular, layered architecture:
 
 ### Installation
 
-#### From Crates.io
-```bash
-cargo install badbatch
-```
-
 #### From Source
 ```bash
 git clone https://github.com/deadjoe/badbatch.git
@@ -173,10 +167,13 @@ badbatch monitor watch --type disruptor --target my-disruptor
 | `DELETE` | `/api/v1/disruptor/{id}` | Delete disruptor |
 | `POST` | `/api/v1/disruptor/{id}/start` | Start disruptor |
 | `POST` | `/api/v1/disruptor/{id}/stop` | Stop disruptor |
+| `POST` | `/api/v1/disruptor/{id}/pause` | Pause disruptor |
+| `POST` | `/api/v1/disruptor/{id}/resume` | Resume disruptor |
 | `POST` | `/api/v1/disruptor/{id}/events` | Publish event |
 | `POST` | `/api/v1/disruptor/{id}/events/batch` | Publish batch |
 | `GET` | `/api/v1/disruptor/{id}/metrics` | Disruptor metrics |
 | `GET` | `/api/v1/disruptor/{id}/health` | Disruptor health |
+| `GET` | `/api/v1/disruptor/{id}/status` | Disruptor status |
 
 ### Configuration
 
@@ -289,7 +286,7 @@ BadBatch is designed for high-performance event processing with the following ch
 
 ## 🤝 Contributing
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+We welcome contributions! Please follow these steps:
 
 ### Development Process
 1. Fork the repository
@@ -306,8 +303,6 @@ This project adheres to the [Rust Code of Conduct](https://www.rust-lang.org/pol
 
 This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
-See [LICENSE](LICENSE) for details.
-
 ## 🙏 Acknowledgments
 
 - [LMAX Disruptor](https://github.com/LMAX-Exchange/disruptor) - Original Java implementation
@@ -317,10 +312,9 @@ See [LICENSE](LICENSE) for details.
 
 ## 📞 Support
 
-- 📖 [Documentation](https://docs.rs/badbatch)
 - 🐛 [Issue Tracker](https://github.com/deadjoe/badbatch/issues)
 - 💬 [Discussions](https://github.com/deadjoe/badbatch/discussions)
-- 📧 Email: support@badbatch.dev
+- 📖 [DESIGN.md](DESIGN.md) - Comprehensive design documentation
 
 ---
 
