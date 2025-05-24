@@ -5,52 +5,65 @@
 
   [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
   [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
-  [![Coverage](https://img.shields.io/badge/coverage-98.3%25-brightgreen.svg)](https://github.com/deadjoe/badbatch)
+  [![Tests](https://img.shields.io/badge/tests-146%20passing-brightgreen.svg)](https://github.com/deadjoe/badbatch)
 
 </div>
 
-> A high-performance, distributed disruptor engine written in Rust, based on the LMAX Disruptor pattern with modern distributed systems capabilities.
+> A high-performance, lock-free disruptor engine written in Rust, implementing the LMAX Disruptor pattern with modern Rust optimizations and disruptor-rs inspired features.
 
 ## 🚀 Features
 
 ### 🔥 LMAX Disruptor Core Engine
+
 - **Lock-free ring buffer** with power-of-2 sizing for maximum performance
 - **Multiple wait strategies**: Blocking, BusySpin, Yielding, Sleeping
 - **Event processors** with batch processing capabilities
-- **Single and multi-producer** support
+- **Single and multi-producer** support with bitmap optimization
 - **Comprehensive exception handling** with custom error types
 - **Sequence barriers** and dependency management
 - **Event factories, handlers, and translators** for flexible event processing
 - **Full compatibility** with original LMAX Disruptor patterns
 
-### 🌐 REST API Interface
-- **Complete HTTP API** with 15+ endpoints
-- **Disruptor lifecycle management** (CRUD operations)
-- **Event publishing** (single, batch, cross-disruptor)
-- **Real-time monitoring** and metrics
-- **Health checks** and status reporting
-- **Standardized error handling** and responses
-- **Middleware support** (CORS, logging, authentication)
-- **OpenAPI-compatible** design
+### ⚡ Modern Rust Optimizations (inspired by disruptor-rs)
 
-### 🔗 Distributed Cluster
-- **Gossip protocol** implementation (SWIM-style)
-- **Dynamic node discovery** and membership management
-- **Service registration** and discovery
-- **Health monitoring** and failure detection
-- **Event replication** framework
-- **Configurable consistency levels**
-- **Cluster state management** and coordination
+- **Simplified Producer API**: Closure-based publishing with `producer.publish(|event| { ... })`
+- **Batch Publishing**: Efficient `BatchIterMut` for zero-copy batch operations
+- **Builder Pattern**: Fluent API with `build_single_producer(size, factory, wait_strategy)`
+- **Thread Management**: CPU affinity support with `ThreadBuilder::new().pin_at_core(1)`
+- **Elegant Consumer**: Automatic lifecycle management with `ElegantConsumer::new()`
+- **Simple Wait Strategies**: Streamlined strategies for easier usage
+
+### 🌐 REST API Interface (Framework Ready)
+
+- **HTTP API framework** with Axum integration
+- **Disruptor lifecycle management** endpoints (create, start, stop, status)
+- **Event publishing** endpoints (single, batch)
+- **Real-time monitoring** and metrics collection
+- **Health checks** and system status reporting
+- **Standardized error handling** with proper HTTP responses
+- **Middleware support** (CORS, logging, timeout, rate limiting)
+- **Extensible architecture** for custom endpoints
+
+### 🔗 Distributed Cluster (Foundation)
+
+- **Gossip protocol** framework (SWIM-style membership)
+- **Node discovery** and membership management structure
+- **Service registration** and discovery interfaces
+- **Health monitoring** and failure detection mechanisms
+- **Event replication** framework foundation
+- **Cluster state management** and coordination primitives
+- **Configurable architecture** for distributed scenarios
 
 ### 🛠️ Command Line Interface
-- **Comprehensive CLI** with 30+ commands
-- **HTTP client** for API communication
-- **Configuration management** (YAML/JSON)
+
+- **Comprehensive CLI** with server, disruptor, event, and monitor commands
+- **HTTP client** integration for API communication
+- **Configuration management** (YAML/JSON support)
 - **Multiple output formats** (JSON, YAML, table)
 - **Progress indicators** and user-friendly output
-- **Performance testing** and load generation tools
+- **Performance testing** and load generation capabilities
 - **Real-time monitoring** and metrics display
-- **Server management** capabilities
+- **Extensible command structure** for custom operations
 
 ## 📊 Performance & Safety
 
@@ -204,36 +217,114 @@ defaults:
 
 ### Programming API
 
+#### Traditional LMAX Disruptor API
+
 ```rust
-use badbatch::disruptor::{Disruptor, DisruptorBuilder};
-use badbatch::event::{Event, EventHandler};
+use badbatch::disruptor::{
+    Disruptor, ProducerType, BlockingWaitStrategy, DefaultEventFactory,
+    EventHandler, EventTranslator, Result,
+};
 
-// Create a disruptor
-let disruptor = DisruptorBuilder::new()
-    .buffer_size(1024)
-    .single_producer()
-    .blocking_wait_strategy()
-    .build()?;
+#[derive(Debug, Default)]
+struct MyEvent {
+    value: i64,
+    message: String,
+}
 
-// Define event handler
+// Event handler implementation
 struct MyEventHandler;
 
 impl EventHandler<MyEvent> for MyEventHandler {
-    fn on_event(&mut self, event: &MyEvent, sequence: u64, end_of_batch: bool) {
-        println!("Processing event: {:?} at sequence {}", event, sequence);
+    fn on_event(&mut self, event: &mut MyEvent, sequence: i64, end_of_batch: bool) -> Result<()> {
+        println!("Processing event {} with value {} (end_of_batch: {})",
+                 sequence, event.value, end_of_batch);
+        Ok(())
     }
 }
 
-// Start processing
-disruptor.handle_events_with(MyEventHandler)?;
+// Create and configure the Disruptor
+let factory = DefaultEventFactory::<MyEvent>::new();
+let mut disruptor = Disruptor::new(
+    factory,
+    1024, // Buffer size (must be power of 2)
+    ProducerType::Single,
+    Box::new(BlockingWaitStrategy::new()),
+)?
+.handle_events_with(MyEventHandler)
+.build();
+
+// Start the Disruptor
 disruptor.start()?;
 
-// Publish events
-let ring_buffer = disruptor.ring_buffer();
-let sequence = ring_buffer.next()?;
-let event = ring_buffer.get_mut(sequence)?;
-event.data = "Hello, World!".to_string();
-ring_buffer.publish(sequence);
+// Publish events using EventTranslator
+struct MyEventTranslator {
+    value: i64,
+    message: String,
+}
+
+impl EventTranslator<MyEvent> for MyEventTranslator {
+    fn translate_to(&self, event: &mut MyEvent, _sequence: i64) {
+        event.value = self.value;
+        event.message = self.message.clone();
+    }
+}
+
+let translator = MyEventTranslator {
+    value: 42,
+    message: "Hello, World!".to_string(),
+};
+disruptor.publish_event(translator)?;
+
+// Shutdown when done
+disruptor.shutdown()?;
+```
+
+#### Modern disruptor-rs Inspired API
+
+```rust
+use badbatch::disruptor::{
+    build_single_producer, Producer, ElegantConsumer,
+    simple_wait_strategy::BusySpin, DefaultEventFactory,
+};
+
+#[derive(Debug, Default)]
+struct MyEvent {
+    value: i64,
+}
+
+// Simple producer with closure-based publishing
+let factory = DefaultEventFactory::<MyEvent>::new();
+let mut producer = build_single_producer(1024, factory, BusySpin)
+    .handle_events_with(|event, sequence, end_of_batch| {
+        println!("Processing event {} with value {} (batch_end: {})",
+                 sequence, event.value, end_of_batch);
+    })
+    .build();
+
+// Publish events with closures
+producer.publish(|event| {
+    event.value = 42;
+});
+
+// Batch publishing
+producer.batch_publish(5, |batch| {
+    for (i, event) in batch.enumerate() {
+        event.value = i as i64;
+    }
+});
+
+// Elegant consumer with CPU affinity
+let consumer = ElegantConsumer::with_affinity(
+    ring_buffer,
+    |event, sequence, end_of_batch| {
+        println!("Processing: {} at {}", event.value, sequence);
+    },
+    BusySpin,
+    1, // Pin to CPU core 1
+)?;
+
+// Graceful shutdown
+consumer.shutdown()?;
 ```
 
 ## 🔧 Development
@@ -277,12 +368,30 @@ cargo doc --no-deps --open
 
 BadBatch is designed for high-performance event processing with the following characteristics:
 
-- **Lock-free architecture**: Zero-cost abstractions with no locks in hot paths
-- **Memory efficiency**: Pre-allocated ring buffer with minimal garbage collection pressure
-- **CPU optimization**: Cache-friendly data structures and NUMA-aware design
-- **Rust advantages**: Memory safety without runtime overhead
+### Core Performance Features
 
-> **Note**: Comprehensive benchmarks comparing BadBatch with the original LMAX Disruptor are planned for future releases. The focus has been on correctness and feature completeness in this initial implementation.
+- **Lock-free architecture**: Zero-cost abstractions with no locks in hot paths
+- **Memory efficiency**: Pre-allocated ring buffer with zero runtime allocation
+- **CPU optimization**: Cache-friendly data structures with proper padding
+- **Rust advantages**: Memory safety without runtime overhead
+- **Mechanical sympathy**: NUMA-aware design and CPU affinity support
+
+### Optimization Techniques
+
+- **Cache Line Padding**: Uses `crossbeam_utils::CachePadded` to prevent false sharing
+- **Bitmap Optimization**: O(1) availability checking for large buffers (inspired by disruptor-rs)
+- **Batch Processing**: Automatic batching reduces coordination overhead
+- **Bit Manipulation**: Fast modulo operations using bit masks for power-of-2 buffer sizes
+- **Memory Layout**: Optimal data structures (`Box<[UnsafeCell<T>]>`) for better cache locality
+
+### Current Status
+
+- **146 tests passing**: Comprehensive test coverage ensures correctness
+- **LMAX Algorithm Compliance**: Faithful implementation of proven algorithms
+- **disruptor-rs Optimizations**: Modern Rust patterns for improved usability
+- **Production Ready**: Core engine is stable and feature-complete
+
+> **Note**: Comprehensive benchmarks comparing BadBatch with other Disruptor implementations are planned for future releases. The current focus has been on correctness, safety, and feature completeness.
 
 ## 🤝 Contributing
 
@@ -303,12 +412,16 @@ This project adheres to the [Rust Code of Conduct](https://www.rust-lang.org/pol
 
 This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
 
+See the [LICENSE](LICENSE) file for details.
+
 ## 🙏 Acknowledgments
 
-- [LMAX Disruptor](https://github.com/LMAX-Exchange/disruptor) - Original Java implementation
-- [Rust Community](https://www.rust-lang.org/community) - For the amazing ecosystem
-- [Tokio](https://tokio.rs/) - Async runtime
-- [Axum](https://github.com/tokio-rs/axum) - Web framework
+- [LMAX Disruptor](https://github.com/LMAX-Exchange/disruptor) - Original Java implementation and design patterns
+- [disruptor-rs](https://github.com/sklose/disruptor) - Rust implementation inspiration for modern API design
+- [Rust Community](https://www.rust-lang.org/community) - For the amazing ecosystem and safety guarantees
+- [Tokio](https://tokio.rs/) - Async runtime for network components
+- [Axum](https://github.com/tokio-rs/axum) - Web framework for REST API
+- [crossbeam-utils](https://github.com/crossbeam-rs/crossbeam) - Cache-friendly atomic operations
 
 ## 📞 Support
 
