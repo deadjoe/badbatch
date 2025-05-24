@@ -221,6 +221,7 @@ dependencies = [
  "chrono",
  "clap",
  "criterion",
+ "crossbeam-utils",
  "env_logger",
  "indicatif",
  "parking_lot",
