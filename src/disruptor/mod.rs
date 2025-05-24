@@ -56,6 +56,9 @@ pub mod exception_handler;
 // Producer types
 pub mod producer_type;
 
+// Producer API (inspired by disruptor-rs)
+pub mod producer;
+
 // Main Disruptor DSL
 pub mod disruptor;
 
