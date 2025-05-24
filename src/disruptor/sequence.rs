@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::disruptor::INITIAL_CURSOR_VALUE;
 
 /// A sequence counter that provides atomic operations with memory ordering guarantees.
-/// 
+///
 /// This is equivalent to the Sequence class in the original LMAX Disruptor.
 /// It uses padding to prevent false sharing between sequence values and provides
 /// atomic operations with appropriate memory barriers.
@@ -27,10 +27,10 @@ pub struct Sequence {
 
 impl Sequence {
     /// Create a new sequence with the initial value
-    /// 
+    ///
     /// # Arguments
     /// * `initial_value` - The initial sequence value (typically INITIAL_CURSOR_VALUE)
-    /// 
+    ///
     /// # Returns
     /// A new Sequence instance
     pub fn new(initial_value: i64) -> Self {
@@ -41,7 +41,7 @@ impl Sequence {
     }
 
     /// Create a new sequence with the default initial value
-    /// 
+    ///
     /// # Returns
     /// A new Sequence instance with INITIAL_CURSOR_VALUE
     pub fn new_with_initial_value() -> Self {
@@ -49,9 +49,9 @@ impl Sequence {
     }
 
     /// Get the current sequence value
-    /// 
+    ///
     /// Uses Acquire ordering to ensure proper synchronization with other threads.
-    /// 
+    ///
     /// # Returns
     /// The current sequence value
     pub fn get(&self) -> i64 {
@@ -59,9 +59,9 @@ impl Sequence {
     }
 
     /// Set the sequence value
-    /// 
+    ///
     /// Uses Release ordering to ensure proper synchronization with other threads.
-    /// 
+    ///
     /// # Arguments
     /// * `value` - The new sequence value
     pub fn set(&self, value: i64) {
@@ -69,10 +69,10 @@ impl Sequence {
     }
 
     /// Set the sequence value with volatile semantics
-    /// 
+    ///
     /// Uses SeqCst ordering for strongest memory ordering guarantees.
     /// This is equivalent to the setVolatile method in the original LMAX Disruptor.
-    /// 
+    ///
     /// # Arguments
     /// * `value` - The new sequence value
     pub fn set_volatile(&self, value: i64) {
@@ -80,14 +80,14 @@ impl Sequence {
     }
 
     /// Compare and swap the sequence value
-    /// 
+    ///
     /// Atomically compares the current value with expected and sets it to new_value
     /// if they match.
-    /// 
+    ///
     /// # Arguments
     /// * `expected` - The expected current value
     /// * `new_value` - The new value to set if comparison succeeds
-    /// 
+    ///
     /// # Returns
     /// True if the swap was successful, false otherwise
     pub fn compare_and_set(&self, expected: i64, new_value: i64) -> bool {
@@ -97,9 +97,9 @@ impl Sequence {
     }
 
     /// Increment and get the new value
-    /// 
+    ///
     /// Atomically increments the sequence value and returns the new value.
-    /// 
+    ///
     /// # Returns
     /// The new sequence value after incrementing
     pub fn increment_and_get(&self) -> i64 {
@@ -107,16 +107,30 @@ impl Sequence {
     }
 
     /// Add a value and get the new result
-    /// 
+    ///
     /// Atomically adds the increment to the sequence value and returns the new value.
-    /// 
+    ///
     /// # Arguments
     /// * `increment` - The value to add
-    /// 
+    ///
     /// # Returns
     /// The new sequence value after adding the increment
     pub fn add_and_get(&self, increment: i64) -> i64 {
         self.value.fetch_add(increment, Ordering::SeqCst) + increment
+    }
+
+    /// Get the current value and add increment
+    ///
+    /// Atomically gets the current value and adds the increment, returning the original value.
+    /// This is equivalent to the getAndAdd method in the original LMAX Disruptor.
+    ///
+    /// # Arguments
+    /// * `increment` - The value to add
+    ///
+    /// # Returns
+    /// The original sequence value before adding the increment
+    pub fn get_and_add(&self, increment: i64) -> i64 {
+        self.value.fetch_add(increment, Ordering::SeqCst)
     }
 }
 
@@ -135,12 +149,12 @@ impl Clone for Sequence {
 /// Utility functions for working with sequences
 impl Sequence {
     /// Get the minimum sequence value from a slice of sequences
-    /// 
+    ///
     /// This is used to find the slowest consumer when coordinating multiple consumers.
-    /// 
+    ///
     /// # Arguments
     /// * `sequences` - A slice of sequence references
-    /// 
+    ///
     /// # Returns
     /// The minimum sequence value, or i64::MAX if the slice is empty
     pub fn get_minimum_sequence(sequences: &[Arc<Sequence>]) -> i64 {
@@ -184,7 +198,7 @@ mod tests {
     #[test]
     fn test_sequence_operations() {
         let seq = Sequence::new(0);
-        
+
         // Test set and get
         seq.set(10);
         assert_eq!(seq.get(), 10);
@@ -206,6 +220,10 @@ mod tests {
         // Test add_and_get
         assert_eq!(seq.add_and_get(5), 36);
         assert_eq!(seq.get(), 36);
+
+        // Test get_and_add
+        assert_eq!(seq.get_and_add(10), 36); // Returns original value
+        assert_eq!(seq.get(), 46); // Value should be updated
     }
 
     #[test]
@@ -250,10 +268,10 @@ mod tests {
     fn test_sequence_clone() {
         let seq1 = Sequence::new(42);
         let seq2 = seq1.clone();
-        
+
         assert_eq!(seq1.get(), 42);
         assert_eq!(seq2.get(), 42);
-        
+
         // Clones should be independent
         seq1.set(100);
         assert_eq!(seq1.get(), 100);
