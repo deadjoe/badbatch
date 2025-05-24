@@ -18,7 +18,7 @@ use crossbeam_utils::CachePadded;
 
 // BadBatch Disruptor imports
 use badbatch::disruptor::{
-    build_multi_producer, Producer, BusySpinWaitStrategy,
+    build_multi_producer, BusySpinWaitStrategy,
 };
 
 // Benchmark configuration
@@ -239,7 +239,7 @@ fn badbatch_mpsc_modern(group: &mut BenchmarkGroup<WallTime>, params: (i64, u64)
     let mut burst_producers = (0..PRODUCERS)
         .map(|_| {
             let burst_size = Arc::clone(&burst_size);
-            let mut producer = producer.clone();
+            let producer = producer.clone();
             BurstProducer::new(move || {
                 let burst_size = burst_size.load(Acquire);
                 producer.batch_publish(burst_size as usize, |batch| {
