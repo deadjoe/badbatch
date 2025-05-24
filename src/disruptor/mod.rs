@@ -59,6 +59,9 @@ pub mod producer_type;
 // Producer API (inspired by disruptor-rs)
 pub mod producer;
 
+// Builder API (inspired by disruptor-rs)
+pub mod builder;
+
 // Main Disruptor DSL
 pub mod disruptor;
 
