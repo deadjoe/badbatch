@@ -4,8 +4,9 @@
 //! Sequencers manage the allocation of sequence numbers and ensure that producers don't
 //! overwrite events that haven't been consumed yet.
 
-use crate::disruptor::{Result, DisruptorError, Sequence, WaitStrategy};
+use crate::disruptor::{Result, DisruptorError, Sequence, WaitStrategy, is_power_of_two};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 /// Trait for sequencers that coordinate access to the ring buffer
 ///
@@ -180,6 +181,8 @@ impl Sequencer for SingleProducerSequencer {
             return Err(DisruptorError::InsufficientCapacity);
         }
 
+        // Update the cursor to claim this sequence
+        self.cursor.set(next_sequence);
         Ok(next_sequence)
     }
 
@@ -193,6 +196,8 @@ impl Sequencer for SingleProducerSequencer {
             return Err(DisruptorError::InsufficientCapacity);
         }
 
+        // Update the cursor to claim these sequences
+        self.cursor.set(next_sequence);
         Ok(next_sequence)
     }
 
@@ -259,32 +264,54 @@ impl Sequencer for SingleProducerSequencer {
 /// Multi producer sequencer
 ///
 /// This sequencer supports multiple threads publishing events concurrently.
-/// It uses more complex algorithms to handle coordination between producers.
+/// It uses complex algorithms to handle coordination between producers, following
+/// the exact design from the original LMAX Disruptor MultiProducerSequencer.
+///
+/// Key features:
+/// - availableBuffer array to track slot availability
+/// - CAS-based coordination between producers
+/// - getHighestPublishedSequence() for consumer coordination
+/// - ABA problem prevention
 #[derive(Debug)]
 pub struct MultiProducerSequencer {
     buffer_size: usize,
     wait_strategy: Arc<dyn WaitStrategy>,
     cursor: Arc<Sequence>,
     gating_sequences: parking_lot::RwLock<Vec<Arc<Sequence>>>,
-    // In a full implementation, this would have additional fields for
-    // tracking individual producer sequences
+    /// Array tracking availability of each slot in the ring buffer
+    /// Each element represents whether the corresponding slot is available for consumption
+    available_buffer: Vec<AtomicI32>,
+    /// Index mask for fast modulo operations (buffer_size - 1)
+    index_mask: usize,
 }
 
 impl MultiProducerSequencer {
     /// Create a new multi producer sequencer
     ///
     /// # Arguments
-    /// * `buffer_size` - The size of the ring buffer
+    /// * `buffer_size` - The size of the ring buffer (must be a power of 2)
     /// * `wait_strategy` - The wait strategy to use
     ///
     /// # Returns
     /// A new MultiProducerSequencer instance
+    ///
+    /// # Panics
+    /// Panics if buffer_size is not a power of 2
     pub fn new(buffer_size: usize, wait_strategy: Arc<dyn WaitStrategy>) -> Self {
+        assert!(is_power_of_two(buffer_size), "Buffer size must be a power of 2");
+
+        // Initialize available buffer with -1 (unavailable) for all slots
+        let available_buffer: Vec<AtomicI32> = (0..buffer_size)
+            .map(|_| AtomicI32::new(-1))
+            .collect();
+
         Self {
             buffer_size,
             wait_strategy,
             cursor: Arc::new(Sequence::new_with_initial_value()),
             gating_sequences: parking_lot::RwLock::new(Vec::new()),
+            available_buffer,
+            index_mask: buffer_size - 1,
         }
     }
 }
@@ -299,17 +326,24 @@ impl Sequencer for MultiProducerSequencer {
     }
 
     fn next(&self) -> Result<i64> {
-        // Simplified implementation - a real multi-producer sequencer
-        // would use more sophisticated coordination
-        let next_sequence = self.cursor.increment_and_get();
-        let wrap_point = next_sequence - self.buffer_size as i64;
-        let cached_gating_sequence = self.get_minimum_sequence();
+        // Real multi-producer implementation following LMAX Disruptor design
+        loop {
+            let current = self.cursor.get();
+            let next_sequence = current + 1;
+            let wrap_point = next_sequence - self.buffer_size as i64;
+            let cached_gating_sequence = self.get_minimum_sequence();
 
-        if wrap_point > cached_gating_sequence {
-            return Err(DisruptorError::InsufficientCapacity);
+            // Check if we would wrap around and overtake consumers
+            if wrap_point > cached_gating_sequence {
+                return Err(DisruptorError::InsufficientCapacity);
+            }
+
+            // Try to claim the next sequence using CAS
+            if self.cursor.compare_and_set(current, next_sequence) {
+                return Ok(next_sequence);
+            }
+            // If CAS failed, another producer claimed this sequence, try again
         }
-
-        Ok(next_sequence)
     }
 
     fn next_n(&self, n: i64) -> Result<i64> {
@@ -333,8 +367,11 @@ impl Sequencer for MultiProducerSequencer {
     }
 
     fn publish(&self, sequence: i64) {
-        // In a real multi-producer implementation, this would be more complex
-        self.cursor.set(sequence);
+        // Mark the slot as available in the available buffer
+        let index = (sequence as usize) & self.index_mask;
+        self.available_buffer[index].store(sequence as i32, Ordering::Release);
+
+        // Signal waiting consumers
         self.wait_strategy.signal_all_when_blocking();
     }
 
@@ -343,10 +380,29 @@ impl Sequencer for MultiProducerSequencer {
     }
 
     fn is_available(&self, sequence: i64) -> bool {
-        sequence <= self.cursor.get()
+        // Check if the sequence is available by examining the available buffer
+        let index = (sequence as usize) & self.index_mask;
+        let flag = self.available_buffer[index].load(Ordering::Acquire);
+        flag == sequence as i32
     }
 
-    fn get_highest_published_sequence(&self, _next_sequence: i64, available_sequence: i64) -> i64 {
+    fn get_highest_published_sequence(&self, next_sequence: i64, available_sequence: i64) -> i64 {
+        // This is the core algorithm from LMAX Disruptor for finding the highest
+        // contiguous published sequence in a multi-producer environment
+
+        // Start from the next sequence we're looking for
+        let mut sequence = next_sequence;
+
+        // Scan through the available buffer to find the highest contiguous sequence
+        while sequence <= available_sequence {
+            if !self.is_available(sequence) {
+                // Found a gap, return the sequence before this gap
+                return sequence - 1;
+            }
+            sequence += 1;
+        }
+
+        // All sequences up to available_sequence are published
         available_sequence
     }
 
@@ -433,5 +489,84 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
 
     fn check_alert(&self) -> Result<()> {
         Ok(()) // Simplified implementation
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::disruptor::BlockingWaitStrategy;
+
+    #[test]
+    fn test_multi_producer_sequencer_creation() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(1024, wait_strategy);
+
+        assert_eq!(sequencer.buffer_size, 1024);
+        assert_eq!(sequencer.index_mask, 1023);
+        assert_eq!(sequencer.available_buffer.len(), 1024);
+    }
+
+    #[test]
+    fn test_multi_producer_sequencer_next() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(8, wait_strategy);
+
+        // Test basic sequence claiming
+        let seq1 = sequencer.next().unwrap();
+        assert_eq!(seq1, 0);
+
+        let seq2 = sequencer.next().unwrap();
+        assert_eq!(seq2, 1);
+    }
+
+    #[test]
+    fn test_multi_producer_sequencer_publish_and_availability() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(8, wait_strategy);
+
+        // Claim and publish a sequence
+        let sequence = sequencer.next().unwrap();
+        assert!(!sequencer.is_available(sequence)); // Not available until published
+
+        sequencer.publish(sequence);
+        assert!(sequencer.is_available(sequence)); // Now available
+    }
+
+    #[test]
+    fn test_multi_producer_highest_published_sequence() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(8, wait_strategy);
+
+        // Publish sequences 0, 1, 2
+        for i in 0..3 {
+            let seq = sequencer.next().unwrap();
+            sequencer.publish(seq);
+        }
+
+        // All sequences should be available
+        let highest = sequencer.get_highest_published_sequence(0, 2);
+        assert_eq!(highest, 2);
+    }
+
+    #[test]
+    fn test_single_producer_sequencer_creation() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = SingleProducerSequencer::new(1024, wait_strategy);
+
+        assert_eq!(sequencer.buffer_size, 1024);
+    }
+
+    #[test]
+    fn test_single_producer_sequencer_next() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = SingleProducerSequencer::new(8, wait_strategy);
+
+        // Test basic sequence claiming
+        let seq1 = sequencer.next().unwrap();
+        assert_eq!(seq1, 0);
+
+        let seq2 = sequencer.next().unwrap();
+        assert_eq!(seq2, 1);
     }
 }
