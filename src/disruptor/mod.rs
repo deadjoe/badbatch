@@ -27,6 +27,9 @@
 // Core sequence management
 pub mod sequence;
 
+// Core interfaces
+pub mod core_interfaces;
+
 // Ring buffer for event storage
 pub mod ring_buffer;
 
@@ -58,13 +61,14 @@ pub mod disruptor;
 
 // Re-export core types for convenience
 pub use sequence::Sequence;
+pub use core_interfaces::{Cursored, Sequenced, DataProvider, EventSink};
 pub use ring_buffer::RingBuffer;
 pub use event_handler::{EventHandler, NoOpEventHandler};
 pub use event_factory::{EventFactory, DefaultEventFactory};
 pub use event_translator::{EventTranslator, EventTranslatorOneArg, EventTranslatorTwoArg, EventTranslatorThreeArg};
 pub use sequencer::{Sequencer, SingleProducerSequencer, MultiProducerSequencer};
 pub use wait_strategy::{WaitStrategy, BlockingWaitStrategy, YieldingWaitStrategy, BusySpinWaitStrategy, SleepingWaitStrategy};
-pub use event_processor::{EventProcessor, BatchEventProcessor, DataProvider};
+pub use event_processor::{EventProcessor, BatchEventProcessor};
 pub use sequence_barrier::{SequenceBarrier, ProcessingSequenceBarrier};
 pub use exception_handler::{ExceptionHandler, DefaultExceptionHandler};
 pub use producer_type::ProducerType;
