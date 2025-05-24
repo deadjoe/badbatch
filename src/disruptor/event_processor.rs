@@ -277,11 +277,11 @@ where
 
         // Process all available events in this batch
         while next_sequence <= available_sequence {
-            let end_of_batch = next_sequence == available_sequence;
+            let _end_of_batch = next_sequence == available_sequence;
 
             // Get the event (we need to work around the mutable access issue)
             // For now, we'll use immutable access and handle this limitation
-            let event = self.data_provider.get(next_sequence);
+            let _event = self.data_provider.get(next_sequence);
 
             // Process the event - we need to work around the mutable handler issue
             // This is a temporary solution until we can properly handle interior mutability
@@ -348,6 +348,7 @@ mod tests {
     use std::sync::atomic::AtomicI64;
 
     #[derive(Debug, Default)]
+    #[allow(dead_code)]
     struct TestEvent {
         value: AtomicI64,
     }

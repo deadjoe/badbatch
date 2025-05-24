@@ -60,6 +60,7 @@ impl BadBatchClient {
     }
 
     /// Get API version
+    #[allow(dead_code)]
     pub async fn get_version(&self) -> CliResult<VersionResponse> {
         let url = self.base_url.join("/api/v1/version")?;
         let response = self.client.get(url).send().await?;
@@ -179,6 +180,7 @@ impl BadBatchClient {
     }
 
     /// Get disruptor health
+    #[allow(dead_code)]
     pub async fn get_disruptor_health(&self, id: &str) -> CliResult<DisruptorHealth> {
         let url = self.base_url.join(&format!("/api/v1/disruptor/{}/health", id))?;
         let response = self.client.get(url).send().await?;

@@ -7,11 +7,9 @@
 use axum::Router;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
-use tower::ServiceBuilder;
-use tower_http::trace::TraceLayer;
 use tracing::{info, error};
 
-use crate::api::{routes, ServerConfig, middleware};
+use crate::api::{routes, ServerConfig};
 
 /// Main API server
 pub struct ApiServer {
@@ -25,7 +23,7 @@ impl ApiServer {
     /// Create a new API server with the given configuration
     pub fn new(config: ServerConfig) -> Self {
         let router = routes::create_router(&config);
-        
+
         Self {
             config,
             router,
@@ -40,7 +38,7 @@ impl ApiServer {
     /// Start the API server
     pub async fn start(self) -> Result<(), ApiServerError> {
         let addr = SocketAddr::from(([0, 0, 0, 0], self.config.port));
-        
+
         info!(
             host = %self.config.host,
             port = %self.config.port,
@@ -73,7 +71,7 @@ impl ApiServer {
         shutdown_signal: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), ApiServerError> {
         let addr = SocketAddr::from(([0, 0, 0, 0], self.config.port));
-        
+
         info!(
             host = %self.config.host,
             port = %self.config.port,
@@ -282,7 +280,7 @@ mod tests {
     async fn test_shutdown_signal_timeout() {
         // Test that shutdown signal can be created (but don't wait for it)
         let shutdown_future = shutdown_signal();
-        
+
         // Use a timeout to avoid waiting indefinitely
         let result = tokio::time::timeout(Duration::from_millis(10), shutdown_future).await;
         assert!(result.is_err()); // Should timeout since no signal is sent

@@ -7,7 +7,7 @@
 use crate::disruptor::{
     Result, DisruptorError, EventFactory, EventHandler, ProducerType,
     RingBuffer, Sequencer, SingleProducerSequencer, MultiProducerSequencer, WaitStrategy,
-    BlockingWaitStrategy, EventProcessor, BatchEventProcessor, SequenceBarrier, Sequence,
+    BlockingWaitStrategy, EventProcessor, BatchEventProcessor, Sequence,
     DataProvider, is_power_of_two,
 };
 use std::sync::Arc;
@@ -16,10 +16,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Dummy data provider for temporary use in event processor threads
 /// This is a temporary solution until we properly implement interior mutability
+#[allow(dead_code)]
 struct DummyDataProvider<T> {
     _phantom: std::marker::PhantomData<T>,
 }
 
+#[allow(dead_code)]
 impl<T> DummyDataProvider<T> {
     fn new() -> Self {
         Self {
@@ -32,16 +34,15 @@ impl<T: Default + Send + Sync + 'static> DataProvider<T> for DummyDataProvider<T
     fn get(&self, _sequence: i64) -> &T {
         // This is a dummy implementation - in a real scenario we'd have actual data
         // For now, we'll use a static reference to a default value
-        // This is unsafe but acceptable for this temporary fix
-        unsafe {
-            static mut DUMMY_VALUE: Option<Box<dyn std::any::Any + Send + Sync>> = None;
-            if DUMMY_VALUE.is_none() {
-                DUMMY_VALUE = Some(Box::new(T::default()));
-            }
-            DUMMY_VALUE.as_ref().unwrap().downcast_ref::<T>().unwrap()
-        }
+        // Using OnceLock to avoid static mut warnings
+        use std::sync::OnceLock;
+        static DUMMY_VALUE: OnceLock<Box<dyn std::any::Any + Send + Sync>> = OnceLock::new();
+
+        let value = DUMMY_VALUE.get_or_init(|| Box::new(T::default()));
+        value.downcast_ref::<T>().unwrap()
     }
 
+    #[allow(static_mut_refs)]
     unsafe fn get_mut(&self, _sequence: i64) -> &mut T {
         // This is a dummy implementation - in a real scenario we'd have actual data
         // For now, we'll use a static mutable reference to a default value
@@ -66,8 +67,14 @@ impl<T: Default + Send + Sync + 'static> DataProvider<T> for DummyDataProvider<T
 ///
 /// # Examples
 /// ```
-/// use badbatch::disruptor::{Disruptor, ProducerType, BlockingWaitStrategy};
+/// use badbatch::disruptor::{Disruptor, ProducerType, BlockingWaitStrategy, DefaultEventFactory};
 ///
+/// #[derive(Default, Debug)]
+/// struct MyEvent {
+///     data: i32,
+/// }
+///
+/// let event_factory = DefaultEventFactory::<MyEvent>::new();
 /// let disruptor = Disruptor::new(
 ///     event_factory,
 ///     1024,
@@ -478,6 +485,7 @@ mod tests {
     use crate::disruptor::{DefaultEventFactory, NoOpEventHandler};
 
     #[derive(Debug, Default)]
+    #[allow(dead_code)]
     struct TestEvent {
         value: i64,
     }
