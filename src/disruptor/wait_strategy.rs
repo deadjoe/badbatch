@@ -8,6 +8,7 @@ use crate::disruptor::{Result, DisruptorError, Sequence};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use std::sync::{Condvar, Mutex};
 
 /// Strategy for waiting for events to become available
 ///
@@ -51,14 +52,18 @@ pub trait WaitStrategy: Send + Sync + std::fmt::Debug {
 /// This is equivalent to the BlockingWaitStrategy in the original LMAX Disruptor.
 #[derive(Debug, Default)]
 pub struct BlockingWaitStrategy {
-    // Internal state for managing parked threads would go here
-    // For now, we'll use a simple implementation
+    // Use a condvar for proper blocking/signaling
+    condvar: Condvar,
+    mutex: Mutex<()>,
 }
 
 impl BlockingWaitStrategy {
     /// Create a new blocking wait strategy
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            condvar: Condvar::new(),
+            mutex: Mutex::new(()),
+        }
     }
 }
 
@@ -78,13 +83,15 @@ impl WaitStrategy for BlockingWaitStrategy {
                 return Err(DisruptorError::InsufficientCapacity);
             }
 
-            // Simple blocking implementation - in a real implementation,
-            // this would use more sophisticated parking/unparking
+            // Real blocking implementation using condvar
+            let mut guard = self.mutex.lock().unwrap();
             while {
                 available_sequence = cursor.get();
                 available_sequence < sequence
             } {
-                thread::park_timeout(Duration::from_nanos(1));
+                // Wait for signal from producers
+                let result = self.condvar.wait_timeout(guard, Duration::from_millis(1)).unwrap();
+                guard = result.0; // Get the guard back from wait_timeout
             }
         }
 
@@ -92,8 +99,8 @@ impl WaitStrategy for BlockingWaitStrategy {
     }
 
     fn signal_all_when_blocking(&self) {
-        // In a real implementation, this would unpark all waiting threads
-        // For now, this is a no-op
+        // Signal all waiting threads using condvar
+        self.condvar.notify_all();
     }
 }
 
