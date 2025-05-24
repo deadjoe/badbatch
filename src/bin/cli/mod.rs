@@ -2,6 +2,7 @@
 //!
 //! Command-line interface implementation for BadBatch.
 
+pub mod client;
 pub mod cluster;
 pub mod config;
 pub mod disruptor;
@@ -17,6 +18,7 @@ pub type CliResult<T> = Result<T, CliError>;
 
 /// CLI errors
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum CliError {
     #[error("HTTP client error: {0}")]
     Http(#[from] reqwest::Error),
@@ -58,6 +60,7 @@ pub enum CliError {
     Timeout { seconds: u64 },
 }
 
+#[allow(dead_code)]
 impl CliError {
     /// Create a configuration error
     pub fn config<S: Into<String>>(message: S) -> Self {
@@ -118,6 +121,7 @@ pub mod format {
     use tabled::{Table, Tabled};
 
     /// Format output based on the specified format
+    #[allow(dead_code)]
     pub fn format_output<T>(data: &T, format: &str) -> crate::cli::CliResult<String>
     where
         T: Serialize,
@@ -138,6 +142,7 @@ pub mod format {
     }
 
     /// Format a list of items as a table
+    #[allow(dead_code)]
     pub fn format_table<T>(items: &[T]) -> String
     where
         T: Tabled,
@@ -150,6 +155,7 @@ pub mod format {
     }
 
     /// Format a single item
+    #[allow(dead_code)]
     pub fn format_item<T>(item: &T, format: &str) -> crate::cli::CliResult<String>
     where
         T: Serialize,

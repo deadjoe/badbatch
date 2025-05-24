@@ -313,17 +313,38 @@ pub struct ClusterHealth {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{TcpListener, SocketAddr};
+
+    /// 获取一个可用的端口
+    fn get_available_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    /// 创建测试用的集群配置，使用动态端口
+    fn create_test_config() -> ClusterConfig {
+        let port = get_available_port();
+        let bind_addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+
+        ClusterConfig {
+            bind_addr,
+            ..ClusterConfig::default()
+        }
+    }
 
     #[tokio::test]
     async fn test_cluster_creation() {
-        let config = ClusterConfig::default();
+        let config = create_test_config();
         let cluster = Cluster::new(config).await;
         assert!(cluster.is_ok());
     }
 
     #[tokio::test]
     async fn test_cluster_state() {
-        let config = ClusterConfig::default();
+        let config = create_test_config();
         let cluster = Cluster::new(config).await.unwrap();
         let state = cluster.get_state().await;
 
@@ -334,7 +355,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_local_node() {
-        let config = ClusterConfig::default();
+        let config = create_test_config();
         let cluster = Cluster::new(config.clone()).await.unwrap();
         let node = cluster.get_local_node().await;
 
