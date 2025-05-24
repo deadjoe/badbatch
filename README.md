@@ -276,18 +276,16 @@ cargo clippy
 cargo doc --no-deps --open
 ```
 
-## 📈 Benchmarks
+## 📈 Performance
 
-Performance comparison with original LMAX Disruptor:
+BadBatch is designed for high-performance event processing with the following characteristics:
 
-| Metric | BadBatch (Rust) | LMAX (Java) | Improvement |
-|--------|-----------------|-------------|-------------|
-| Throughput | 100M ops/sec | 80M ops/sec | +25% |
-| Latency (P99) | 50ns | 80ns | -37.5% |
-| Memory Usage | 50MB | 120MB | -58% |
-| CPU Usage | 15% | 25% | -40% |
+- **Lock-free architecture**: Zero-cost abstractions with no locks in hot paths
+- **Memory efficiency**: Pre-allocated ring buffer with minimal garbage collection pressure
+- **CPU optimization**: Cache-friendly data structures and NUMA-aware design
+- **Rust advantages**: Memory safety without runtime overhead
 
-*Benchmarks run on: Intel i7-12700K, 32GB RAM, Ubuntu 22.04*
+> **Note**: Comprehensive benchmarks comparing BadBatch with the original LMAX Disruptor are planned for future releases. The focus has been on correctness and feature completeness in this initial implementation.
 
 ## 🤝 Contributing
 
