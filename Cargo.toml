@@ -1,0 +1,57 @@
+[package]
+name = "badbatch"
+version = "0.1.0"
+edition = "2021"
+authors = ["BadBatch Team"]
+description = "High-performance data processing engine with Disruptor-style queue implementation"
+license = "Apache-2.0"
+repository = "https://github.com/deadjoe/badbatch"
+keywords = ["disruptor", "queue", "performance", "concurrent", "lock-free"]
+categories = ["concurrency", "data-structures", "network-programming"]
+
+[dependencies]
+# Async runtime and HTTP server
+tokio = { version = "1.0", features = ["full"] }
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Networking and clustering
+uuid = { version = "1.0", features = ["v4", "serde"] }
+rand = "0.8"
+
+# Memory management and atomics
+crossbeam-utils = "0.8"
+parking_lot = "0.12"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Configuration
+clap = { version = "4.0", features = ["derive"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tokio-test = "0.4"
+reqwest = { version = "0.11", features = ["json"] }
+
+[[bench]]
+name = "disruptor_bench"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+debug = true
