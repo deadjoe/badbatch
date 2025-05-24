@@ -8,7 +8,8 @@ use tokio::time::sleep;
 use tabled::Tabled;
 use serde_json::Value;
 
-use crate::{MonitorCommands, client::BadBatchClient};
+use crate::{MonitorCommands};
+use crate::cli::client::{BadBatchClient, SystemMetrics, DisruptorMetrics};
 use crate::cli::{CliResult, format, utils};
 
 /// Handle monitor commands
@@ -248,8 +249,8 @@ struct SystemMetricsRow {
     events: String,
 }
 
-impl From<crate::client::SystemMetrics> for SystemMetricsRow {
-    fn from(metrics: crate::client::SystemMetrics) -> Self {
+impl From<SystemMetrics> for SystemMetricsRow {
+    fn from(metrics: SystemMetrics) -> Self {
         Self {
             uptime: utils::format_duration(Duration::from_secs(metrics.uptime_seconds)),
             memory: utils::format_bytes(metrics.memory_usage_bytes),
@@ -277,8 +278,8 @@ struct DisruptorMetricsRow {
     last_sequence: String,
 }
 
-impl From<crate::client::DisruptorMetrics> for DisruptorMetricsRow {
-    fn from(metrics: crate::client::DisruptorMetrics) -> Self {
+impl From<DisruptorMetrics> for DisruptorMetricsRow {
+    fn from(metrics: DisruptorMetrics) -> Self {
         Self {
             events_processed: format!("{}", metrics.events_processed),
             events_per_second: format!("{:.2}", metrics.events_per_second),

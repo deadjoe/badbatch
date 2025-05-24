@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::cluster::{ClusterMembership, ClusterError, ClusterResult, NodeId};
+use crate::cluster::{ClusterMembership, ClusterResult, NodeId};
 
 /// Service information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +114,7 @@ pub struct ServiceDiscovery {
     /// Service registry
     registry: ServiceRegistry,
     /// Cluster membership
+    #[allow(dead_code)]
     membership: Arc<ClusterMembership>,
 }
 
@@ -162,14 +163,11 @@ impl ServiceDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cluster::{Node, NodeId};
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
 
     #[tokio::test]
     async fn test_service_registry() {
         let registry = ServiceRegistry::new();
-        
+
         let service = ServiceInfo {
             id: "service-1".to_string(),
             name: "test-service".to_string(),
@@ -183,7 +181,7 @@ mod tests {
         };
 
         registry.register(service.clone()).await.unwrap();
-        
+
         let services = registry.get_services("test-service").await;
         assert_eq!(services.len(), 1);
         assert_eq!(services[0].id, "service-1");

@@ -2,7 +2,8 @@
 //!
 //! Command handlers for cluster management operations.
 
-use crate::{ClusterCommands, client::BadBatchClient};
+use crate::{ClusterCommands};
+use crate::cli::client::BadBatchClient;
 use crate::cli::{CliResult, format};
 
 /// Handle cluster commands
@@ -20,7 +21,7 @@ pub async fn handle_cluster_command(
     }
 }
 
-async fn show_cluster_status(client: &BadBatchClient, output_format: &str) -> CliResult<()> {
+async fn show_cluster_status(_client: &BadBatchClient, output_format: &str) -> CliResult<()> {
     // For now, return a placeholder status
     // In a real implementation, this would call a cluster status endpoint
     let status = serde_json::json!({
@@ -37,7 +38,7 @@ async fn show_cluster_status(client: &BadBatchClient, output_format: &str) -> Cl
     Ok(())
 }
 
-async fn list_cluster_nodes(client: &BadBatchClient, output_format: &str) -> CliResult<()> {
+async fn list_cluster_nodes(_client: &BadBatchClient, output_format: &str) -> CliResult<()> {
     // Placeholder implementation
     let nodes = serde_json::json!([
         {

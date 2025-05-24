@@ -4,7 +4,8 @@
 
 use tabled::Tabled;
 
-use crate::{DisruptorCommands, client::BadBatchClient};
+use crate::{DisruptorCommands};
+use crate::cli::client::{BadBatchClient, CreateDisruptorRequest, DisruptorInfo};
 use crate::cli::{CliResult, format, utils, progress};
 
 /// Handle disruptor commands
@@ -65,7 +66,7 @@ async fn create_disruptor(
 
     let spinner = progress::create_spinner(&format!("Creating disruptor '{}'...", name));
 
-    let request = crate::client::CreateDisruptorRequest {
+    let request = CreateDisruptorRequest {
         name: name.clone(),
         buffer_size: size,
         producer_type,
@@ -186,8 +187,8 @@ struct DisruptorTableRow {
     created_at: String,
 }
 
-impl From<crate::client::DisruptorInfo> for DisruptorTableRow {
-    fn from(info: crate::client::DisruptorInfo) -> Self {
+impl From<DisruptorInfo> for DisruptorTableRow {
+    fn from(info: DisruptorInfo) -> Self {
         Self {
             id: info.id,
             name: info.name,

@@ -8,6 +8,7 @@ use tabled::{Table, Tabled};
 use crate::cli::CliResult;
 
 /// Format output based on the specified format
+#[allow(dead_code)]
 pub fn format_output<T>(data: &T, format: &str) -> CliResult<String>
 where
     T: Serialize,
@@ -28,6 +29,7 @@ where
 }
 
 /// Format a list of items as a table
+#[allow(dead_code)]
 pub fn format_table<T>(items: &[T]) -> String
 where
     T: Tabled,
@@ -40,6 +42,7 @@ where
 }
 
 /// Format a single item
+#[allow(dead_code)]
 pub fn format_item<T>(item: &T, format: &str) -> CliResult<String>
 where
     T: Serialize,
@@ -48,21 +51,38 @@ where
 }
 
 /// Format success message
+/// This function is used by CLI commands for user feedback
 pub fn success_message(message: &str) -> String {
     format!("✓ {}", message)
 }
 
 /// Format error message
+/// This function is used by CLI commands for error reporting
 pub fn error_message(message: &str) -> String {
     format!("✗ {}", message)
 }
 
 /// Format warning message
+/// This function is used by CLI commands for warnings
 pub fn warning_message(message: &str) -> String {
     format!("⚠ {}", message)
 }
 
 /// Format info message
+/// This function is used by CLI commands for information
 pub fn info_message(message: &str) -> String {
     format!("ℹ {}", message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message_formatting() {
+        assert_eq!(success_message("test"), "✓ test");
+        assert_eq!(error_message("test"), "✗ test");
+        assert_eq!(warning_message("test"), "⚠ test");
+        assert_eq!(info_message("test"), "ℹ test");
+    }
 }

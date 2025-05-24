@@ -8,7 +8,8 @@ use tokio::fs;
 use tokio::time::sleep;
 use serde_json::Value;
 
-use crate::{EventCommands, client::BadBatchClient};
+use crate::{EventCommands};
+use crate::cli::client::{BadBatchClient, PublishEventRequest, PublishBatchRequest, EventData};
 use crate::cli::{CliResult, format, utils, progress};
 
 /// Handle event commands
@@ -62,7 +63,7 @@ async fn publish_event(
 
     let spinner = progress::create_spinner("Publishing event...");
 
-    let request = crate::client::PublishEventRequest {
+    let request = PublishEventRequest {
         data: event_data,
         metadata: metadata_map,
     };
@@ -103,15 +104,15 @@ async fn publish_file(
     let start_time = Instant::now();
 
     for (_batch_idx, chunk) in events.chunks(batch_size).enumerate() {
-        let batch_events: Vec<crate::client::EventData> = chunk
+        let batch_events: Vec<EventData> = chunk
             .iter()
-            .map(|data| crate::client::EventData {
+            .map(|data| EventData {
                 data: data.clone(),
                 metadata: None,
             })
             .collect();
 
-        let request = crate::client::PublishBatchRequest {
+        let request = PublishBatchRequest {
             events: batch_events,
         };
 
@@ -158,15 +159,15 @@ async fn publish_batch(
 
     let spinner = progress::create_spinner(&format!("Publishing {} events...", events.len()));
 
-    let batch_events: Vec<crate::client::EventData> = events
+    let batch_events: Vec<EventData> = events
         .into_iter()
-        .map(|data| crate::client::EventData {
+        .map(|data| EventData {
             data,
             metadata: None,
         })
         .collect();
 
-    let request = crate::client::PublishBatchRequest {
+    let request = PublishBatchRequest {
         events: batch_events,
     };
 
@@ -199,7 +200,7 @@ async fn generate_events(
         // Generate event data
         let event_data = generate_test_event(i, size);
 
-        let request = crate::client::PublishEventRequest {
+        let request = PublishEventRequest {
             data: event_data,
             metadata: None,
         };

@@ -9,60 +9,60 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Coordination barrier for managing dependencies between event processors
-/// 
+///
 /// This trait defines the interface for sequence barriers, which are used to
 /// coordinate dependencies between event processors. This follows the exact
 /// design from the original LMAX Disruptor SequenceBarrier interface.
 pub trait SequenceBarrier: Send + Sync {
     /// Wait for the given sequence to become available
-    /// 
+    ///
     /// This method blocks until the specified sequence is available for processing,
     /// taking into account any dependent sequences that must be processed first.
-    /// 
+    ///
     /// # Arguments
     /// * `sequence` - The sequence to wait for
-    /// 
+    ///
     /// # Returns
     /// The actual available sequence (may be higher than requested)
-    /// 
+    ///
     /// # Errors
     /// Returns an error if waiting is interrupted or an alert occurs
     fn wait_for(&self, sequence: i64) -> Result<i64>;
 
     /// Get the cursor sequence that this barrier is tracking
-    /// 
+    ///
     /// # Returns
     /// The cursor sequence
     fn get_cursor(&self) -> Arc<Sequence>;
 
     /// Check if this barrier has been alerted
-    /// 
+    ///
     /// # Returns
     /// True if the barrier has been alerted, false otherwise
     fn is_alerted(&self) -> bool;
 
     /// Alert this barrier to wake up any waiting threads
-    /// 
+    ///
     /// This is used to interrupt waiting threads, typically during shutdown.
     fn alert(&self);
 
     /// Clear the alert status
-    /// 
+    ///
     /// This resets the alert flag so that the barrier can be used again.
     fn clear_alert(&self);
 
     /// Check if the barrier is alerted and throw an exception if it is
-    /// 
+    ///
     /// # Returns
     /// Ok(()) if not alerted
-    /// 
+    ///
     /// # Errors
     /// Returns `DisruptorError::Alert` if the barrier has been alerted
     fn check_alert(&self) -> Result<()>;
 }
 
 /// Standard implementation of a sequence barrier
-/// 
+///
 /// This barrier coordinates between a cursor sequence (typically from a sequencer)
 /// and a set of dependent sequences (typically from other event processors).
 /// It ensures that events are not processed until all dependencies are satisfied.
@@ -80,12 +80,12 @@ pub struct ProcessingSequenceBarrier {
 
 impl ProcessingSequenceBarrier {
     /// Create a new processing sequence barrier
-    /// 
+    ///
     /// # Arguments
     /// * `cursor` - The cursor sequence to track
     /// * `wait_strategy` - The wait strategy to use
     /// * `dependent_sequences` - Sequences that this barrier depends on
-    /// 
+    ///
     /// # Returns
     /// A new ProcessingSequenceBarrier instance
     pub fn new(
@@ -147,7 +147,7 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
 }
 
 /// A simple sequence barrier that only tracks a cursor
-/// 
+///
 /// This is a simplified barrier that doesn't have any dependent sequences.
 /// It's useful for the first consumer in a processing chain.
 #[derive(Debug)]
@@ -162,11 +162,11 @@ pub struct SimpleSequenceBarrier {
 
 impl SimpleSequenceBarrier {
     /// Create a new simple sequence barrier
-    /// 
+    ///
     /// # Arguments
     /// * `cursor` - The cursor sequence to track
     /// * `wait_strategy` - The wait strategy to use
-    /// 
+    ///
     /// # Returns
     /// A new SimpleSequenceBarrier instance
     pub fn new(
@@ -225,14 +225,14 @@ impl SequenceBarrier for SimpleSequenceBarrier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::disruptor::{BlockingWaitStrategy, INITIAL_CURSOR_VALUE};
+    use crate::disruptor::BlockingWaitStrategy;
 
     #[test]
     fn test_processing_sequence_barrier() {
         let cursor = Arc::new(Sequence::new(10));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let dependent_sequences = vec![Arc::new(Sequence::new(5))];
-        
+
         let barrier = ProcessingSequenceBarrier::new(
             cursor.clone(),
             wait_strategy,
@@ -248,7 +248,7 @@ mod tests {
         assert!(!barrier.is_alerted());
         barrier.alert();
         assert!(barrier.is_alerted());
-        
+
         // Should fail when alerted
         let result = barrier.wait_for(15);
         assert!(result.is_err());
@@ -264,7 +264,7 @@ mod tests {
     fn test_simple_sequence_barrier() {
         let cursor = Arc::new(Sequence::new(10));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        
+
         let barrier = SimpleSequenceBarrier::new(cursor.clone(), wait_strategy);
 
         // Should be able to wait for a sequence that's already available
@@ -276,7 +276,7 @@ mod tests {
         assert!(!barrier.is_alerted());
         barrier.alert();
         assert!(barrier.is_alerted());
-        
+
         barrier.clear_alert();
         assert!(!barrier.is_alerted());
     }
@@ -285,10 +285,10 @@ mod tests {
     fn test_barrier_cursor_access() {
         let cursor = Arc::new(Sequence::new(42));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        
+
         let barrier = SimpleSequenceBarrier::new(cursor.clone(), wait_strategy);
         let barrier_cursor = barrier.get_cursor();
-        
+
         assert_eq!(barrier_cursor.get(), 42);
         assert!(Arc::ptr_eq(&cursor, &barrier_cursor));
     }

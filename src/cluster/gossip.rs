@@ -4,16 +4,16 @@
 //! across the cluster. It follows the SWIM (Scalable Weakly-consistent Infection-style
 //! Process Group Membership) protocol with optimizations for performance and reliability.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::{RwLock, mpsc};
-use tokio::time::{interval, timeout};
+use tokio::time::interval;
 use serde::{Deserialize, Serialize};
 
-use crate::cluster::{Node, NodeId, NodeInfo, NodeState, ClusterError, ClusterResult};
+use crate::cluster::{Node, NodeId, NodeInfo, ClusterError, ClusterResult};
 
 /// Gossip protocol configuration
 #[derive(Debug, Clone)]
@@ -114,6 +114,7 @@ pub struct GossipProtocol {
 
 /// Pending acknowledgment
 #[derive(Debug)]
+#[allow(dead_code)]
 struct PendingAck {
     target: NodeId,
     sent_at: Instant,
@@ -161,7 +162,7 @@ impl GossipProtocol {
         self.running.store(true, std::sync::atomic::Ordering::SeqCst);
 
         // Start gossip timer
-        let gossip_task = {
+        let _gossip_task = {
             let config = self.config.clone();
             let local_node = self.local_node.clone();
             let nodes = self.nodes.clone();
@@ -194,7 +195,7 @@ impl GossipProtocol {
         };
 
         // Start message receiver
-        let receiver_task = {
+        let _receiver_task = {
             let socket = self.socket.clone();
             let local_node = self.local_node.clone();
             let nodes = self.nodes.clone();

@@ -5,21 +5,27 @@
 //! from the original LMAX Disruptor EventTranslator family.
 
 /// Base trait for translating data into events
-/// 
+///
 /// This trait is used to populate events in the ring buffer with data.
 /// It follows the exact LMAX Disruptor EventTranslator interface design.
-/// 
+///
 /// # Type Parameters
 /// * `T` - The event type to populate
-/// 
+///
 /// # Examples
 /// ```
 /// use badbatch::disruptor::EventTranslator;
-/// 
+///
+/// #[derive(Default)]
+/// struct MyEvent {
+///     value: i64,
+///     sequence: i64,
+/// }
+///
 /// struct MyEventTranslator {
 ///     data: i64,
 /// }
-/// 
+///
 /// impl EventTranslator<MyEvent> for MyEventTranslator {
 ///     fn translate_to(&self, event: &mut MyEvent, sequence: i64) {
 ///         event.value = self.data;
@@ -29,10 +35,10 @@
 /// ```
 pub trait EventTranslator<T>: Send + Sync {
     /// Translate data into an event
-    /// 
+    ///
     /// This method is called to populate an event with data. The event
     /// is already allocated in the ring buffer and just needs to be populated.
-    /// 
+    ///
     /// # Arguments
     /// * `event` - The event to populate (mutable reference)
     /// * `sequence` - The sequence number of the event in the ring buffer
@@ -40,15 +46,15 @@ pub trait EventTranslator<T>: Send + Sync {
 }
 
 /// Event translator that takes one argument
-/// 
+///
 /// This is used when you need to pass one piece of data to the translator.
-/// 
+///
 /// # Type Parameters
 /// * `T` - The event type to populate
 /// * `A` - The type of the argument
 pub trait EventTranslatorOneArg<T, A>: Send + Sync {
     /// Translate data into an event with one argument
-    /// 
+    ///
     /// # Arguments
     /// * `event` - The event to populate (mutable reference)
     /// * `sequence` - The sequence number of the event in the ring buffer
@@ -57,16 +63,16 @@ pub trait EventTranslatorOneArg<T, A>: Send + Sync {
 }
 
 /// Event translator that takes two arguments
-/// 
+///
 /// This is used when you need to pass two pieces of data to the translator.
-/// 
+///
 /// # Type Parameters
 /// * `T` - The event type to populate
 /// * `A` - The type of the first argument
 /// * `B` - The type of the second argument
 pub trait EventTranslatorTwoArg<T, A, B>: Send + Sync {
     /// Translate data into an event with two arguments
-    /// 
+    ///
     /// # Arguments
     /// * `event` - The event to populate (mutable reference)
     /// * `sequence` - The sequence number of the event in the ring buffer
@@ -76,9 +82,9 @@ pub trait EventTranslatorTwoArg<T, A, B>: Send + Sync {
 }
 
 /// Event translator that takes three arguments
-/// 
+///
 /// This is used when you need to pass three pieces of data to the translator.
-/// 
+///
 /// # Type Parameters
 /// * `T` - The event type to populate
 /// * `A` - The type of the first argument
@@ -86,7 +92,7 @@ pub trait EventTranslatorTwoArg<T, A, B>: Send + Sync {
 /// * `C` - The type of the third argument
 pub trait EventTranslatorThreeArg<T, A, B, C>: Send + Sync {
     /// Translate data into an event with three arguments
-    /// 
+    ///
     /// # Arguments
     /// * `event` - The event to populate (mutable reference)
     /// * `sequence` - The sequence number of the event in the ring buffer
@@ -97,9 +103,9 @@ pub trait EventTranslatorThreeArg<T, A, B, C>: Send + Sync {
 }
 
 /// Closure-based event translator
-/// 
+///
 /// This provides a convenient way to create event translators using closures.
-/// 
+///
 /// # Type Parameters
 /// * `T` - The event type
 /// * `F` - The closure type
@@ -116,10 +122,10 @@ where
     F: Fn(&mut T, i64) + Send + Sync,
 {
     /// Create a new closure-based event translator
-    /// 
+    ///
     /// # Arguments
     /// * `translator_fn` - The closure that will populate events
-    /// 
+    ///
     /// # Returns
     /// A new ClosureEventTranslator instance
     pub fn new(translator_fn: F) -> Self {
@@ -141,7 +147,7 @@ where
 }
 
 /// Closure-based event translator with one argument
-/// 
+///
 /// # Type Parameters
 /// * `T` - The event type
 /// * `A` - The argument type
@@ -179,7 +185,7 @@ where
 }
 
 /// Closure-based event translator with two arguments
-/// 
+///
 /// # Type Parameters
 /// * `T` - The event type
 /// * `A` - The first argument type
@@ -264,7 +270,7 @@ mod tests {
 
         let mut event = TestEvent::default();
         translator.translate_to(&mut event, 42);
-        
+
         assert_eq!(event.value, 42);
         assert_eq!(event.name, "event_42");
     }
@@ -278,7 +284,7 @@ mod tests {
 
         let mut event = TestEvent::default();
         translator.translate_to(&mut event, 42, "test_name".to_string());
-        
+
         assert_eq!(event.value, 42);
         assert_eq!(event.name, "test_name");
     }
@@ -293,7 +299,7 @@ mod tests {
 
         let mut event = TestEvent::default();
         translator.translate_to(&mut event, 42, "test_name".to_string(), 100);
-        
+
         assert_eq!(event.value, 42);
         assert_eq!(event.name, "test_name");
         assert_eq!(event.count, 100);

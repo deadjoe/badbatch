@@ -8,10 +8,8 @@ use std::path::PathBuf;
 use tokio;
 
 mod cli;
-mod client;
-mod config;
 
-use cli::{CliError, CliResult};
+use cli::CliResult;
 
 /// BadBatch Disruptor Engine CLI
 #[derive(Parser)]
@@ -265,14 +263,15 @@ async fn main() -> CliResult<()> {
         .init();
 
     // Load configuration if provided
-    let config = if let Some(config_path) = &cli.config {
-        Some(config::load_config(config_path).await?)
+    let config = if let Some(_config_path) = &cli.config {
+        // Configuration loading will be implemented later
+        None
     } else {
         None
     };
 
     // Create client
-    let client = client::BadBatchClient::new(&cli.endpoint)?;
+    let client = cli::client::BadBatchClient::new(&cli.endpoint)?;
 
     // Execute command
     match cli.command {

@@ -214,7 +214,10 @@ mod tests {
     #[test]
     fn test_get_uptime_seconds() {
         let uptime = get_uptime_seconds();
-        assert!(uptime >= 0);
+        // uptime is u64, so it's always non-negative
+        // We just verify it doesn't panic and returns a valid value
+        // The function should work correctly
+        let _ = uptime; // Just verify it doesn't panic
     }
 
     #[test]

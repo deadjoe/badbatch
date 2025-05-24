@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::cluster::{NodeId, ClusterError, ClusterResult};
+use crate::cluster::{NodeId, ClusterResult};
 use crate::cluster::config::HealthConfig;
 
 /// Health status for cluster nodes
@@ -54,6 +54,7 @@ pub struct HealthCheckResult {
 /// Health checker
 pub struct HealthChecker {
     /// Configuration
+    #[allow(dead_code)]
     config: HealthConfig,
     /// Node health status
     node_health: Arc<RwLock<HashMap<NodeId, HealthCheckResult>>>,
@@ -96,11 +97,11 @@ impl HealthChecker {
     /// Check health of a node
     pub async fn check_node_health(&self, node_id: &NodeId) -> ClusterResult<HealthCheckResult> {
         let start_time = std::time::Instant::now();
-        
+
         // Placeholder health check - in real implementation would ping the node
         let status = HealthStatus::Healthy;
         let response_time = start_time.elapsed();
-        
+
         let result = HealthCheckResult {
             node_id: node_id.clone(),
             status,
