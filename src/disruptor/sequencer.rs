@@ -314,6 +314,34 @@ impl MultiProducerSequencer {
             index_mask: buffer_size - 1,
         }
     }
+
+    /// Calculate the index in the available buffer for a given sequence
+    /// This matches the LMAX Disruptor calculateIndex method
+    fn calculate_index(&self, sequence: i64) -> usize {
+        (sequence as usize) & self.index_mask
+    }
+
+    /// Calculate the availability flag for a given sequence
+    /// This matches the LMAX Disruptor calculateAvailabilityFlag method
+    fn calculate_availability_flag(&self, sequence: i64) -> i32 {
+        (sequence >> self.buffer_size.trailing_zeros()) as i32
+    }
+
+    /// Set a sequence as available for consumption
+    /// This matches the LMAX Disruptor setAvailable method
+    fn set_available(&self, sequence: i64) {
+        let index = self.calculate_index(sequence);
+        let flag = self.calculate_availability_flag(sequence);
+        self.available_buffer[index].store(flag, Ordering::Release);
+    }
+
+    /// Check if a sequence is available for consumption
+    /// This matches the LMAX Disruptor isAvailable method with proper flag checking
+    fn is_available_internal(&self, sequence: i64) -> bool {
+        let index = self.calculate_index(sequence);
+        let flag = self.calculate_availability_flag(sequence);
+        self.available_buffer[index].load(Ordering::Acquire) == flag
+    }
 }
 
 impl Sequencer for MultiProducerSequencer {
@@ -367,9 +395,8 @@ impl Sequencer for MultiProducerSequencer {
     }
 
     fn publish(&self, sequence: i64) {
-        // Mark the slot as available in the available buffer
-        let index = (sequence as usize) & self.index_mask;
-        self.available_buffer[index].store(sequence as i32, Ordering::Release);
+        // Use the proper LMAX Disruptor setAvailable method
+        self.set_available(sequence);
 
         // Signal waiting consumers
         self.wait_strategy.signal_all_when_blocking();
@@ -380,10 +407,8 @@ impl Sequencer for MultiProducerSequencer {
     }
 
     fn is_available(&self, sequence: i64) -> bool {
-        // Check if the sequence is available by examining the available buffer
-        let index = (sequence as usize) & self.index_mask;
-        let flag = self.available_buffer[index].load(Ordering::Acquire);
-        flag == sequence as i32
+        // Use the proper LMAX Disruptor isAvailable method with flag checking
+        self.is_available_internal(sequence)
     }
 
     fn get_highest_published_sequence(&self, next_sequence: i64, available_sequence: i64) -> i64 {
