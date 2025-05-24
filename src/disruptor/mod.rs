@@ -1,23 +1,76 @@
 //! BadBatch Disruptor Implementation
 //!
 //! This module provides a complete Rust implementation of the LMAX Disruptor pattern,
-//! designed for ultra-low latency inter-thread messaging with mechanical sympathy.
+//! strictly following the original design from https://github.com/LMAX-Exchange/disruptor
+//!
+//! ## Core Architecture
+//!
+//! The Disruptor pattern consists of the following key components:
+//!
+//! 1. **RingBuffer** - Pre-allocated circular buffer for events
+//! 2. **Sequence** - Atomic sequence counters for coordination
+//! 3. **Sequencer** - Coordinates access to the ring buffer (single/multi producer)
+//! 4. **EventHandler** - Processes events from the ring buffer
+//! 5. **EventProcessor** - Manages the event processing loop
+//! 6. **WaitStrategy** - Different strategies for waiting for events
+//! 7. **SequenceBarrier** - Coordination point for dependencies
+//! 8. **Disruptor** - Main DSL for configuring the system
+//!
+//! ## Design Principles
+//!
+//! - **Lock-free**: Uses only atomic operations and memory barriers
+//! - **Zero-allocation**: Pre-allocates all events during initialization
+//! - **Mechanical sympathy**: CPU cache-friendly data structures
+//! - **High throughput**: Batch processing and efficient algorithms
+//! - **Low latency**: Minimal overhead and predictable performance
 
+// Core sequence management
 pub mod sequence;
+
+// Ring buffer for event storage
 pub mod ring_buffer;
+
+// Event handling interfaces
+pub mod event_handler;
+pub mod event_factory;
+pub mod event_translator;
+
+// Sequencer implementations
 pub mod sequencer;
+
+// Wait strategies
 pub mod wait_strategy;
+
+// Event processing
 pub mod event_processor;
+
+// Sequence barriers for coordination
 pub mod sequence_barrier;
 
+// Exception handling
+pub mod exception_handler;
+
+// Producer types
+pub mod producer_type;
+
+// Main Disruptor DSL
+pub mod disruptor;
+
+// Re-export core types for convenience
 pub use sequence::Sequence;
-pub use ring_buffer::{RingBuffer, SharedRingBuffer};
+pub use ring_buffer::RingBuffer;
+pub use event_handler::{EventHandler, NoOpEventHandler};
+pub use event_factory::{EventFactory, DefaultEventFactory};
+pub use event_translator::{EventTranslator, EventTranslatorOneArg, EventTranslatorTwoArg, EventTranslatorThreeArg};
 pub use sequencer::{Sequencer, SingleProducerSequencer, MultiProducerSequencer};
 pub use wait_strategy::{WaitStrategy, BlockingWaitStrategy, YieldingWaitStrategy, BusySpinWaitStrategy, SleepingWaitStrategy};
-pub use event_processor::{EventProcessor, BatchEventProcessor};
-pub use sequence_barrier::SequenceBarrier;
+pub use event_processor::{EventProcessor, BatchEventProcessor, DataProvider};
+pub use sequence_barrier::{SequenceBarrier, ProcessingSequenceBarrier};
+pub use exception_handler::{ExceptionHandler, DefaultExceptionHandler};
+pub use producer_type::ProducerType;
+pub use disruptor::Disruptor;
 
-/// The initial cursor value for sequences
+/// The initial cursor value for sequences (matches LMAX Disruptor)
 pub const INITIAL_CURSOR_VALUE: i64 = -1;
 
 /// Errors that can occur in the Disruptor
@@ -37,27 +90,16 @@ pub enum DisruptorError {
 
     #[error("Disruptor has been shut down")]
     Shutdown,
+
+    #[error("Insufficient capacity")]
+    InsufficientCapacity,
+
+    #[error("Alert exception")]
+    Alert,
 }
 
+/// Result type for Disruptor operations
 pub type Result<T> = std::result::Result<T, DisruptorError>;
-
-/// Trait for events that can be processed by the Disruptor
-pub trait Event: Send + Sync + 'static {
-    /// Clear the event data (for memory management)
-    fn clear(&mut self);
-}
-
-/// Factory for creating events
-pub trait EventFactory<T: Event>: Send + Sync {
-    /// Create a new event instance
-    fn new_instance(&self) -> T;
-}
-
-/// Handler for processing events
-pub trait EventHandler<T: Event>: Send + Sync {
-    /// Process an event
-    fn on_event(&mut self, event: &mut T, sequence: i64, end_of_batch: bool) -> Result<()>;
-}
 
 /// Utility function to check if a number is a power of 2
 pub fn is_power_of_two(n: usize) -> bool {

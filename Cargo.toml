@@ -3,55 +3,69 @@ name = "badbatch"
 version = "0.1.0"
 edition = "2021"
 authors = ["BadBatch Team"]
-description = "High-performance data processing engine with Disruptor-style queue implementation"
-license = "Apache-2.0"
+description = "High-Performance Disruptor Engine - A complete Rust implementation of the LMAX Disruptor pattern"
+license = "MIT"
 repository = "https://github.com/deadjoe/badbatch"
-keywords = ["disruptor", "queue", "performance", "concurrent", "lock-free"]
+keywords = ["disruptor", "lock-free", "high-performance", "messaging", "queue"]
 categories = ["concurrency", "data-structures", "network-programming"]
 
-[dependencies]
-# Async runtime and HTTP server
-tokio = { version = "1.0", features = ["full"] }
-axum = "0.7"
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+[lib]
+name = "badbatch"
+path = "src/lib.rs"
 
-# Serialization
+[[bin]]
+name = "badbatch"
+path = "src/bin/badbatch.rs"
+
+[dependencies]
+# Core dependencies
+tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-
-# Logging and tracing
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Networking and clustering
-uuid = { version = "1.0", features = ["v4", "serde"] }
-rand = "0.8"
-
-# Memory management and atomics
-crossbeam-utils = "0.8"
-parking_lot = "0.12"
-
-# Error handling
+tracing-subscriber = "0.3"
 anyhow = "1.0"
 thiserror = "1.0"
 
-# Configuration
+# CLI and configuration
 clap = { version = "4.0", features = ["derive"] }
+env_logger = "0.10"
+tabled = "0.15"
+indicatif = "0.17"
+url = "2.0"
+serde_yaml = "0.9"
+
+# Async and networking (for future REST API)
+axum = "0.7"
+reqwest = { version = "0.11", features = ["json"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Synchronization primitives
+parking_lot = "0.12"
+chrono = { version = "0.4.41", features = ["serde"] }
+tower = "0.5.2"
+tower-http = { version = "0.6.4", features = ["cors", "trace", "timeout", "limit"] }
 
 [dev-dependencies]
+# Testing and benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
 tokio-test = "0.4"
-reqwest = { version = "0.11", features = ["json"] }
 
-[[bench]]
-name = "disruptor_bench"
-harness = false
+# Benchmarks will be added later
+# [[bench]]
+# name = "disruptor_bench"
+# harness = false
 
 [profile.release]
+# Optimize for performance
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
 
 [profile.bench]
+# Optimize benchmarks
+opt-level = 3
+lto = true
+codegen-units = 1
 debug = true

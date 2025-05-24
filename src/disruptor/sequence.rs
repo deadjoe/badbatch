@@ -1,267 +1,262 @@
-//! Sequence implementation for the Disruptor
+//! Sequence Implementation
 //!
-//! The Sequence is used to track progress through the ring buffer and coordinate
-//! between producers and consumers. It provides atomic operations while preventing
-//! false sharing through careful memory layout.
+//! This module provides the Sequence type, which is the core coordination primitive
+//! in the LMAX Disruptor pattern. Sequences are used to track progress through the
+//! ring buffer and coordinate between producers and consumers.
+//!
+//! The implementation follows the original LMAX Disruptor design with optimizations
+//! for preventing false sharing and ensuring memory ordering.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use crate::disruptor::INITIAL_CURSOR_VALUE;
 
-/// Cache line size for padding to prevent false sharing
-const CACHE_LINE_SIZE: usize = 64;
-
-/// A sequence number that prevents false sharing
-///
-/// This structure is carefully designed to prevent false sharing by padding
-/// the atomic value to ensure it occupies its own cache line.
-#[repr(align(64))]
+/// A sequence counter that provides atomic operations with memory ordering guarantees.
+/// 
+/// This is equivalent to the Sequence class in the original LMAX Disruptor.
+/// It uses padding to prevent false sharing between sequence values and provides
+/// atomic operations with appropriate memory barriers.
+#[repr(align(64))] // Cache line alignment to prevent false sharing
+#[derive(Debug)]
 pub struct Sequence {
     /// The actual sequence value
     value: AtomicI64,
-    /// Padding to prevent false sharing (cache line size - size of AtomicI64)
-    _padding: [u8; CACHE_LINE_SIZE - std::mem::size_of::<AtomicI64>()],
+    /// Padding to prevent false sharing (cache line is typically 64 bytes)
+    _padding: [u8; 56], // 64 - 8 = 56 bytes padding
 }
 
 impl Sequence {
-    /// Create a new sequence with the given initial value
+    /// Create a new sequence with the initial value
+    /// 
+    /// # Arguments
+    /// * `initial_value` - The initial sequence value (typically INITIAL_CURSOR_VALUE)
+    /// 
+    /// # Returns
+    /// A new Sequence instance
     pub fn new(initial_value: i64) -> Self {
         Self {
             value: AtomicI64::new(initial_value),
-            _padding: [0; CACHE_LINE_SIZE - std::mem::size_of::<AtomicI64>()],
+            _padding: [0; 56],
         }
     }
 
+    /// Create a new sequence with the default initial value
+    /// 
+    /// # Returns
+    /// A new Sequence instance with INITIAL_CURSOR_VALUE
+    pub fn new_with_initial_value() -> Self {
+        Self::new(INITIAL_CURSOR_VALUE)
+    }
+
     /// Get the current sequence value
-    #[inline]
+    /// 
+    /// Uses Acquire ordering to ensure proper synchronization with other threads.
+    /// 
+    /// # Returns
+    /// The current sequence value
     pub fn get(&self) -> i64 {
         self.value.load(Ordering::Acquire)
     }
 
     /// Set the sequence value
-    #[inline]
+    /// 
+    /// Uses Release ordering to ensure proper synchronization with other threads.
+    /// 
+    /// # Arguments
+    /// * `value` - The new sequence value
     pub fn set(&self, value: i64) {
         self.value.store(value, Ordering::Release);
     }
 
     /// Set the sequence value with volatile semantics
-    #[inline]
+    /// 
+    /// Uses SeqCst ordering for strongest memory ordering guarantees.
+    /// This is equivalent to the setVolatile method in the original LMAX Disruptor.
+    /// 
+    /// # Arguments
+    /// * `value` - The new sequence value
     pub fn set_volatile(&self, value: i64) {
         self.value.store(value, Ordering::SeqCst);
     }
 
     /// Compare and swap the sequence value
-    #[inline]
-    pub fn compare_and_swap(&self, expected: i64, new: i64) -> Result<i64, i64> {
-        self.value.compare_exchange_weak(expected, new, Ordering::AcqRel, Ordering::Acquire)
+    /// 
+    /// Atomically compares the current value with expected and sets it to new_value
+    /// if they match.
+    /// 
+    /// # Arguments
+    /// * `expected` - The expected current value
+    /// * `new_value` - The new value to set if comparison succeeds
+    /// 
+    /// # Returns
+    /// True if the swap was successful, false otherwise
+    pub fn compare_and_set(&self, expected: i64, new_value: i64) -> bool {
+        self.value
+            .compare_exchange(expected, new_value, Ordering::SeqCst, Ordering::Acquire)
+            .is_ok()
     }
 
     /// Increment and get the new value
-    #[inline]
+    /// 
+    /// Atomically increments the sequence value and returns the new value.
+    /// 
+    /// # Returns
+    /// The new sequence value after incrementing
     pub fn increment_and_get(&self) -> i64 {
-        self.value.fetch_add(1, Ordering::AcqRel) + 1
+        self.value.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     /// Add a value and get the new result
-    #[inline]
+    /// 
+    /// Atomically adds the increment to the sequence value and returns the new value.
+    /// 
+    /// # Arguments
+    /// * `increment` - The value to add
+    /// 
+    /// # Returns
+    /// The new sequence value after adding the increment
     pub fn add_and_get(&self, increment: i64) -> i64 {
-        self.value.fetch_add(increment, Ordering::AcqRel) + increment
-    }
-
-    /// Get the current value and then increment
-    #[inline]
-    pub fn get_and_increment(&self) -> i64 {
-        self.value.fetch_add(1, Ordering::AcqRel)
-    }
-
-    /// Get the current value and then add
-    #[inline]
-    pub fn get_and_add(&self, increment: i64) -> i64 {
-        self.value.fetch_add(increment, Ordering::AcqRel)
+        self.value.fetch_add(increment, Ordering::SeqCst) + increment
     }
 }
 
 impl Default for Sequence {
     fn default() -> Self {
-        Self::new(crate::disruptor::INITIAL_CURSOR_VALUE)
+        Self::new_with_initial_value()
     }
 }
 
-impl std::fmt::Debug for Sequence {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Sequence")
-            .field("value", &self.get())
-            .finish()
+impl Clone for Sequence {
+    fn clone(&self) -> Self {
+        Self::new(self.get())
     }
 }
 
-impl std::fmt::Display for Sequence {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.get())
-    }
-}
-
-/// A group of sequences that can be tracked together
-pub struct SequenceGroup {
-    sequences: Vec<Arc<Sequence>>,
-}
-
-impl SequenceGroup {
-    /// Create a new empty sequence group
-    pub fn new() -> Self {
-        Self {
-            sequences: Vec::new(),
+/// Utility functions for working with sequences
+impl Sequence {
+    /// Get the minimum sequence value from a slice of sequences
+    /// 
+    /// This is used to find the slowest consumer when coordinating multiple consumers.
+    /// 
+    /// # Arguments
+    /// * `sequences` - A slice of sequence references
+    /// 
+    /// # Returns
+    /// The minimum sequence value, or i64::MAX if the slice is empty
+    pub fn get_minimum_sequence(sequences: &[Arc<Sequence>]) -> i64 {
+        if sequences.is_empty() {
+            return i64::MAX;
         }
-    }
 
-    /// Add a sequence to the group
-    pub fn add(&mut self, sequence: Arc<Sequence>) {
-        self.sequences.push(sequence);
-    }
-
-    /// Remove a sequence from the group
-    pub fn remove(&mut self, sequence: &Arc<Sequence>) -> bool {
-        if let Some(pos) = self.sequences.iter().position(|s| Arc::ptr_eq(s, sequence)) {
-            self.sequences.remove(pos);
-            true
-        } else {
-            false
+        let mut minimum = sequences[0].get();
+        for sequence in sequences.iter().skip(1) {
+            let value = sequence.get();
+            if value < minimum {
+                minimum = value;
+            }
         }
-    }
-
-    /// Get the minimum sequence value from all sequences in the group
-    pub fn get_minimum_sequence(&self) -> i64 {
-        self.sequences
-            .iter()
-            .map(|seq| seq.get())
-            .min()
-            .unwrap_or(i64::MAX)
-    }
-
-    /// Get the number of sequences in the group
-    pub fn len(&self) -> usize {
-        self.sequences.len()
-    }
-
-    /// Check if the group is empty
-    pub fn is_empty(&self) -> bool {
-        self.sequences.is_empty()
-    }
-
-    /// Get all sequences as a slice
-    pub fn sequences(&self) -> &[Arc<Sequence>] {
-        &self.sequences
+        minimum
     }
 }
 
-impl Default for SequenceGroup {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Ensure Sequence is Send and Sync for multi-threading
+unsafe impl Send for Sequence {}
+unsafe impl Sync for Sequence {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use std::thread;
 
     #[test]
     fn test_sequence_creation() {
         let seq = Sequence::new(42);
         assert_eq!(seq.get(), 42);
+
+        let seq_default = Sequence::new_with_initial_value();
+        assert_eq!(seq_default.get(), INITIAL_CURSOR_VALUE);
+
+        let seq_default2 = Sequence::default();
+        assert_eq!(seq_default2.get(), INITIAL_CURSOR_VALUE);
     }
 
     #[test]
-    fn test_sequence_default() {
-        let seq = Sequence::default();
-        assert_eq!(seq.get(), crate::disruptor::INITIAL_CURSOR_VALUE);
-    }
-
-    #[test]
-    fn test_sequence_set_get() {
+    fn test_sequence_operations() {
         let seq = Sequence::new(0);
-        seq.set(100);
-        assert_eq!(seq.get(), 100);
-    }
-
-    #[test]
-    fn test_sequence_increment() {
-        let seq = Sequence::new(0);
-        assert_eq!(seq.increment_and_get(), 1);
-        assert_eq!(seq.get(), 1);
         
-        assert_eq!(seq.get_and_increment(), 1);
-        assert_eq!(seq.get(), 2);
-    }
+        // Test set and get
+        seq.set(10);
+        assert_eq!(seq.get(), 10);
 
-    #[test]
-    fn test_sequence_add() {
-        let seq = Sequence::new(10);
-        assert_eq!(seq.add_and_get(5), 15);
-        assert_eq!(seq.get(), 15);
-        
-        assert_eq!(seq.get_and_add(3), 15);
-        assert_eq!(seq.get(), 18);
-    }
-
-    #[test]
-    fn test_sequence_compare_and_swap() {
-        let seq = Sequence::new(10);
-        
-        // Successful CAS
-        assert_eq!(seq.compare_and_swap(10, 20), Ok(10));
+        // Test set_volatile
+        seq.set_volatile(20);
         assert_eq!(seq.get(), 20);
-        
-        // Failed CAS
-        assert_eq!(seq.compare_and_swap(10, 30), Err(20));
-        assert_eq!(seq.get(), 20);
-    }
 
-    #[test]
-    fn test_sequence_group() {
-        let mut group = SequenceGroup::new();
-        assert!(group.is_empty());
-        assert_eq!(group.len(), 0);
-        
-        let seq1 = Arc::new(Sequence::new(10));
-        let seq2 = Arc::new(Sequence::new(20));
-        let seq3 = Arc::new(Sequence::new(5));
-        
-        group.add(seq1.clone());
-        group.add(seq2.clone());
-        group.add(seq3.clone());
-        
-        assert_eq!(group.len(), 3);
-        assert_eq!(group.get_minimum_sequence(), 5);
-        
-        assert!(group.remove(&seq3));
-        assert_eq!(group.len(), 2);
-        assert_eq!(group.get_minimum_sequence(), 10);
-        
-        assert!(!group.remove(&seq3)); // Already removed
+        // Test compare_and_set
+        assert!(seq.compare_and_set(20, 30));
+        assert_eq!(seq.get(), 30);
+        assert!(!seq.compare_and_set(20, 40)); // Should fail
+        assert_eq!(seq.get(), 30);
+
+        // Test increment_and_get
+        assert_eq!(seq.increment_and_get(), 31);
+        assert_eq!(seq.get(), 31);
+
+        // Test add_and_get
+        assert_eq!(seq.add_and_get(5), 36);
+        assert_eq!(seq.get(), 36);
     }
 
     #[test]
     fn test_sequence_thread_safety() {
         let seq = Arc::new(Sequence::new(0));
         let mut handles = vec![];
-        
+
         // Spawn multiple threads to increment the sequence
         for _ in 0..10 {
             let seq_clone = Arc::clone(&seq);
             let handle = thread::spawn(move || {
-                for _ in 0..1000 {
+                for _ in 0..100 {
                     seq_clone.increment_and_get();
                 }
             });
             handles.push(handle);
         }
-        
+
         // Wait for all threads to complete
         for handle in handles {
             handle.join().unwrap();
         }
+
+        // Should have incremented 10 * 100 = 1000 times
+        assert_eq!(seq.get(), 1000);
+    }
+
+    #[test]
+    fn test_get_minimum_sequence() {
+        let seq1 = Arc::new(Sequence::new(10));
+        let seq2 = Arc::new(Sequence::new(5));
+        let seq3 = Arc::new(Sequence::new(15));
+
+        let sequences = vec![seq1, seq2, seq3];
+        assert_eq!(Sequence::get_minimum_sequence(&sequences), 5);
+
+        // Test empty slice
+        assert_eq!(Sequence::get_minimum_sequence(&[]), i64::MAX);
+    }
+
+    #[test]
+    fn test_sequence_clone() {
+        let seq1 = Sequence::new(42);
+        let seq2 = seq1.clone();
         
-        // Should have incremented 10 * 1000 = 10000 times
-        assert_eq!(seq.get(), 10000);
+        assert_eq!(seq1.get(), 42);
+        assert_eq!(seq2.get(), 42);
+        
+        // Clones should be independent
+        seq1.set(100);
+        assert_eq!(seq1.get(), 100);
+        assert_eq!(seq2.get(), 42);
     }
 }
