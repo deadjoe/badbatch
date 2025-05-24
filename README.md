@@ -1,11 +1,13 @@
-# BadBatch Disruptor Engine
+<div align="center">
+  <img src="badbatch.png" alt="BadBatch Logo" width="200" height="200">
 
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/deadjoe/badbatch/ci.yml?branch=main)](https://github.com/deadjoe/badbatch/actions)
-[![Coverage](https://img.shields.io/badge/coverage-98.3%25-brightgreen.svg)](https://github.com/deadjoe/badbatch)
-[![Crates.io](https://img.shields.io/crates/v/badbatch.svg)](https://crates.io/crates/badbatch)
-[![Documentation](https://docs.rs/badbatch/badge.svg)](https://docs.rs/badbatch)
+  # BadBatch Disruptor Engine
+
+  [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+  [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
+  [![Coverage](https://img.shields.io/badge/coverage-98.3%25-brightgreen.svg)](https://github.com/deadjoe/badbatch)
+
+</div>
 
 > A high-performance, distributed disruptor engine written in Rust, based on the LMAX Disruptor pattern with modern distributed systems capabilities.
 
