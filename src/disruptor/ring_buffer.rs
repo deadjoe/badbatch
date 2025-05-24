@@ -170,6 +170,84 @@ where
     pub fn free_slots(&self, producer_sequence: i64, consumer_sequence: i64) -> i64 {
         self.size() - (producer_sequence - consumer_sequence)
     }
+
+    /// Create a batch iterator for mutable access to a range of events
+    ///
+    /// This follows the disruptor-rs pattern for batch processing
+    ///
+    /// # Arguments
+    /// * `start` - The starting sequence (inclusive)
+    /// * `end` - The ending sequence (inclusive)
+    ///
+    /// # Returns
+    /// A batch iterator for mutable access to events
+    ///
+    /// # Safety
+    /// The caller must ensure exclusive access to the specified range
+    pub unsafe fn batch_iter_mut(&self, start: i64, end: i64) -> BatchIterMut<T>
+    where
+        T: Send + Sync,
+    {
+        BatchIterMut::new(start, end, self)
+    }
+}
+
+/// Iterator for batch mutable access to events (inspired by disruptor-rs)
+pub struct BatchIterMut<'a, T>
+where
+    T: Send + Sync,
+{
+    ring_buffer: &'a RingBuffer<T>,
+    current: i64,
+    last: i64,
+}
+
+impl<'a, T> BatchIterMut<'a, T>
+where
+    T: Send + Sync,
+{
+    fn new(start: i64, end: i64, ring_buffer: &'a RingBuffer<T>) -> Self {
+        Self {
+            ring_buffer,
+            current: start,
+            last: end,
+        }
+    }
+
+    fn remaining(&self) -> usize {
+        (self.last - self.current + 1) as usize
+    }
+}
+
+impl<'a, T> Iterator for BatchIterMut<'a, T>
+where
+    T: Send + Sync,
+{
+    type Item = &'a mut T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current > self.last {
+            None
+        } else {
+            // SAFETY: Iterator has exclusive access to event range
+            let event_ptr = unsafe { self.ring_buffer.get_mut_unchecked(self.current) };
+            let event = unsafe { &mut *event_ptr };
+            self.current += 1;
+            Some(event)
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.remaining();
+        (remaining, Some(remaining))
+    }
+
+    fn count(self) -> usize
+    where
+        Self: Sized,
+    {
+        self.remaining()
+    }
 }
 
 // Ensure RingBuffer is Send and Sync for multi-threading
