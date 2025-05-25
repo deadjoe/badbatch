@@ -164,4 +164,139 @@ pub mod format {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_error_constructors() {
+        // Test config error
+        let config_err = CliError::config("Invalid configuration");
+        assert!(matches!(config_err, CliError::Config { .. }));
+        assert_eq!(config_err.to_string(), "Configuration error: Invalid configuration");
+
+        // Test validation error
+        let validation_err = CliError::validation("Invalid input");
+        assert!(matches!(validation_err, CliError::Validation { .. }));
+        assert_eq!(validation_err.to_string(), "Validation error: Invalid input");
+
+        // Test server error
+        let server_err = CliError::server(404, "Not found".to_string());
+        assert!(matches!(server_err, CliError::Server { .. }));
+        assert_eq!(server_err.to_string(), "Server error: 404 - Not found");
+
+        // Test not found error
+        let not_found_err = CliError::not_found("resource");
+        assert!(matches!(not_found_err, CliError::NotFound { .. }));
+        assert_eq!(not_found_err.to_string(), "Not found: resource");
+
+        // Test invalid input error
+        let invalid_input_err = CliError::invalid_input("bad input");
+        assert!(matches!(invalid_input_err, CliError::InvalidInput { .. }));
+        assert_eq!(invalid_input_err.to_string(), "Invalid input: bad input");
+
+        // Test operation error
+        let operation_err = CliError::operation("operation failed");
+        assert!(matches!(operation_err, CliError::Operation { .. }));
+        assert_eq!(operation_err.to_string(), "Operation failed: operation failed");
+
+        // Test network error
+        let network_err = CliError::network("connection failed");
+        assert!(matches!(network_err, CliError::Network { .. }));
+        assert_eq!(network_err.to_string(), "Network error: connection failed");
+
+        // Test timeout error
+        let timeout_err = CliError::timeout(30);
+        assert!(matches!(timeout_err, CliError::Timeout { .. }));
+        assert_eq!(timeout_err.to_string(), "Timeout error: operation timed out after 30s");
+    }
+
+    #[test]
+    fn test_cli_error_from_conversions() {
+        // Test from serde_json::Error
+        let json_err = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
+        let cli_err: CliError = json_err.into();
+        assert!(matches!(cli_err, CliError::Json(_)));
+
+        // Test from std::io::Error
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let cli_err: CliError = io_err.into();
+        assert!(matches!(cli_err, CliError::Io(_)));
+
+        // Test from url::ParseError
+        let url_err = url::Url::parse("invalid url").unwrap_err();
+        let cli_err: CliError = url_err.into();
+        assert!(matches!(cli_err, CliError::UrlError(_)));
+    }
+
+    mod format_tests {
+        use super::*;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize)]
+        struct TestData {
+            name: String,
+            value: i32,
+        }
+
+        #[test]
+        fn test_format_output_json() {
+            let data = TestData {
+                name: "test".to_string(),
+                value: 42,
+            };
+
+            let result = format::format_output(&data, "json").unwrap();
+            assert!(result.contains("\"name\": \"test\""));
+            assert!(result.contains("\"value\": 42"));
+        }
+
+        #[test]
+        fn test_format_output_yaml() {
+            let data = TestData {
+                name: "test".to_string(),
+                value: 42,
+            };
+
+            let result = format::format_output(&data, "yaml").unwrap();
+            assert!(result.contains("name: test"));
+            assert!(result.contains("value: 42"));
+        }
+
+        #[test]
+        fn test_format_output_table() {
+            let data = TestData {
+                name: "test".to_string(),
+                value: 42,
+            };
+
+            // Table format falls back to JSON for now
+            let result = format::format_output(&data, "table").unwrap();
+            assert!(result.contains("\"name\": \"test\""));
+        }
+
+        #[test]
+        fn test_format_output_unsupported() {
+            let data = TestData {
+                name: "test".to_string(),
+                value: 42,
+            };
+
+            let result = format::format_output(&data, "xml");
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("Unsupported format"));
+        }
+
+        #[test]
+        fn test_format_item() {
+            let data = TestData {
+                name: "test".to_string(),
+                value: 42,
+            };
+
+            let result = format::format_item(&data, "json").unwrap();
+            assert!(result.contains("\"name\": \"test\""));
+        }
+    }
+}
 

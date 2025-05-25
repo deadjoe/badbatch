@@ -113,7 +113,12 @@ pub fn format_duration(duration: Duration) -> String {
     } else if total_seconds < 86400 {
         let hours = total_seconds / 3600;
         let minutes = (total_seconds % 3600) / 60;
-        format!("{}h {}m", hours, minutes)
+        let seconds = total_seconds % 60;
+        if seconds > 0 {
+            format!("{}h {}m {}s", hours, minutes, seconds)
+        } else {
+            format!("{}h {}m", hours, minutes)
+        }
     } else {
         let days = total_seconds / 86400;
         let hours = (total_seconds % 86400) / 3600;
@@ -213,7 +218,8 @@ mod tests {
     fn test_format_duration() {
         assert_eq!(format_duration(Duration::from_secs(30)), "30s");
         assert_eq!(format_duration(Duration::from_secs(90)), "1m 30s");
-        assert_eq!(format_duration(Duration::from_secs(3661)), "1h 1m");
+        assert_eq!(format_duration(Duration::from_secs(3600)), "1h 0m");
+        assert_eq!(format_duration(Duration::from_secs(3661)), "1h 1m 1s");
     }
 
     #[test]

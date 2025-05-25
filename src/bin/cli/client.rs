@@ -11,6 +11,7 @@ use url::Url;
 use crate::cli::{CliError, CliResult};
 
 /// BadBatch HTTP client
+#[derive(Debug)]
 pub struct BadBatchClient {
     client: Client,
     base_url: Url,
@@ -283,4 +284,160 @@ pub struct DisruptorHealth {
     pub healthy: bool,
     pub last_check: String,
     pub issues: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_client_creation() {
+        // Test valid URL
+        let client = BadBatchClient::new("http://localhost:8080");
+        assert!(client.is_ok());
+
+        // Test invalid URL
+        let client = BadBatchClient::new("invalid-url");
+        assert!(client.is_err());
+        assert!(matches!(client.unwrap_err(), CliError::InvalidInput { .. }));
+    }
+
+    #[test]
+    fn test_request_structs_serialization() {
+        // Test CreateDisruptorRequest
+        let create_req = CreateDisruptorRequest {
+            name: "test-disruptor".to_string(),
+            buffer_size: 1024,
+            producer_type: "single".to_string(),
+            wait_strategy: "blocking".to_string(),
+        };
+        let json = serde_json::to_string(&create_req).unwrap();
+        assert!(json.contains("test-disruptor"));
+        assert!(json.contains("1024"));
+
+        // Test PublishEventRequest
+        let mut metadata = HashMap::new();
+        metadata.insert("key".to_string(), "value".to_string());
+
+        let publish_req = PublishEventRequest {
+            data: serde_json::json!({"message": "test"}),
+            metadata: Some(metadata),
+        };
+        let json = serde_json::to_string(&publish_req).unwrap();
+        assert!(json.contains("test"));
+        assert!(json.contains("key"));
+
+        // Test PublishBatchRequest
+        let event_data = EventData {
+            data: serde_json::json!({"id": 1}),
+            metadata: None,
+        };
+        let batch_req = PublishBatchRequest {
+            events: vec![event_data],
+        };
+        let json = serde_json::to_string(&batch_req).unwrap();
+        assert!(json.contains("events"));
+    }
+
+    #[test]
+    fn test_response_structs_deserialization() {
+        // Test HealthResponse
+        let health_json = r#"{
+            "status": "healthy",
+            "timestamp": "2023-01-01T00:00:00Z",
+            "version": "1.0.0"
+        }"#;
+        let health: HealthResponse = serde_json::from_str(health_json).unwrap();
+        assert_eq!(health.status, "healthy");
+        assert_eq!(health.version, "1.0.0");
+
+        // Test SystemMetrics
+        let metrics_json = r#"{
+            "uptime_seconds": 3600,
+            "memory_usage_bytes": 1048576,
+            "cpu_usage_percent": 25.5,
+            "active_disruptors": 2,
+            "total_events_processed": 1000
+        }"#;
+        let metrics: SystemMetrics = serde_json::from_str(metrics_json).unwrap();
+        assert_eq!(metrics.uptime_seconds, 3600);
+        assert_eq!(metrics.active_disruptors, 2);
+
+        // Test DisruptorInfo
+        let disruptor_json = r#"{
+            "id": "test-id",
+            "name": "test-disruptor",
+            "buffer_size": 1024,
+            "producer_type": "single",
+            "wait_strategy": "blocking",
+            "status": "running",
+            "created_at": "2023-01-01T00:00:00Z"
+        }"#;
+        let disruptor: DisruptorInfo = serde_json::from_str(disruptor_json).unwrap();
+        assert_eq!(disruptor.id, "test-id");
+        assert_eq!(disruptor.buffer_size, 1024);
+
+        // Test PublishResponse
+        let publish_json = r#"{
+            "sequence": 42,
+            "timestamp": "2023-01-01T00:00:00Z"
+        }"#;
+        let publish: PublishResponse = serde_json::from_str(publish_json).unwrap();
+        assert_eq!(publish.sequence, 42);
+
+        // Test DisruptorMetrics
+        let metrics_json = r#"{
+            "events_processed": 1000,
+            "events_per_second": 100.5,
+            "buffer_utilization": 0.75,
+            "producer_count": 1,
+            "consumer_count": 2,
+            "last_sequence": 999
+        }"#;
+        let metrics: DisruptorMetrics = serde_json::from_str(metrics_json).unwrap();
+        assert_eq!(metrics.events_processed, 1000);
+        assert_eq!(metrics.producer_count, 1);
+    }
+
+    #[test]
+    fn test_event_data_creation() {
+        let mut metadata = HashMap::new();
+        metadata.insert("source".to_string(), "test".to_string());
+
+        let event = EventData {
+            data: serde_json::json!({"message": "hello"}),
+            metadata: Some(metadata),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("hello"));
+        assert!(json.contains("source"));
+    }
+
+    #[test]
+    fn test_disruptor_health_deserialization() {
+        let health_json = r#"{
+            "status": "healthy",
+            "healthy": true,
+            "last_check": "2023-01-01T00:00:00Z",
+            "issues": []
+        }"#;
+        let health: DisruptorHealth = serde_json::from_str(health_json).unwrap();
+        assert_eq!(health.status, "healthy");
+        assert!(health.healthy);
+        assert!(health.issues.is_empty());
+
+        // Test with issues
+        let health_with_issues_json = r#"{
+            "status": "degraded",
+            "healthy": false,
+            "last_check": "2023-01-01T00:00:00Z",
+            "issues": ["High latency", "Memory pressure"]
+        }"#;
+        let health: DisruptorHealth = serde_json::from_str(health_with_issues_json).unwrap();
+        assert_eq!(health.status, "degraded");
+        assert!(!health.healthy);
+        assert_eq!(health.issues.len(), 2);
+    }
 }

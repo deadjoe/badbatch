@@ -290,3 +290,229 @@ impl From<DisruptorMetrics> for DisruptorMetricsRow {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn create_test_system_metrics() -> SystemMetrics {
+        SystemMetrics {
+            uptime_seconds: 3600,
+            memory_usage_bytes: 1048576,
+            cpu_usage_percent: 25.5,
+            active_disruptors: 2,
+            total_events_processed: 1000,
+        }
+    }
+
+    fn create_test_disruptor_metrics() -> DisruptorMetrics {
+        DisruptorMetrics {
+            events_processed: 500,
+            events_per_second: 100.5,
+            buffer_utilization: 0.75,
+            producer_count: 1,
+            consumer_count: 2,
+            last_sequence: 499,
+        }
+    }
+
+    #[test]
+    fn test_system_metrics_row_conversion() {
+        let metrics = create_test_system_metrics();
+        let row = SystemMetricsRow::from(metrics);
+
+        assert_eq!(row.uptime, "1h 0m");
+        assert_eq!(row.memory, "1.0 MB");
+        assert_eq!(row.cpu, "25.5%");
+        assert_eq!(row.disruptors, "2");
+        assert_eq!(row.events, "1000");
+    }
+
+    #[test]
+    fn test_disruptor_metrics_row_conversion() {
+        let metrics = create_test_disruptor_metrics();
+        let row = DisruptorMetricsRow::from(metrics);
+
+        assert_eq!(row.events_processed, "500");
+        assert_eq!(row.events_per_second, "100.50");
+        assert_eq!(row.buffer_utilization, "75.0%");
+        assert_eq!(row.producers, "1");
+        assert_eq!(row.consumers, "2");
+        assert_eq!(row.last_sequence, "499");
+    }
+
+    #[test]
+    fn test_export_to_csv() {
+        let data = serde_json::json!({
+            "timestamp": "2023-01-01T00:00:00Z",
+            "system_metrics": {
+                "uptime_seconds": 3600,
+                "memory_usage_bytes": 1048576,
+                "cpu_usage_percent": 25.5
+            }
+        });
+
+        let csv = export_to_csv(&data).unwrap();
+
+        assert!(csv.contains("metric_type,metric_name,value,timestamp"));
+        assert!(csv.contains("system,uptime_seconds,3600"));
+        assert!(csv.contains("system,memory_usage_bytes,1048576"));
+        assert!(csv.contains("system,cpu_usage_percent,25.5"));
+    }
+
+    #[test]
+    fn test_export_to_prometheus() {
+        let data = serde_json::json!({
+            "system_metrics": {
+                "uptime_seconds": 3600,
+                "memory_usage_bytes": 1048576
+            }
+        });
+
+        let prometheus = export_to_prometheus(&data).unwrap();
+
+        assert!(prometheus.contains("# HELP badbatch_uptime_seconds"));
+        assert!(prometheus.contains("# TYPE badbatch_uptime_seconds counter"));
+        assert!(prometheus.contains("badbatch_uptime_seconds 3600"));
+        assert!(prometheus.contains("# HELP badbatch_memory_usage_bytes"));
+        assert!(prometheus.contains("badbatch_memory_usage_bytes 1048576"));
+    }
+
+    #[test]
+    fn test_cluster_metrics_structure() {
+        let system_metrics = create_test_system_metrics();
+        let cluster_metrics = serde_json::json!({
+            "cluster_status": "active",
+            "node_count": 3,
+            "healthy_nodes": 2,
+            "system_metrics": system_metrics
+        });
+
+        assert_eq!(cluster_metrics["cluster_status"], "active");
+        assert_eq!(cluster_metrics["node_count"], 3);
+        assert_eq!(cluster_metrics["healthy_nodes"], 2);
+        assert!(cluster_metrics["system_metrics"].is_object());
+    }
+
+    #[test]
+    fn test_export_data_structure() {
+        let export_data = serde_json::json!({
+            "timestamp": "2023-01-01T00:00:00Z",
+            "system_metrics": create_test_system_metrics(),
+            "disruptor_metrics": [],
+            "disruptor_count": 0
+        });
+
+        assert!(export_data["timestamp"].is_string());
+        assert!(export_data["system_metrics"].is_object());
+        assert!(export_data["disruptor_metrics"].is_array());
+        assert_eq!(export_data["disruptor_count"], 0);
+    }
+
+    #[test]
+    fn test_monitor_type_validation() {
+        let valid_types = ["system", "disruptor", "cluster"];
+
+        for monitor_type in &valid_types {
+            // This simulates the validation logic in watch_metrics
+            let is_valid = match monitor_type.to_lowercase().as_str() {
+                "system" | "disruptor" | "cluster" => true,
+                _ => false,
+            };
+            assert!(is_valid, "Monitor type '{}' should be valid", monitor_type);
+        }
+
+        let invalid_types = ["invalid", "unknown", ""];
+        for monitor_type in &invalid_types {
+            let is_valid = match monitor_type.to_lowercase().as_str() {
+                "system" | "disruptor" | "cluster" => true,
+                _ => false,
+            };
+            assert!(!is_valid, "Monitor type '{}' should be invalid", monitor_type);
+        }
+    }
+
+    #[test]
+    fn test_export_format_validation() {
+        let valid_formats = ["json", "yaml", "csv", "prometheus"];
+
+        for format in &valid_formats {
+            let is_valid = match format.to_lowercase().as_str() {
+                "json" | "yaml" | "csv" | "prometheus" => true,
+                _ => false,
+            };
+            assert!(is_valid, "Export format '{}' should be valid", format);
+        }
+
+        let invalid_formats = ["xml", "binary", ""];
+        for format in &invalid_formats {
+            let is_valid = match format.to_lowercase().as_str() {
+                "json" | "yaml" | "csv" | "prometheus" => true,
+                _ => false,
+            };
+            assert!(!is_valid, "Export format '{}' should be invalid", format);
+        }
+    }
+
+    #[test]
+    fn test_watch_interval_conversion() {
+        let intervals = [1, 5, 10, 30, 60];
+
+        for interval in &intervals {
+            let duration = Duration::from_secs(*interval);
+            assert_eq!(duration.as_secs(), *interval);
+        }
+    }
+
+    #[test]
+    fn test_metrics_formatting() {
+        // Test buffer utilization formatting
+        let utilizations = [0.0, 0.25, 0.5, 0.75, 1.0];
+        for util in &utilizations {
+            let formatted = format!("{:.1}%", util * 100.0);
+            let expected = format!("{:.1}%", util * 100.0);
+            assert_eq!(formatted, expected);
+        }
+
+        // Test events per second formatting
+        let rates = [0.0, 10.5, 100.25, 1000.0];
+        for rate in &rates {
+            let formatted = format!("{:.2}", rate);
+            assert!(formatted.contains('.'));
+        }
+    }
+
+    #[test]
+    fn test_csv_header() {
+        let data = serde_json::json!({
+            "timestamp": "2023-01-01T00:00:00Z",
+            "system_metrics": {}
+        });
+
+        let csv = export_to_csv(&data).unwrap();
+        let lines: Vec<&str> = csv.lines().collect();
+
+        assert!(!lines.is_empty());
+        assert_eq!(lines[0], "metric_type,metric_name,value,timestamp");
+    }
+
+    #[test]
+    fn test_prometheus_help_comments() {
+        let data = serde_json::json!({
+            "system_metrics": {
+                "uptime_seconds": 100
+            }
+        });
+
+        let prometheus = export_to_prometheus(&data).unwrap();
+        let lines: Vec<&str> = prometheus.lines().collect();
+
+        // Should have HELP and TYPE comments
+        let help_lines: Vec<_> = lines.iter().filter(|line| line.starts_with("# HELP")).collect();
+        let type_lines: Vec<_> = lines.iter().filter(|line| line.starts_with("# TYPE")).collect();
+
+        assert!(!help_lines.is_empty());
+        assert!(!type_lines.is_empty());
+    }
+}
