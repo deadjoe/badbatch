@@ -225,6 +225,12 @@ public_key*
 # Examples and reference implementations
 examples/
 
+# TLA+ verification artifacts
+verification/states/
+verification/tla2tools.jar
+verification/*.st
+verification/*.fp
+
 # Misc
 .cache/
 .local/
