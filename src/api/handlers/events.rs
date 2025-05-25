@@ -9,8 +9,6 @@ use axum::{
 };
 use uuid::Uuid;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
-
 use crate::api::{
     ApiResponse,
     models::{
@@ -18,15 +16,8 @@ use crate::api::{
         PublishBatchResponse, EventData,
     },
     handlers::{ApiResult, ApiError},
-    manager::DisruptorManager,
+    global_manager::get_global_manager,
 };
-
-// Global manager instance for now - this is a temporary solution
-static GLOBAL_MANAGER: OnceLock<Arc<Mutex<DisruptorManager>>> = OnceLock::new();
-
-fn get_manager() -> &'static Arc<Mutex<DisruptorManager>> {
-    GLOBAL_MANAGER.get_or_init(|| Arc::new(Mutex::new(DisruptorManager::new())))
-}
 
 /// Publish a single event to a Disruptor
 pub async fn publish_event(
@@ -234,7 +225,7 @@ async fn publish_batch_internal(
 }
 
 fn validate_disruptor_exists(disruptor_id: &str) -> ApiResult<()> {
-    let manager = get_manager();
+    let manager = get_global_manager();
     let manager = manager.lock().map_err(|_| ApiError::internal("Failed to acquire manager lock"))?;
 
     // Check if Disruptor exists
@@ -243,7 +234,7 @@ fn validate_disruptor_exists(disruptor_id: &str) -> ApiResult<()> {
 }
 
 fn validate_disruptor_for_publishing(disruptor_id: &str) -> ApiResult<()> {
-    let manager = get_manager();
+    let manager = get_global_manager();
     let manager = manager.lock().map_err(|_| ApiError::internal("Failed to acquire manager lock"))?;
 
     // Check if Disruptor exists and is in a state that allows publishing
@@ -288,43 +279,60 @@ fn validate_event_data(data: &serde_json::Value) -> ApiResult<()> {
 }
 
 fn get_next_sequence(disruptor_id: &str) -> ApiResult<i64> {
-    let manager = get_manager();
+    let manager = get_global_manager();
     let manager = manager.lock().map_err(|_| ApiError::internal("Failed to acquire manager lock"))?;
 
     // Get the Disruptor instance
-    let _disruptor = manager.get_disruptor(disruptor_id)?;
+    let disruptor = manager.get_disruptor(disruptor_id)?;
 
-    // TODO: Use actual Disruptor sequencer to get next sequence
-    // For now, use a simple atomic counter per Disruptor
-    // This should be replaced with disruptor.next() when the Producer API is fully implemented
-    use std::sync::atomic::{AtomicI64, Ordering};
-    static COUNTER: AtomicI64 = AtomicI64::new(0);
+    // Use the Disruptor's sequencer to get the next sequence
+    // This provides a preview of what the next sequence would be
+    // Note: This is for informational purposes in the API response
+    // The actual sequence assignment happens during event publishing
+    let current_cursor = disruptor.get_cursor().get();
+    let next_sequence = current_cursor + 1;
 
-    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
-    Ok(sequence)
+    Ok(next_sequence)
 }
 
 fn publish_event_to_disruptor(disruptor_id: &str, event_data: &EventData) -> ApiResult<()> {
-    let manager = get_manager();
+    let manager = get_global_manager();
     let manager = manager.lock().map_err(|_| ApiError::internal("Failed to acquire manager lock"))?;
 
     // Get the Disruptor instance
-    let _disruptor = manager.get_disruptor(disruptor_id)?;
+    let disruptor = manager.get_disruptor(disruptor_id)?;
 
-    // TODO: Actually publish the event to the Disruptor
-    // In a real implementation, this would:
-    // 1. Create an ApiEvent from the EventData
-    // 2. Use the Producer to publish the event to the ring buffer
-    // 3. Handle any errors from the publishing process
+    // Prepare data for the event translator
+    let event_data_clone = event_data.data.clone();
+    let metadata_clone = event_data.metadata.clone();
+    let correlation_id_clone = event_data.correlation_id.clone();
 
-    tracing::info!(
-        disruptor_id = %disruptor_id,
-        event_id = %event_data.id,
-        sequence = %event_data.sequence,
-        "Event published to Disruptor (placeholder implementation)"
-    );
+    // Create an EventTranslator for the ApiEvent
+    use crate::disruptor::event_translator::ClosureEventTranslator;
+    let translator = ClosureEventTranslator::new(move |event: &mut crate::api::manager::ApiEvent, _sequence: i64| {
+        event.data = event_data_clone.clone();
+        event.metadata = Some(metadata_clone.clone());
+        event.correlation_id = correlation_id_clone.clone();
+    });
 
-    Ok(())
+    // Try to publish the event using the Disruptor's try_publish_event
+    let published = disruptor.try_publish_event(translator);
+
+    if published {
+        tracing::info!(
+            disruptor_id = %disruptor_id,
+            event_id = %event_data.id,
+            "Event successfully published to Disruptor"
+        );
+        Ok(())
+    } else {
+        tracing::warn!(
+            disruptor_id = %disruptor_id,
+            event_id = %event_data.id,
+            "Failed to publish event to Disruptor - ring buffer full"
+        );
+        Err(ApiError::internal("Ring buffer is full, cannot publish event"))
+    }
 }
 
 fn get_events_from_disruptor(_disruptor_id: &str, _query: &EventQuery) -> ApiResult<Vec<EventData>> {

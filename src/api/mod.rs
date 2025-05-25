@@ -23,13 +23,14 @@
 //! - `GET /api/v1/health` - System health check
 //! - `GET /api/v1/metrics` - System-wide metrics
 
+pub mod error;
+pub mod global_manager;
 pub mod handlers;
 pub mod manager;
+pub mod middleware;
 pub mod models;
 pub mod routes;
 pub mod server;
-pub mod middleware;
-pub mod error;
 
 // Re-export main types
 pub use server::ApiServer;
