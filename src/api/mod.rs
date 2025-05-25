@@ -24,6 +24,7 @@
 //! - `GET /api/v1/metrics` - System-wide metrics
 
 pub mod handlers;
+pub mod manager;
 pub mod models;
 pub mod routes;
 pub mod server;

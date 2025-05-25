@@ -4,7 +4,7 @@
 
 use crate::{ClusterCommands};
 use crate::cli::client::BadBatchClient;
-use crate::cli::{CliResult, format};
+use crate::cli::CliResult;
 
 /// Handle cluster commands
 pub async fn handle_cluster_command(
@@ -21,69 +21,58 @@ pub async fn handle_cluster_command(
     }
 }
 
-async fn show_cluster_status(_client: &BadBatchClient, output_format: &str) -> CliResult<()> {
-    // For now, return a placeholder status
-    // In a real implementation, this would call a cluster status endpoint
-    let status = serde_json::json!({
-        "status": "active",
-        "node_id": "local-node",
-        "cluster_size": 1,
-        "leader": "local-node",
-        "formation_time": chrono::Utc::now().to_rfc3339()
-    });
+async fn show_cluster_status(_client: &BadBatchClient, _output_format: &str) -> CliResult<()> {
+    // Cluster functionality is not yet implemented
+    eprintln!("❌ Cluster functionality is not yet implemented in this version.");
+    eprintln!("   This feature is planned for a future release.");
+    eprintln!("   Currently, BadBatch operates in single-node mode only.");
 
-    let output = format::format_output(&status, output_format)?;
-    println!("{}", output);
-
-    Ok(())
+    Err(crate::cli::CliError::operation(
+        "Cluster functionality not implemented".to_string()
+    ))
 }
 
-async fn list_cluster_nodes(_client: &BadBatchClient, output_format: &str) -> CliResult<()> {
-    // Placeholder implementation
-    let nodes = serde_json::json!([
-        {
-            "id": "local-node",
-            "address": "127.0.0.1:7946",
-            "status": "alive",
-            "role": "leader",
-            "joined_at": chrono::Utc::now().to_rfc3339()
-        }
-    ]);
+async fn list_cluster_nodes(_client: &BadBatchClient, _output_format: &str) -> CliResult<()> {
+    // Cluster functionality is not yet implemented
+    eprintln!("❌ Cluster functionality is not yet implemented in this version.");
+    eprintln!("   This feature is planned for a future release.");
+    eprintln!("   Currently, BadBatch operates in single-node mode only.");
 
-    let output = format::format_output(&nodes, output_format)?;
-    println!("{}", output);
-
-    Ok(())
+    Err(crate::cli::CliError::operation(
+        "Cluster functionality not implemented".to_string()
+    ))
 }
 
 async fn join_cluster(_client: &BadBatchClient, seed: &str) -> CliResult<()> {
-    println!("Joining cluster via seed node: {}", seed);
-    println!("✓ Successfully joined cluster");
-    Ok(())
+    eprintln!("❌ Cluster functionality is not yet implemented in this version.");
+    eprintln!("   Cannot join cluster via seed node: {}", seed);
+    eprintln!("   This feature is planned for a future release.");
+    eprintln!("   Currently, BadBatch operates in single-node mode only.");
+
+    Err(crate::cli::CliError::operation(
+        "Cluster functionality not implemented".to_string()
+    ))
 }
 
 async fn leave_cluster(_client: &BadBatchClient) -> CliResult<()> {
-    println!("Leaving cluster...");
-    println!("✓ Successfully left cluster");
-    Ok(())
+    eprintln!("❌ Cluster functionality is not yet implemented in this version.");
+    eprintln!("   This feature is planned for a future release.");
+    eprintln!("   Currently, BadBatch operates in single-node mode only.");
+
+    Err(crate::cli::CliError::operation(
+        "Cluster functionality not implemented".to_string()
+    ))
 }
 
-async fn show_cluster_health(client: &BadBatchClient, output_format: &str) -> CliResult<()> {
-    // Placeholder implementation using system health
-    let health = client.get_health().await?;
+async fn show_cluster_health(_client: &BadBatchClient, _output_format: &str) -> CliResult<()> {
+    eprintln!("❌ Cluster functionality is not yet implemented in this version.");
+    eprintln!("   This feature is planned for a future release.");
+    eprintln!("   Currently, BadBatch operates in single-node mode only.");
+    eprintln!("   Use 'badbatch health' for system health information.");
 
-    let cluster_health = serde_json::json!({
-        "cluster_healthy": true,
-        "total_nodes": 1,
-        "healthy_nodes": 1,
-        "unhealthy_nodes": 0,
-        "system_health": health
-    });
-
-    let output = format::format_output(&cluster_health, output_format)?;
-    println!("{}", output);
-
-    Ok(())
+    Err(crate::cli::CliError::operation(
+        "Cluster functionality not implemented".to_string()
+    ))
 }
 
 #[cfg(test)]

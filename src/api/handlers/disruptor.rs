@@ -7,68 +7,44 @@ use axum::{
     extract::{Path, Query, Json as ExtractJson},
     response::Json,
 };
-use uuid::Uuid;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::api::{
     ApiResponse,
     models::{
         CreateDisruptorRequest, CreateDisruptorResponse, DisruptorInfo,
-        DisruptorList, DisruptorStatus, ListDisruptorsQuery, DisruptorConfig,
+        DisruptorList, DisruptorStatus, ListDisruptorsQuery,
     },
-    handlers::{ApiResult, ApiError},
+    handlers::ApiResult,
+    manager::DisruptorManager,
 };
-use crate::disruptor::ProducerType;
+
+// Global manager instance for now - this is a temporary solution
+static GLOBAL_MANAGER: OnceLock<Arc<Mutex<DisruptorManager>>> = OnceLock::new();
+
+fn get_manager() -> &'static Arc<Mutex<DisruptorManager>> {
+    GLOBAL_MANAGER.get_or_init(|| Arc::new(Mutex::new(DisruptorManager::new())))
+}
 
 /// Create a new Disruptor instance
 pub async fn create_disruptor(
     ExtractJson(request): ExtractJson<CreateDisruptorRequest>,
 ) -> ApiResult<Json<ApiResponse<CreateDisruptorResponse>>> {
-    // Validate request
-    validate_create_request(&request)?;
+    // Get the global manager
+    let manager = get_manager();
+    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
 
-    // Generate unique ID for the Disruptor
-    let disruptor_id = Uuid::new_v4().to_string();
-
-    // Parse producer type
-    let _producer_type = match request.producer_type.to_lowercase().as_str() {
-        "single" => ProducerType::Single,
-        "multi" => ProducerType::Multi,
-        _ => return Err(ApiError::invalid_request("Invalid producer_type. Must be 'single' or 'multi'")),
-    };
-
-    // Parse wait strategy (placeholder - in real implementation would create actual strategy)
-    let _wait_strategy = match request.wait_strategy.to_lowercase().as_str() {
-        "blocking" | "yielding" | "busy_spin" | "sleeping" => {
-            // Valid strategy names
-        },
-        _ => return Err(ApiError::invalid_request(
-            "Invalid wait_strategy. Must be 'blocking', 'yielding', 'busy_spin', or 'sleeping'"
-        )),
-    };
-
-    // Create the Disruptor instance
-    // Note: This is a simplified implementation. In a real system, you would:
-    // 1. Store the Disruptor instance in a manager
-    // 2. Set up event handlers based on configuration
-    // 3. Handle the lifecycle properly
-
-    let disruptor_info = DisruptorInfo {
-        id: disruptor_id.clone(),
-        name: request.name.clone(),
-        buffer_size: request.buffer_size,
-        producer_type: request.producer_type.clone(),
-        wait_strategy: request.wait_strategy.clone(),
-        status: DisruptorStatus::Created,
-        config: request.config.clone(),
-        created_at: chrono::Utc::now(),
-        last_activity: chrono::Utc::now(),
-    };
-
-    // Store the Disruptor (placeholder - would use a real storage mechanism)
-    store_disruptor_info(&disruptor_info)?;
+    // Create the Disruptor using the manager
+    let disruptor_info = manager.create_disruptor(
+        request.name.clone(),
+        request.buffer_size,
+        &request.producer_type,
+        &request.wait_strategy,
+        request.config.clone(),
+    )?;
 
     let response = CreateDisruptorResponse {
-        id: disruptor_id,
+        id: disruptor_info.id.clone(),
         config: disruptor_info,
         created_at: chrono::Utc::now(),
     };
@@ -80,8 +56,12 @@ pub async fn create_disruptor(
 pub async fn list_disruptors(
     Query(query): Query<ListDisruptorsQuery>,
 ) -> ApiResult<Json<ApiResponse<DisruptorList>>> {
-    // Get all Disruptor instances (placeholder implementation)
-    let all_disruptors = get_all_disruptors()?;
+    // Get the global manager
+    let manager = get_manager();
+    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+
+    // Get all Disruptor instances from manager
+    let all_disruptors = manager.list_disruptors()?;
 
     // Apply filters
     let mut filtered_disruptors = all_disruptors;
@@ -126,7 +106,9 @@ pub async fn list_disruptors(
 pub async fn get_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
-    let disruptor_info = get_disruptor_info(&id)?;
+    let manager = get_manager();
+    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let disruptor_info = manager.get_disruptor_info(&id)?;
     Ok(Json(ApiResponse::success(disruptor_info)))
 }
 
@@ -134,29 +116,9 @@ pub async fn get_disruptor(
 pub async fn delete_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<()>>> {
-    // Check if Disruptor exists
-    let mut disruptor_info = get_disruptor_info(&id)?;
-
-    // Check if it's safe to delete (not running)
-    match disruptor_info.status {
-        DisruptorStatus::Running => {
-            return Err(ApiError::invalid_request(
-                "Cannot delete a running Disruptor. Stop it first."
-            ));
-        }
-        _ => {}
-    }
-
-    // Mark as stopping and then delete
-    disruptor_info.status = DisruptorStatus::Stopping;
-    store_disruptor_info(&disruptor_info)?;
-
-    // Perform cleanup (placeholder)
-    cleanup_disruptor(&id)?;
-
-    // Remove from storage
-    remove_disruptor_info(&id)?;
-
+    let manager = get_manager();
+    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    manager.remove_disruptor(&id)?;
     Ok(Json(ApiResponse::success(())))
 }
 
@@ -164,236 +126,111 @@ pub async fn delete_disruptor(
 pub async fn start_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
-    let mut disruptor_info = get_disruptor_info(&id)?;
-
-    match disruptor_info.status {
-        DisruptorStatus::Created | DisruptorStatus::Stopped | DisruptorStatus::Paused => {
-            disruptor_info.status = DisruptorStatus::Running;
-            disruptor_info.last_activity = chrono::Utc::now();
-
-            // Start the actual Disruptor (placeholder)
-            start_disruptor_instance(&id)?;
-
-            store_disruptor_info(&disruptor_info)?;
-            Ok(Json(ApiResponse::success(disruptor_info)))
-        }
-        DisruptorStatus::Running => {
-            Err(ApiError::invalid_request("Disruptor is already running"))
-        }
-        DisruptorStatus::Stopping => {
-            Err(ApiError::invalid_request("Disruptor is currently stopping"))
-        }
-        DisruptorStatus::Error => {
-            Err(ApiError::invalid_request("Disruptor is in error state. Delete and recreate."))
-        }
-    }
+    let manager = get_manager();
+    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let disruptor_info = manager.start_disruptor(&id)?;
+    Ok(Json(ApiResponse::success(disruptor_info)))
 }
 
 /// Stop a Disruptor instance
 pub async fn stop_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
-    let mut disruptor_info = get_disruptor_info(&id)?;
-
-    match disruptor_info.status {
-        DisruptorStatus::Running | DisruptorStatus::Paused => {
-            disruptor_info.status = DisruptorStatus::Stopping;
-            disruptor_info.last_activity = chrono::Utc::now();
-
-            // Stop the actual Disruptor (placeholder)
-            stop_disruptor_instance(&id)?;
-
-            disruptor_info.status = DisruptorStatus::Stopped;
-            store_disruptor_info(&disruptor_info)?;
-            Ok(Json(ApiResponse::success(disruptor_info)))
-        }
-        DisruptorStatus::Stopped => {
-            Err(ApiError::invalid_request("Disruptor is already stopped"))
-        }
-        DisruptorStatus::Created => {
-            Err(ApiError::invalid_request("Disruptor has not been started yet"))
-        }
-        DisruptorStatus::Stopping => {
-            Err(ApiError::invalid_request("Disruptor is already stopping"))
-        }
-        DisruptorStatus::Error => {
-            Err(ApiError::invalid_request("Disruptor is in error state"))
-        }
-    }
+    let manager = get_manager();
+    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let disruptor_info = manager.stop_disruptor(&id)?;
+    Ok(Json(ApiResponse::success(disruptor_info)))
 }
 
 /// Pause a Disruptor instance
 pub async fn pause_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
-    let mut disruptor_info = get_disruptor_info(&id)?;
-
-    match disruptor_info.status {
-        DisruptorStatus::Running => {
-            disruptor_info.status = DisruptorStatus::Paused;
-            disruptor_info.last_activity = chrono::Utc::now();
-
-            // Pause the actual Disruptor (placeholder)
-            pause_disruptor_instance(&id)?;
-
-            store_disruptor_info(&disruptor_info)?;
-            Ok(Json(ApiResponse::success(disruptor_info)))
-        }
-        DisruptorStatus::Paused => {
-            Err(ApiError::invalid_request("Disruptor is already paused"))
-        }
-        _ => {
-            Err(ApiError::invalid_request("Can only pause a running Disruptor"))
-        }
-    }
+    let manager = get_manager();
+    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let _disruptor_info = manager.get_disruptor_info(&id)?;
+    manager.update_status(&id, DisruptorStatus::Paused)?;
+    let updated_info = manager.get_disruptor_info(&id)?;
+    Ok(Json(ApiResponse::success(updated_info)))
 }
 
 /// Resume a paused Disruptor instance
 pub async fn resume_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
-    let mut disruptor_info = get_disruptor_info(&id)?;
-
-    match disruptor_info.status {
-        DisruptorStatus::Paused => {
-            disruptor_info.status = DisruptorStatus::Running;
-            disruptor_info.last_activity = chrono::Utc::now();
-
-            // Resume the actual Disruptor (placeholder)
-            resume_disruptor_instance(&id)?;
-
-            store_disruptor_info(&disruptor_info)?;
-            Ok(Json(ApiResponse::success(disruptor_info)))
-        }
-        DisruptorStatus::Running => {
-            Err(ApiError::invalid_request("Disruptor is already running"))
-        }
-        _ => {
-            Err(ApiError::invalid_request("Can only resume a paused Disruptor"))
-        }
-    }
+    let manager = get_manager();
+    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let _disruptor_info = manager.get_disruptor_info(&id)?;
+    manager.update_status(&id, DisruptorStatus::Running)?;
+    let updated_info = manager.get_disruptor_info(&id)?;
+    Ok(Json(ApiResponse::success(updated_info)))
 }
 
 /// Get Disruptor status
 pub async fn get_disruptor_status(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorStatus>>> {
-    let disruptor_info = get_disruptor_info(&id)?;
+    let manager = get_manager();
+    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let disruptor_info = manager.get_disruptor_info(&id)?;
     Ok(Json(ApiResponse::success(disruptor_info.status)))
 }
 
-// Helper functions (placeholder implementations)
-
-fn validate_create_request(request: &CreateDisruptorRequest) -> ApiResult<()> {
-    if !crate::disruptor::is_power_of_two(request.buffer_size) {
-        return Err(ApiError::invalid_request("buffer_size must be a power of 2"));
-    }
-
-    if request.buffer_size < 2 || request.buffer_size > 1024 * 1024 {
-        return Err(ApiError::invalid_request("buffer_size must be between 2 and 1048576"));
-    }
-
-    Ok(())
-}
-
-fn store_disruptor_info(_info: &DisruptorInfo) -> ApiResult<()> {
-    // Placeholder: In a real implementation, this would store to a database or in-memory store
-    Ok(())
-}
-
-fn get_disruptor_info(id: &str) -> ApiResult<DisruptorInfo> {
-    // Placeholder: In a real implementation, this would retrieve from storage
-    // For now, return a mock Disruptor
-    if id == "test-id" {
-        Ok(DisruptorInfo {
-            id: id.to_string(),
-            name: Some("Test Disruptor".to_string()),
-            buffer_size: 1024,
-            producer_type: "single".to_string(),
-            wait_strategy: "blocking".to_string(),
-            status: DisruptorStatus::Created,
-            config: DisruptorConfig::default(),
-            created_at: chrono::Utc::now(),
-            last_activity: chrono::Utc::now(),
-        })
-    } else {
-        Err(ApiError::disruptor_not_found(id))
-    }
-}
-
-fn get_all_disruptors() -> ApiResult<Vec<DisruptorInfo>> {
-    // Placeholder: Return empty list for now
-    Ok(vec![])
-}
-
-fn remove_disruptor_info(_id: &str) -> ApiResult<()> {
-    // Placeholder: In a real implementation, this would remove from storage
-    Ok(())
-}
-
-fn cleanup_disruptor(_id: &str) -> ApiResult<()> {
-    // Placeholder: In a real implementation, this would clean up resources
-    Ok(())
-}
-
-fn start_disruptor_instance(_id: &str) -> ApiResult<()> {
-    // Placeholder: In a real implementation, this would start the Disruptor
-    Ok(())
-}
-
-fn stop_disruptor_instance(_id: &str) -> ApiResult<()> {
-    // Placeholder: In a real implementation, this would stop the Disruptor
-    Ok(())
-}
-
-fn pause_disruptor_instance(_id: &str) -> ApiResult<()> {
-    // Placeholder: In a real implementation, this would pause the Disruptor
-    Ok(())
-}
-
-fn resume_disruptor_instance(_id: &str) -> ApiResult<()> {
-    // Placeholder: In a real implementation, this would resume the Disruptor
-    Ok(())
-}
+// Helper functions - these are now mostly handled by the DisruptorManager
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-
-    #[tokio::test]
-    async fn test_get_disruptor_existing() {
-        let result = get_disruptor(axum::extract::Path("test-id".to_string())).await;
-        assert!(result.is_ok());
-    }
+    use crate::api::models::DisruptorConfig;
 
     #[tokio::test]
     async fn test_get_disruptor_not_found() {
-        let result = get_disruptor(axum::extract::Path("non-existent".to_string())).await;
+        let result = get_disruptor(
+            axum::extract::Path("non-existent".to_string())
+        ).await;
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_validate_create_request_valid() {
+    #[tokio::test]
+    async fn test_create_and_get_disruptor() {
+        // Create a disruptor
         let request = CreateDisruptorRequest {
             buffer_size: 1024,
             producer_type: "single".to_string(),
             wait_strategy: "blocking".to_string(),
-            name: None,
+            name: Some("test".to_string()),
             config: DisruptorConfig::default(),
         };
-        assert!(validate_create_request(&request).is_ok());
+
+        let create_result = create_disruptor(
+            axum::extract::Json(request)
+        ).await;
+
+        assert!(create_result.is_ok());
+        let response = create_result.unwrap().0;
+        let disruptor_id = response.data.unwrap().id;
+
+        // Get the disruptor
+        let get_result = get_disruptor(
+            axum::extract::Path(disruptor_id)
+        ).await;
+
+        assert!(get_result.is_ok());
     }
 
-    #[test]
-    fn test_validate_create_request_invalid_buffer_size() {
-        let request = CreateDisruptorRequest {
-            buffer_size: 1023, // Not a power of 2
-            producer_type: "single".to_string(),
-            wait_strategy: "blocking".to_string(),
+    #[tokio::test]
+    async fn test_list_disruptors() {
+        let query = ListDisruptorsQuery {
+            offset: 0,
+            limit: 10,
+            status: None,
             name: None,
-            config: DisruptorConfig::default(),
         };
-        assert!(validate_create_request(&request).is_err());
+
+        let result = list_disruptors(
+            axum::extract::Query(query)
+        ).await;
+
+        assert!(result.is_ok());
     }
 }
