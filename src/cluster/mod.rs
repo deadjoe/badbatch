@@ -326,7 +326,11 @@ mod tests {
 
     /// 创建测试用的集群配置，使用动态端口
     fn create_test_config() -> ClusterConfig {
-        let port = get_available_port();
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static PORT_COUNTER: AtomicU16 = AtomicU16::new(50000);
+
+        // Use a unique port for each test to avoid conflicts
+        let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
         let bind_addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
 
         ClusterConfig {

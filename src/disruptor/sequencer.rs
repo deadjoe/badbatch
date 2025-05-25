@@ -4,10 +4,9 @@
 //! Sequencers manage the allocation of sequence numbers and ensure that producers don't
 //! overwrite events that haven't been consumed yet.
 
-use crate::disruptor::{Result, DisruptorError, Sequence, WaitStrategy, is_power_of_two, INITIAL_CURSOR_VALUE};
+use crate::disruptor::{Result, DisruptorError, Sequence, WaitStrategy, is_power_of_two};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
-use std::sync::RwLock;
 use crossbeam_utils::CachePadded;
 
 /// Trait for sequencers that coordinate access to the ring buffer
@@ -172,8 +171,8 @@ impl SingleProducerSequencer {
             wait_strategy,
             cursor: Arc::new(Sequence::new_with_initial_value()),
             gating_sequences: parking_lot::RwLock::new(Vec::new()),
-            next_value: AtomicI64::new(crate::disruptor::INITIAL_CURSOR_VALUE),
-            cached_value: AtomicI64::new(crate::disruptor::INITIAL_CURSOR_VALUE),
+            next_value: AtomicI64::new(-1),
+            cached_value: AtomicI64::new(-1),
         }
     }
 
@@ -320,7 +319,15 @@ impl Sequencer for SingleProducerSequencer {
         // This follows the exact LMAX Disruptor SingleProducerSequencer.remainingCapacity logic
         let next_value = self.next_value.load(Ordering::Relaxed);
         let consumed = self.get_minimum_sequence();
-        self.buffer_size as i64 - (next_value - consumed)
+
+        // If no consumers are registered, consumed will be i64::MAX
+        // In this case, we have full capacity available
+        if consumed == i64::MAX {
+            return self.buffer_size as i64;
+        }
+
+        let used_capacity = next_value.saturating_sub(consumed);
+        (self.buffer_size as i64).saturating_sub(used_capacity)
     }
 }
 
@@ -348,8 +355,7 @@ pub struct MultiProducerSequencer {
     available_bitmap: Box<[AtomicU64]>,
     /// Index mask for fast modulo operations (buffer_size - 1)
     index_mask: usize,
-    /// Shift amount for calculating round numbers (log2 of buffer_size)
-    index_shift: usize,
+
     /// Cached minimum gating sequence to reduce lock contention
     /// This is an optimization from the LMAX Disruptor to avoid frequent reads of gating sequences
     cached_gating_sequence: CachePadded<AtomicI64>,
@@ -380,17 +386,16 @@ impl MultiProducerSequencer {
 
         // Initialize bitmap for availability tracking if buffer is large enough
         // For smaller buffers, we'll use an empty bitmap and fall back to legacy method
-        let (available_bitmap, index_shift) = if buffer_size >= 64 {
+        let available_bitmap = if buffer_size >= 64 {
             let bitmap_size = buffer_size / 64; // Each AtomicU64 tracks 64 slots
             let bitmap: Box<[AtomicU64]> = (0..bitmap_size)
                 .map(|_| AtomicU64::new(!0_u64)) // Initialize with all 1's (nothing published initially)
                 .collect();
-            let shift = Self::log2(buffer_size);
-            (bitmap, shift)
+            bitmap
         } else {
             // For small buffers, use empty bitmap and fall back to legacy method
             let empty_bitmap: Box<[AtomicU64]> = Box::new([]);
-            (empty_bitmap, 0)
+            empty_bitmap
         };
 
         Self {
@@ -400,16 +405,12 @@ impl MultiProducerSequencer {
             gating_sequences: parking_lot::RwLock::new(Vec::new()),
             available_bitmap,
             index_mask: buffer_size - 1,
-            index_shift,
-            cached_gating_sequence: CachePadded::new(AtomicI64::new(crate::disruptor::INITIAL_CURSOR_VALUE)),
+            cached_gating_sequence: CachePadded::new(AtomicI64::new(-1)),
             available_buffer,
         }
     }
 
-    /// Calculate log2 of a number (inspired by disruptor-rs)
-    fn log2(i: usize) -> usize {
-        std::mem::size_of::<usize>() * 8 - (i.leading_zeros() as usize) - 1
-    }
+
 
     /// Calculate the index in the available buffer for a given sequence
     /// This matches the LMAX Disruptor calculateIndex method
@@ -431,11 +432,7 @@ impl MultiProducerSequencer {
         (availability_index, bit_index)
     }
 
-    /// Calculate availability flag for bitmap (inspired by disruptor-rs)
-    fn calculate_bitmap_availability_flag(&self, sequence: i64) -> u64 {
-        let round = (sequence >> self.index_shift) as u64;
-        round & 1
-    }
+
 
     /// Get availability bitmap at index (inspired by disruptor-rs)
     fn availability_at(&self, index: usize) -> &AtomicU64 {
@@ -634,7 +631,15 @@ impl Sequencer for MultiProducerSequencer {
     fn remaining_capacity(&self) -> i64 {
         let next_value = self.cursor.get() + 1;
         let consumed = self.get_minimum_sequence();
-        self.buffer_size as i64 - (next_value - consumed)
+
+        // If no consumers are registered, consumed will be i64::MAX
+        // In this case, we have full capacity available
+        if consumed == i64::MAX {
+            return self.buffer_size as i64;
+        }
+
+        let used_capacity = next_value.saturating_sub(consumed);
+        (self.buffer_size as i64).saturating_sub(used_capacity)
     }
 }
 

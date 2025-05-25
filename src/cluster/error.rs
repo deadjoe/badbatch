@@ -372,4 +372,116 @@ mod tests {
         assert!(!ClusterError::not_supported("test").is_retryable());
         assert!(!ClusterError::authentication("test").is_retryable());
     }
+
+    #[test]
+    fn test_all_error_constructors() {
+        // Test all error constructor methods
+        let _ = ClusterError::network("network error");
+        let _ = ClusterError::protocol("protocol error");
+        let _ = ClusterError::gossip("gossip error");
+        let _ = ClusterError::node_not_found("node-123");
+        let _ = ClusterError::service_not_found("my-service");
+        let _ = ClusterError::join_failed("join failed");
+        let _ = ClusterError::health_check_failed("node-456", "timeout");
+        let _ = ClusterError::replication("replication error");
+        let _ = ClusterError::timeout("operation timeout");
+        let _ = ClusterError::encryption("encryption error");
+        let _ = ClusterError::authentication("auth failed");
+        let _ = ClusterError::not_ready("not ready");
+        let _ = ClusterError::not_supported("unsupported operation");
+        let _ = ClusterError::resource_exhausted("memory");
+        let _ = ClusterError::internal("internal error");
+    }
+
+    #[test]
+    fn test_error_category_display() {
+        assert_eq!(ErrorCategory::Network.to_string(), "network");
+        assert_eq!(ErrorCategory::Protocol.to_string(), "protocol");
+        assert_eq!(ErrorCategory::NotFound.to_string(), "not_found");
+        assert_eq!(ErrorCategory::Operation.to_string(), "operation");
+        assert_eq!(ErrorCategory::Health.to_string(), "health");
+        assert_eq!(ErrorCategory::Replication.to_string(), "replication");
+        assert_eq!(ErrorCategory::Serialization.to_string(), "serialization");
+        assert_eq!(ErrorCategory::IO.to_string(), "io");
+        assert_eq!(ErrorCategory::Timeout.to_string(), "timeout");
+        assert_eq!(ErrorCategory::Configuration.to_string(), "configuration");
+        assert_eq!(ErrorCategory::Security.to_string(), "security");
+        assert_eq!(ErrorCategory::State.to_string(), "state");
+        assert_eq!(ErrorCategory::Resource.to_string(), "resource");
+        assert_eq!(ErrorCategory::Internal.to_string(), "internal");
+    }
+
+    #[test]
+    fn test_permanent_errors() {
+        assert!(ClusterError::not_supported("test").is_permanent());
+        assert!(ClusterError::authentication("test").is_permanent());
+        assert!(!ClusterError::network("test").is_permanent());
+        assert!(!ClusterError::timeout("test").is_permanent());
+    }
+
+    #[test]
+    fn test_error_context_builder() {
+        let context = ErrorContext::new("test_operation");
+        assert_eq!(context.operation, "test_operation");
+        assert!(context.node_id.is_none());
+        assert!(context.service_name.is_none());
+        assert!(context.metadata.is_empty());
+
+        let context = context
+            .with_node_id("test-node")
+            .with_service_name("test-service")
+            .with_metadata("key1", "value1")
+            .with_metadata("key2", "value2");
+
+        assert_eq!(context.node_id, Some("test-node".to_string()));
+        assert_eq!(context.service_name, Some("test-service".to_string()));
+        assert_eq!(context.metadata.len(), 2);
+        assert_eq!(context.metadata.get("key1"), Some(&"value1".to_string()));
+        assert_eq!(context.metadata.get("key2"), Some(&"value2".to_string()));
+    }
+
+    #[test]
+    fn test_error_from_conversions() {
+        // Test From implementations
+        let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let cluster_error: ClusterError = io_error.into();
+        assert!(matches!(cluster_error, ClusterError::IoError(_)));
+        assert_eq!(cluster_error.category(), ErrorCategory::IO);
+
+        // Create a serde_json error by trying to parse invalid JSON
+        let invalid_json = "{invalid json";
+        let serde_error = serde_json::from_str::<serde_json::Value>(invalid_json).unwrap_err();
+        let cluster_error: ClusterError = serde_error.into();
+        assert!(matches!(cluster_error, ClusterError::SerializationError(_)));
+        assert_eq!(cluster_error.category(), ErrorCategory::Serialization);
+    }
+
+    #[test]
+    fn test_specific_error_variants() {
+        // Test specific error variants with their expected categories
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let io_error = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
+        let bind_error = ClusterError::BindError {
+            addr,
+            source: io_error,
+        };
+        assert_eq!(bind_error.category(), ErrorCategory::Network);
+        assert!(!bind_error.is_retryable());
+
+        let addr2: SocketAddr = "192.168.1.1:9090".parse().unwrap();
+        let io_error2 = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "Connection refused");
+        let connection_error = ClusterError::ConnectionError {
+            addr: addr2,
+            source: io_error2,
+        };
+        assert_eq!(connection_error.category(), ErrorCategory::Network);
+        assert!(connection_error.is_retryable());
+
+        let health_check_error = ClusterError::HealthCheckFailed {
+            node_id: "node-456".to_string(),
+            reason: "Timeout after 5s".to_string(),
+        };
+        assert_eq!(health_check_error.category(), ErrorCategory::Health);
+        assert!(!health_check_error.is_retryable());
+    }
 }
