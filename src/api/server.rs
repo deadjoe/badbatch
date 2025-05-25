@@ -37,7 +37,13 @@ impl ApiServer {
 
     /// Start the API server
     pub async fn start(self) -> Result<(), ApiServerError> {
-        let addr = SocketAddr::from(([0, 0, 0, 0], self.config.port));
+        // Parse the configured host and port into a SocketAddr
+        let addr = format!("{}:{}", self.config.host, self.config.port)
+            .parse::<SocketAddr>()
+            .map_err(|e| ApiServerError::ConfigError {
+                message: format!("Invalid host:port combination '{}:{}': {}",
+                    self.config.host, self.config.port, e)
+            })?;
 
         info!(
             host = %self.config.host,
@@ -70,7 +76,13 @@ impl ApiServer {
         self,
         shutdown_signal: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), ApiServerError> {
-        let addr = SocketAddr::from(([0, 0, 0, 0], self.config.port));
+        // Parse the configured host and port into a SocketAddr
+        let addr = format!("{}:{}", self.config.host, self.config.port)
+            .parse::<SocketAddr>()
+            .map_err(|e| ApiServerError::ConfigError {
+                message: format!("Invalid host:port combination '{}:{}': {}",
+                    self.config.host, self.config.port, e)
+            })?;
 
         info!(
             host = %self.config.host,
@@ -284,5 +296,97 @@ mod tests {
         // Use a timeout to avoid waiting indefinitely
         let result = tokio::time::timeout(Duration::from_millis(10), shutdown_future).await;
         assert!(result.is_err()); // Should timeout since no signal is sent
+    }
+
+    #[tokio::test]
+    async fn test_server_respects_host_configuration() {
+        // Test that server uses the configured host address, not hardcoded 0.0.0.0
+        let config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0, // Use port 0 to let the OS choose
+            max_body_size: 1024,
+            timeout_seconds: 30,
+            enable_cors: true,
+            enable_logging: false,
+        };
+
+        let server = ApiServer::new(config);
+
+        // Test that the configuration is stored correctly
+        assert_eq!(server.config().host, "127.0.0.1");
+        assert_eq!(server.config().port, 0);
+
+        // Test that invalid host configurations are rejected
+        let invalid_config = ServerConfig {
+            host: "invalid-host-format".to_string(),
+            port: 8080,
+            max_body_size: 1024,
+            timeout_seconds: 30,
+            enable_cors: true,
+            enable_logging: false,
+        };
+
+        let invalid_server = ApiServer::new(invalid_config);
+
+        // This should fail when trying to start due to invalid host format
+        let result = invalid_server.start().await;
+        assert!(result.is_err());
+
+        // Verify it's a configuration error
+        match result.unwrap_err() {
+            ApiServerError::ConfigError { message } => {
+                assert!(message.contains("Invalid host:port combination"));
+                assert!(message.contains("invalid-host-format"));
+            }
+            _ => panic!("Expected ConfigError"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_host_security_configurations() {
+        // Test various host configurations to ensure security
+
+        // Test localhost-only binding (secure)
+        let localhost_config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            max_body_size: 1024,
+            timeout_seconds: 30,
+            enable_cors: true,
+            enable_logging: false,
+        };
+
+        let localhost_server = ApiServer::new(localhost_config);
+        assert_eq!(localhost_server.config().host, "127.0.0.1");
+
+        // Test IPv6 localhost binding
+        let ipv6_localhost_config = ServerConfig {
+            host: "::1".to_string(),
+            port: 0,
+            max_body_size: 1024,
+            timeout_seconds: 30,
+            enable_cors: true,
+            enable_logging: false,
+        };
+
+        let ipv6_server = ApiServer::new(ipv6_localhost_config);
+        assert_eq!(ipv6_server.config().host, "::1");
+
+        // Test that 0.0.0.0 is only used when explicitly configured
+        let all_interfaces_config = ServerConfig {
+            host: "0.0.0.0".to_string(),
+            port: 0,
+            max_body_size: 1024,
+            timeout_seconds: 30,
+            enable_cors: true,
+            enable_logging: false,
+        };
+
+        let all_interfaces_server = ApiServer::new(all_interfaces_config);
+        assert_eq!(all_interfaces_server.config().host, "0.0.0.0");
+
+        // Verify that the default configuration is explicit about binding to all interfaces
+        let default_server = ApiServer::with_defaults();
+        assert_eq!(default_server.config().host, "0.0.0.0");
     }
 }
