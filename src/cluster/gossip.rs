@@ -110,6 +110,8 @@ pub struct GossipProtocol {
     shutdown_tx: Arc<RwLock<Option<mpsc::Sender<()>>>>,
     /// Running state
     running: Arc<std::sync::atomic::AtomicBool>,
+    /// Background task handles
+    task_handles: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 /// Pending acknowledgment
@@ -148,6 +150,7 @@ impl GossipProtocol {
             sequence_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             shutdown_tx: Arc::new(RwLock::new(None)),
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            task_handles: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -162,7 +165,7 @@ impl GossipProtocol {
         self.running.store(true, std::sync::atomic::Ordering::SeqCst);
 
         // Start gossip timer
-        let _gossip_task = {
+        let gossip_task = {
             let config = self.config.clone();
             let local_node = self.local_node.clone();
             let nodes = self.nodes.clone();
@@ -195,7 +198,7 @@ impl GossipProtocol {
         };
 
         // Start message receiver
-        let _receiver_task = {
+        let receiver_task = {
             let socket = self.socket.clone();
             let local_node = self.local_node.clone();
             let nodes = self.nodes.clone();
@@ -227,6 +230,13 @@ impl GossipProtocol {
             })
         };
 
+        // Store task handles for proper cleanup
+        {
+            let mut handles = self.task_handles.write().await;
+            handles.push(gossip_task);
+            handles.push(receiver_task);
+        }
+
         tracing::info!("Gossip protocol started");
         Ok(())
     }
@@ -239,8 +249,17 @@ impl GossipProtocol {
 
         self.running.store(false, std::sync::atomic::Ordering::SeqCst);
 
+        // Send shutdown signal
         if let Some(shutdown_tx) = self.shutdown_tx.write().await.take() {
             let _ = shutdown_tx.send(()).await;
+        }
+
+        // Wait for all background tasks to complete
+        let mut handles = self.task_handles.write().await;
+        while let Some(handle) = handles.pop() {
+            if let Err(e) = handle.await {
+                tracing::warn!("Background task failed to complete cleanly: {}", e);
+            }
         }
 
         tracing::info!("Gossip protocol stopped");

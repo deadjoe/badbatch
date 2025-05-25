@@ -7,6 +7,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::cli::{CliError, CliResult};
+use badbatch::disruptor::is_power_of_two;
 
 /// Validate that a string is valid JSON
 pub fn validate_json(data: &str) -> CliResult<Value> {
@@ -75,11 +76,6 @@ pub fn validate_buffer_size(size: usize) -> CliResult<()> {
     }
 
     Ok(())
-}
-
-/// Check if a number is a power of 2
-fn is_power_of_two(n: usize) -> bool {
-    n != 0 && (n & (n - 1)) == 0
 }
 
 /// Confirm an action with the user
@@ -202,16 +198,6 @@ mod tests {
         assert!(validate_buffer_size(1024).is_ok());
         assert!(validate_buffer_size(1023).is_err());
         assert!(validate_buffer_size(0).is_err());
-    }
-
-    #[test]
-    fn test_is_power_of_two() {
-        assert!(is_power_of_two(1));
-        assert!(is_power_of_two(2));
-        assert!(is_power_of_two(1024));
-        assert!(!is_power_of_two(0));
-        assert!(!is_power_of_two(3));
-        assert!(!is_power_of_two(1023));
     }
 
     #[test]
