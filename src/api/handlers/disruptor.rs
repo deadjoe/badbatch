@@ -7,8 +7,6 @@ use axum::{
     extract::{Path, Query, Json as ExtractJson},
     response::Json,
 };
-use std::sync::{Arc, Mutex, OnceLock};
-
 use crate::api::{
     ApiResponse,
     models::{
@@ -16,22 +14,15 @@ use crate::api::{
         DisruptorList, DisruptorStatus, ListDisruptorsQuery,
     },
     handlers::ApiResult,
-    manager::DisruptorManager,
+    global_manager::get_global_manager,
 };
-
-// Global manager instance for now - this is a temporary solution
-static GLOBAL_MANAGER: OnceLock<Arc<Mutex<DisruptorManager>>> = OnceLock::new();
-
-fn get_manager() -> &'static Arc<Mutex<DisruptorManager>> {
-    GLOBAL_MANAGER.get_or_init(|| Arc::new(Mutex::new(DisruptorManager::new())))
-}
 
 /// Create a new Disruptor instance
 pub async fn create_disruptor(
     ExtractJson(request): ExtractJson<CreateDisruptorRequest>,
 ) -> ApiResult<Json<ApiResponse<CreateDisruptorResponse>>> {
     // Get the global manager
-    let manager = get_manager();
+    let manager = get_global_manager();
     let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
 
     // Create the Disruptor using the manager
@@ -57,7 +48,7 @@ pub async fn list_disruptors(
     Query(query): Query<ListDisruptorsQuery>,
 ) -> ApiResult<Json<ApiResponse<DisruptorList>>> {
     // Get the global manager
-    let manager = get_manager();
+    let manager = get_global_manager();
     let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
 
     // Get all Disruptor instances from manager
@@ -106,7 +97,7 @@ pub async fn list_disruptors(
 pub async fn get_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
-    let manager = get_manager();
+    let manager = get_global_manager();
     let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
     let disruptor_info = manager.get_disruptor_info(&id)?;
     Ok(Json(ApiResponse::success(disruptor_info)))
@@ -116,7 +107,7 @@ pub async fn get_disruptor(
 pub async fn delete_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<()>>> {
-    let manager = get_manager();
+    let manager = get_global_manager();
     let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
     manager.remove_disruptor(&id)?;
     Ok(Json(ApiResponse::success(())))
@@ -126,7 +117,7 @@ pub async fn delete_disruptor(
 pub async fn start_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
-    let manager = get_manager();
+    let manager = get_global_manager();
     let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
     let disruptor_info = manager.start_disruptor(&id)?;
     Ok(Json(ApiResponse::success(disruptor_info)))
@@ -136,7 +127,7 @@ pub async fn start_disruptor(
 pub async fn stop_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
-    let manager = get_manager();
+    let manager = get_global_manager();
     let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
     let disruptor_info = manager.stop_disruptor(&id)?;
     Ok(Json(ApiResponse::success(disruptor_info)))
@@ -146,7 +137,7 @@ pub async fn stop_disruptor(
 pub async fn pause_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
-    let manager = get_manager();
+    let manager = get_global_manager();
     let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
     let _disruptor_info = manager.get_disruptor_info(&id)?;
     manager.update_status(&id, DisruptorStatus::Paused)?;
@@ -158,7 +149,7 @@ pub async fn pause_disruptor(
 pub async fn resume_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
-    let manager = get_manager();
+    let manager = get_global_manager();
     let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
     let _disruptor_info = manager.get_disruptor_info(&id)?;
     manager.update_status(&id, DisruptorStatus::Running)?;
@@ -170,7 +161,7 @@ pub async fn resume_disruptor(
 pub async fn get_disruptor_status(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorStatus>>> {
-    let manager = get_manager();
+    let manager = get_global_manager();
     let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
     let disruptor_info = manager.get_disruptor_info(&id)?;
     Ok(Json(ApiResponse::success(disruptor_info.status)))

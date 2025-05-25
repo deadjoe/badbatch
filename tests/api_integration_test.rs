@@ -228,10 +228,69 @@ async fn test_sequence_generation_thread_safety() {
     for handle in handles {
         let result = handle.await;
         assert!(result.is_ok());
-        // The publish might fail because it's a placeholder implementation
-        // but it should not panic or have thread safety issues
-        let _publish_result = result.unwrap();
-        // We don't assert success here because the current implementation
-        // is a placeholder and may return errors
+        // Now that we have real event publishing, these should succeed
+        let publish_result = result.unwrap();
+        assert!(publish_result.is_ok());
     }
+}
+
+/// Test real event publishing functionality
+#[tokio::test]
+async fn test_real_event_publishing() {
+    use badbatch::api::handlers::disruptor::{create_disruptor, start_disruptor};
+    use badbatch::api::handlers::events::publish_event;
+    use badbatch::api::models::{CreateDisruptorRequest, DisruptorConfig, PublishEventRequest};
+    use axum::extract::{Json as ExtractJson, Path};
+
+    // Create a disruptor
+    let request = CreateDisruptorRequest {
+        buffer_size: 64,
+        producer_type: "single".to_string(),
+        wait_strategy: "yielding".to_string(),
+        name: Some("real-publish-test".to_string()),
+        config: DisruptorConfig::default(),
+    };
+
+    let create_result = create_disruptor(ExtractJson(request)).await;
+    assert!(create_result.is_ok());
+
+    let disruptor_id = create_result.unwrap().0.data.unwrap().id;
+
+    // Start the disruptor
+    let start_result = start_disruptor(Path(disruptor_id.clone())).await;
+    assert!(start_result.is_ok());
+
+    // Publish a real event
+    let event_request = PublishEventRequest {
+        data: serde_json::json!({
+            "message": "Hello, Disruptor!",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "priority": "high"
+        }),
+        metadata: {
+            let mut map = HashMap::new();
+            map.insert("source".to_string(), "integration_test".to_string());
+            map.insert("version".to_string(), "1.0".to_string());
+            map
+        },
+        correlation_id: Some("test-correlation-123".to_string()),
+    };
+
+    let publish_result = publish_event(
+        Path(disruptor_id.clone()),
+        ExtractJson(event_request)
+    ).await;
+
+    // Should succeed with real implementation
+    if let Err(ref e) = publish_result {
+        eprintln!("Event publishing failed: {:?}", e);
+    }
+    assert!(publish_result.is_ok());
+
+    let response = publish_result.unwrap().0;
+    assert!(response.data.is_some());
+
+    let event_response = response.data.unwrap();
+    assert_eq!(event_response.correlation_id, Some("test-correlation-123".to_string()));
+    assert!(event_response.sequence >= 0);
 }
