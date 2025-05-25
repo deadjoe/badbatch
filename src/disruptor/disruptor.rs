@@ -15,47 +15,6 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Dummy data provider for temporary use in event processor threads
-/// This is a temporary solution until we properly implement interior mutability
-#[allow(dead_code)]
-struct DummyDataProvider<T> {
-    _phantom: std::marker::PhantomData<T>,
-}
-
-#[allow(dead_code)]
-impl<T> DummyDataProvider<T> {
-    fn new() -> Self {
-        Self {
-            _phantom: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<T: Default + Send + Sync + 'static> DataProvider<T> for DummyDataProvider<T> {
-    fn get(&self, _sequence: i64) -> &T {
-        // This is a dummy implementation - in a real scenario we'd have actual data
-        // For now, we'll use a static reference to a default value
-        // Using OnceLock to avoid static mut warnings
-        use std::sync::OnceLock;
-        static DUMMY_VALUE: OnceLock<Box<dyn std::any::Any + Send + Sync>> = OnceLock::new();
-
-        let value = DUMMY_VALUE.get_or_init(|| Box::new(T::default()));
-        value.downcast_ref::<T>().unwrap()
-    }
-
-    #[allow(static_mut_refs)]
-    unsafe fn get_mut(&self, _sequence: i64) -> &mut T {
-        // This is a dummy implementation - in a real scenario we'd have actual data
-        // For now, we'll use a static mutable reference to a default value
-        // This is unsafe but acceptable for this temporary fix
-        static mut DUMMY_VALUE: Option<Box<dyn std::any::Any + Send + Sync>> = None;
-        if DUMMY_VALUE.is_none() {
-            DUMMY_VALUE = Some(Box::new(T::default()));
-        }
-        DUMMY_VALUE.as_mut().unwrap().downcast_mut::<T>().unwrap()
-    }
-}
-
 /// The main Disruptor class
 ///
 /// This is the primary entry point for using the Disruptor pattern. It provides
@@ -765,26 +724,5 @@ mod tests {
         // Verify the change
         let event = ring_buffer.get(0);
         assert_eq!(event.value, 999);
-    }
-
-    #[test]
-    fn test_dummy_data_provider() {
-        let provider = DummyDataProvider::<TestEvent>::new();
-
-        // Test get method
-        let event = provider.get(0);
-        assert_eq!(event.value, 0); // Default value
-
-        // Test get_mut method (unsafe)
-        unsafe {
-            let event_mut = provider.get_mut(0);
-            event_mut.value = 777;
-        }
-
-        // Note: DummyDataProvider uses static storage, so changes persist
-        unsafe {
-            let event_mut = provider.get_mut(1);
-            assert_eq!(event_mut.value, 777);
-        }
     }
 }
