@@ -4,7 +4,7 @@
 //! handling their lifecycle, state tracking, and coordination with the API layer.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Mutex};
 use uuid::Uuid;
 
 use crate::api::error::{ApiResult, ApiError};
@@ -26,7 +26,7 @@ pub struct ApiEvent {
 #[derive(Debug)]
 pub struct ManagedDisruptor {
     pub info: DisruptorInfo,
-    pub disruptor: Arc<Disruptor<ApiEvent>>,
+    pub disruptor: Arc<Mutex<Disruptor<ApiEvent>>>,
 }
 
 /// Global Disruptor manager for handling all Disruptor instances
@@ -82,13 +82,16 @@ impl DisruptorManager {
         // Create event factory
         let event_factory = DefaultEventFactory::<ApiEvent>::new();
 
-        // Create the actual Disruptor
+        // Create the actual Disruptor with a default event handler
+        use crate::disruptor::NoOpEventHandler;
         let disruptor = Disruptor::new(
             event_factory,
             buffer_size,
             producer_type_enum,
             wait_strategy_impl,
-        ).map_err(|e| ApiError::internal(format!("Failed to create Disruptor: {}", e)))?;
+        ).map_err(|e| ApiError::internal(format!("Failed to create Disruptor: {}", e)))?
+        .handle_events_with(NoOpEventHandler::<ApiEvent>::new())
+        .build();
 
         // Generate unique ID
         let disruptor_id = Uuid::new_v4().to_string();
@@ -109,7 +112,7 @@ impl DisruptorManager {
         // Create managed instance
         let managed = ManagedDisruptor {
             info: disruptor_info.clone(),
-            disruptor: Arc::new(disruptor),
+            disruptor: Arc::new(Mutex::new(disruptor)),
         };
 
         // Store in manager
@@ -157,8 +160,15 @@ impl DisruptorManager {
             Some(managed) => {
                 match managed.info.status {
                     DisruptorStatus::Created | DisruptorStatus::Stopped | DisruptorStatus::Paused => {
-                        // TODO: Actually start the Disruptor with event processors
-                        // For now, just update the status
+                        // Actually start the Disruptor with event processors
+                        let mut disruptor = managed.disruptor.lock()
+                            .map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
+
+                        // Start the disruptor (this will start all event processors)
+                        disruptor.start()
+                            .map_err(|e| ApiError::internal(format!("Failed to start Disruptor: {}", e)))?;
+
+                        // Update status
                         managed.info.status = DisruptorStatus::Running;
                         managed.info.last_activity = chrono::Utc::now();
                         Ok(managed.info.clone())
@@ -187,7 +197,19 @@ impl DisruptorManager {
             Some(managed) => {
                 match managed.info.status {
                     DisruptorStatus::Running | DisruptorStatus::Paused => {
-                        // TODO: Actually stop the Disruptor
+                        // Set status to stopping first
+                        managed.info.status = DisruptorStatus::Stopping;
+                        managed.info.last_activity = chrono::Utc::now();
+
+                        // Actually stop the Disruptor
+                        let mut disruptor = managed.disruptor.lock()
+                            .map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
+
+                        // Shutdown the disruptor (this will stop all event processors)
+                        disruptor.shutdown()
+                            .map_err(|e| ApiError::internal(format!("Failed to stop Disruptor: {}", e)))?;
+
+                        // Update status to stopped
                         managed.info.status = DisruptorStatus::Stopped;
                         managed.info.last_activity = chrono::Utc::now();
                         Ok(managed.info.clone())
@@ -227,13 +249,24 @@ impl DisruptorManager {
         let mut disruptors = self.disruptors.write()
             .map_err(|_| ApiError::internal("Failed to acquire write lock"))?;
 
-        match disruptors.get(id) {
+        match disruptors.get_mut(id) {
             Some(managed) => {
-                // Check if it's safe to delete
+                // Check if it's safe to delete and stop if necessary
                 match managed.info.status {
-                    DisruptorStatus::Running => {
+                    DisruptorStatus::Running | DisruptorStatus::Paused => {
+                        // Force stop the disruptor before removal
+                        let mut disruptor = managed.disruptor.lock()
+                            .map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
+
+                        // Shutdown the disruptor
+                        disruptor.shutdown()
+                            .map_err(|e| ApiError::internal(format!("Failed to stop Disruptor during removal: {}", e)))?;
+
+                        managed.info.status = DisruptorStatus::Stopped;
+                    }
+                    DisruptorStatus::Stopping => {
                         return Err(ApiError::invalid_request(
-                            "Cannot delete a running Disruptor. Stop it first."
+                            "Cannot delete a Disruptor that is currently stopping. Wait for it to stop first."
                         ));
                     }
                     _ => {}
@@ -248,7 +281,7 @@ impl DisruptorManager {
     }
 
     /// Get the actual Disruptor instance for event publishing
-    pub fn get_disruptor(&self, id: &str) -> ApiResult<Arc<Disruptor<ApiEvent>>> {
+    pub fn get_disruptor(&self, id: &str) -> ApiResult<Arc<Mutex<Disruptor<ApiEvent>>>> {
         let disruptors = self.disruptors.read()
             .map_err(|_| ApiError::internal("Failed to acquire read lock"))?;
 
@@ -309,5 +342,119 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_disruptor_lifecycle_management() {
+        let manager = DisruptorManager::new();
+        let config = DisruptorConfig::default();
+
+        // Create a disruptor
+        let info = manager.create_disruptor(
+            Some("lifecycle-test".to_string()),
+            1024,
+            "single",
+            "blocking",
+            config,
+        ).unwrap();
+
+        assert_eq!(info.status, DisruptorStatus::Created);
+        let disruptor_id = info.id.clone();
+
+        // Start the disruptor
+        let info = manager.start_disruptor(&disruptor_id).unwrap();
+        assert_eq!(info.status, DisruptorStatus::Running);
+
+        // Try to start again (should fail)
+        let result = manager.start_disruptor(&disruptor_id);
+        assert!(result.is_err());
+
+        // Stop the disruptor
+        let info = manager.stop_disruptor(&disruptor_id).unwrap();
+        assert_eq!(info.status, DisruptorStatus::Stopped);
+
+        // Try to stop again (should fail)
+        let result = manager.stop_disruptor(&disruptor_id);
+        assert!(result.is_err());
+
+        // Remove the disruptor
+        let result = manager.remove_disruptor(&disruptor_id);
+        assert!(result.is_ok());
+
+        // Try to get removed disruptor (should fail)
+        let result = manager.get_disruptor_info(&disruptor_id);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_remove_running_disruptor() {
+        let manager = DisruptorManager::new();
+        let config = DisruptorConfig::default();
+
+        // Create and start a disruptor
+        let info = manager.create_disruptor(
+            Some("remove-test".to_string()),
+            512,
+            "single",
+            "blocking",
+            config,
+        ).unwrap();
+
+        let disruptor_id = info.id.clone();
+        manager.start_disruptor(&disruptor_id).unwrap();
+
+        // Remove should work (it will force stop first)
+        let result = manager.remove_disruptor(&disruptor_id);
+        assert!(result.is_ok());
+
+        // Verify it's gone
+        let result = manager.get_disruptor_info(&disruptor_id);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_disruptor_event_publishing_integration() {
+        let manager = DisruptorManager::new();
+        let config = DisruptorConfig::default();
+
+        // Create a disruptor
+        let info = manager.create_disruptor(
+            Some("event-test".to_string()),
+            1024,
+            "single",
+            "blocking",
+            config,
+        ).unwrap();
+
+        let disruptor_id = info.id.clone();
+
+        // Start the disruptor
+        manager.start_disruptor(&disruptor_id).unwrap();
+
+        // Get the disruptor for event publishing
+        let disruptor = manager.get_disruptor(&disruptor_id).unwrap();
+        let disruptor = disruptor.lock().unwrap();
+
+        // Test event publishing
+        use crate::disruptor::event_translator::ClosureEventTranslator;
+        let translator = ClosureEventTranslator::new(|event: &mut ApiEvent, _sequence: i64| {
+            event.data = serde_json::json!({"test": "data"});
+            event.metadata = Some(std::collections::HashMap::new());
+            event.correlation_id = Some("test-correlation".to_string());
+        });
+
+        // Publish an event
+        let result = disruptor.try_publish_event(translator);
+        assert!(result);
+
+        // Verify cursor advanced
+        assert_eq!(disruptor.get_cursor().get(), 0);
+
+        // Drop the lock before stopping
+        drop(disruptor);
+
+        // Stop the disruptor
+        let info = manager.stop_disruptor(&disruptor_id).unwrap();
+        assert_eq!(info.status, DisruptorStatus::Stopped);
     }
 }
