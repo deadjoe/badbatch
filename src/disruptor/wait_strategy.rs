@@ -90,8 +90,6 @@ pub struct BlockingWaitStrategy {
 struct BlockingState {
     /// Whether the strategy has been alerted (for shutdown)
     alerted: bool,
-    /// Number of waiting threads
-    waiting_threads: usize,
 }
 
 impl BlockingWaitStrategy {

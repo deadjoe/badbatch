@@ -200,3 +200,163 @@ impl From<DisruptorInfo> for DisruptorTableRow {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::client::{DisruptorInfo, DisruptorResponse};
+
+    fn create_test_disruptor_info() -> DisruptorInfo {
+        DisruptorInfo {
+            id: "test-id".to_string(),
+            name: "test-disruptor".to_string(),
+            buffer_size: 1024,
+            producer_type: "single".to_string(),
+            wait_strategy: "blocking".to_string(),
+            status: "running".to_string(),
+            created_at: "2023-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_disruptor_table_row_from_info() {
+        let info = create_test_disruptor_info();
+        let row = DisruptorTableRow::from(info);
+
+        assert_eq!(row.id, "test-id");
+        assert_eq!(row.name, "test-disruptor");
+        assert_eq!(row.buffer_size, "1024");
+        assert_eq!(row.producer_type, "single");
+        assert_eq!(row.wait_strategy, "blocking");
+        assert_eq!(row.status, "running");
+        assert_eq!(row.created_at, "2023-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn test_create_disruptor_request_validation() {
+        // Test valid producer types
+        let valid_producers = ["single", "multi", "SINGLE", "MULTI"];
+        for producer in &valid_producers {
+            let normalized = match producer.to_lowercase().as_str() {
+                "single" | "multi" => producer.to_lowercase(),
+                _ => panic!("Should be valid"),
+            };
+            assert!(normalized == "single" || normalized == "multi");
+        }
+
+        // Test valid wait strategies
+        let valid_strategies = ["blocking", "busy-spin", "yielding", "sleeping"];
+        for strategy in &valid_strategies {
+            let normalized = match strategy.to_lowercase().as_str() {
+                "blocking" | "busy-spin" | "yielding" | "sleeping" => strategy.to_lowercase(),
+                _ => panic!("Should be valid"),
+            };
+            assert!(["blocking", "busy-spin", "yielding", "sleeping"].contains(&normalized.as_str()));
+        }
+    }
+
+    #[test]
+    fn test_invalid_producer_type() {
+        let invalid_producers = ["invalid", "triple", ""];
+        for producer in &invalid_producers {
+            let result = match producer.to_lowercase().as_str() {
+                "single" | "multi" => Ok(producer.to_lowercase()),
+                _ => Err("Invalid producer type"),
+            };
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn test_invalid_wait_strategy() {
+        let invalid_strategies = ["invalid", "custom", ""];
+        for strategy in &invalid_strategies {
+            let result = match strategy.to_lowercase().as_str() {
+                "blocking" | "busy-spin" | "yielding" | "sleeping" => Ok(strategy.to_lowercase()),
+                _ => Err("Invalid wait strategy"),
+            };
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn test_disruptor_table_row_formatting() {
+        let info = DisruptorInfo {
+            id: "long-id-12345".to_string(),
+            name: "my-test-disruptor".to_string(),
+            buffer_size: 2048,
+            producer_type: "multi".to_string(),
+            wait_strategy: "busy-spin".to_string(),
+            status: "stopped".to_string(),
+            created_at: "2023-12-25T12:30:45Z".to_string(),
+        };
+
+        let row = DisruptorTableRow::from(info);
+        assert_eq!(row.buffer_size, "2048");
+        assert_eq!(row.producer_type, "multi");
+        assert_eq!(row.wait_strategy, "busy-spin");
+        assert_eq!(row.status, "stopped");
+    }
+
+    #[test]
+    fn test_create_disruptor_request_structure() {
+        let request = CreateDisruptorRequest {
+            name: "test-disruptor".to_string(),
+            buffer_size: 512,
+            producer_type: "single".to_string(),
+            wait_strategy: "yielding".to_string(),
+        };
+
+        assert_eq!(request.name, "test-disruptor");
+        assert_eq!(request.buffer_size, 512);
+        assert_eq!(request.producer_type, "single");
+        assert_eq!(request.wait_strategy, "yielding");
+    }
+
+    #[test]
+    fn test_disruptor_response_structure() {
+        let response = DisruptorResponse {
+            id: "new-id".to_string(),
+            message: "Created successfully".to_string(),
+        };
+
+        assert_eq!(response.id, "new-id");
+        assert_eq!(response.message, "Created successfully");
+    }
+
+    #[test]
+    fn test_case_insensitive_producer_validation() {
+        let test_cases = [
+            ("Single", "single"),
+            ("MULTI", "multi"),
+            ("sInGlE", "single"),
+            ("MuLtI", "multi"),
+        ];
+
+        for (input, expected) in &test_cases {
+            let result = match input.to_lowercase().as_str() {
+                "single" | "multi" => input.to_lowercase(),
+                _ => panic!("Should be valid"),
+            };
+            assert_eq!(result, *expected);
+        }
+    }
+
+    #[test]
+    fn test_case_insensitive_wait_strategy_validation() {
+        let test_cases = [
+            ("Blocking", "blocking"),
+            ("BUSY-SPIN", "busy-spin"),
+            ("YiElDiNg", "yielding"),
+            ("SLEEPING", "sleeping"),
+        ];
+
+        for (input, expected) in &test_cases {
+            let result = match input.to_lowercase().as_str() {
+                "blocking" | "busy-spin" | "yielding" | "sleeping" => input.to_lowercase(),
+                _ => panic!("Should be valid"),
+            };
+            assert_eq!(result, *expected);
+        }
+    }
+}

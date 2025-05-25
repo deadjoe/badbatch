@@ -483,9 +483,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::disruptor::{DefaultEventFactory, NoOpEventHandler};
+    use crate::disruptor::{DefaultEventFactory, NoOpEventHandler, YieldingWaitStrategy, SleepingWaitStrategy};
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
 
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Clone)]
     #[allow(dead_code)]
     struct TestEvent {
         value: i64,
@@ -502,6 +505,20 @@ mod tests {
         ).unwrap();
 
         assert_eq!(disruptor.get_buffer_size(), 1024);
+        assert!(!disruptor.started);
+    }
+
+    #[test]
+    fn test_disruptor_creation_multi_producer() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let disruptor = Disruptor::new(
+            factory,
+            512,
+            ProducerType::Multi,
+            Box::new(YieldingWaitStrategy::new()),
+        ).unwrap();
+
+        assert_eq!(disruptor.get_buffer_size(), 512);
         assert!(!disruptor.started);
     }
 
@@ -528,6 +545,20 @@ mod tests {
     }
 
     #[test]
+    fn test_disruptor_zero_buffer_size() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let result = Disruptor::new(
+            factory,
+            0,
+            ProducerType::Single,
+            Box::new(BlockingWaitStrategy::new()),
+        );
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DisruptorError::InvalidBufferSize(0)));
+    }
+
+    #[test]
     fn test_disruptor_builder() {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let disruptor = Disruptor::with_defaults(factory, 1024)
@@ -537,5 +568,223 @@ mod tests {
             .build();
 
         assert_eq!(disruptor.event_processors.len(), 2);
+    }
+
+    #[test]
+    fn test_disruptor_get_ring_buffer() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let disruptor = Disruptor::with_defaults(factory, 256).unwrap();
+
+        let ring_buffer = disruptor.get_ring_buffer();
+        assert_eq!(ring_buffer.buffer_size(), 256);
+    }
+
+    #[test]
+    fn test_disruptor_get_cursor() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let disruptor = Disruptor::with_defaults(factory, 128).unwrap();
+
+        let cursor = disruptor.get_cursor();
+        assert_eq!(cursor.get(), -1); // Initial cursor value
+    }
+
+    #[test]
+    fn test_disruptor_get_remaining_capacity() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let disruptor = Disruptor::with_defaults(factory, 64).unwrap();
+
+        let capacity = disruptor.get_remaining_capacity();
+        // With no consumers registered, should return full buffer capacity
+        assert_eq!(capacity, 64);
+    }
+
+    #[test]
+    fn test_disruptor_start_and_shutdown() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let mut disruptor = Disruptor::with_defaults(factory, 32)
+            .unwrap()
+            .handle_events_with(NoOpEventHandler::<TestEvent>::new())
+            .build();
+
+        // Test start
+        assert!(!disruptor.started);
+        disruptor.start().unwrap();
+        assert!(disruptor.started);
+
+        // Test double start fails
+        let result = disruptor.start();
+        assert!(result.is_err());
+
+        // Test shutdown
+        std::thread::sleep(Duration::from_millis(10)); // Let threads start
+        disruptor.shutdown().unwrap();
+        assert!(!disruptor.started);
+
+        // Test double shutdown is ok
+        disruptor.shutdown().unwrap();
+    }
+
+    #[test]
+    fn test_disruptor_shutdown_without_start() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let mut disruptor = Disruptor::with_defaults(factory, 16).unwrap();
+
+        // Should be ok to shutdown without starting
+        disruptor.shutdown().unwrap();
+        assert!(!disruptor.started);
+    }
+
+    #[test]
+    fn test_disruptor_with_different_wait_strategies() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+
+        // Test with SleepingWaitStrategy
+        let factory2 = DefaultEventFactory::<TestEvent>::new();
+        let disruptor1 = Disruptor::new(
+            factory,
+            64,
+            ProducerType::Single,
+            Box::new(SleepingWaitStrategy::new()),
+        ).unwrap();
+        assert_eq!(disruptor1.get_buffer_size(), 64);
+
+        // Test with YieldingWaitStrategy
+        let disruptor2 = Disruptor::new(
+            factory2,
+            128,
+            ProducerType::Multi,
+            Box::new(YieldingWaitStrategy::new()),
+        ).unwrap();
+        assert_eq!(disruptor2.get_buffer_size(), 128);
+    }
+
+    // Custom event handler for testing event publishing
+    #[allow(dead_code)]
+    struct CountingEventHandler {
+        count: Arc<AtomicI64>,
+    }
+
+    #[allow(dead_code)]
+    impl CountingEventHandler {
+        fn new() -> Self {
+            Self {
+                count: Arc::new(AtomicI64::new(0)),
+            }
+        }
+
+        fn get_count(&self) -> i64 {
+            self.count.load(Ordering::Acquire)
+        }
+    }
+
+    impl crate::disruptor::EventHandler<TestEvent> for CountingEventHandler {
+        fn on_event(&mut self, _event: &mut TestEvent, _sequence: i64, _end_of_batch: bool) -> crate::disruptor::Result<()> {
+            self.count.fetch_add(1, Ordering::Release);
+            Ok(())
+        }
+    }
+
+    // Custom event translator for testing
+    struct TestEventTranslator {
+        value: i64,
+    }
+
+    impl TestEventTranslator {
+        fn new(value: i64) -> Self {
+            Self { value }
+        }
+    }
+
+    impl crate::disruptor::EventTranslator<TestEvent> for TestEventTranslator {
+        fn translate_to(&self, event: &mut TestEvent, _sequence: i64) {
+            event.value = self.value;
+        }
+    }
+
+    #[test]
+    fn test_disruptor_publish_event() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let disruptor = Disruptor::with_defaults(factory, 32).unwrap();
+
+        // Test successful publish
+        let translator = TestEventTranslator::new(42);
+        let result = disruptor.publish_event(translator);
+        assert!(result.is_ok());
+
+        // Verify cursor advanced
+        assert_eq!(disruptor.get_cursor().get(), 0);
+    }
+
+    #[test]
+    fn test_disruptor_try_publish_event() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let disruptor = Disruptor::with_defaults(factory, 4).unwrap();
+
+        // Test successful publish
+        let translator = TestEventTranslator::new(123);
+        let result = disruptor.try_publish_event(translator);
+        assert!(result);
+
+        // Verify cursor advanced
+        assert_eq!(disruptor.get_cursor().get(), 0);
+    }
+
+    #[test]
+    fn test_disruptor_builder_chain() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let handler1 = NoOpEventHandler::<TestEvent>::new();
+        let handler2 = NoOpEventHandler::<TestEvent>::new();
+        let handler3 = NoOpEventHandler::<TestEvent>::new();
+
+        let disruptor = Disruptor::with_defaults(factory, 64)
+            .unwrap()
+            .handle_events_with(handler1)
+            .then(handler2)
+            .then(handler3)
+            .build();
+
+        assert_eq!(disruptor.event_processors.len(), 3);
+        assert_eq!(disruptor.get_buffer_size(), 64);
+    }
+
+    #[test]
+    fn test_data_provider_implementation() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let ring_buffer = RingBuffer::new(16, factory).unwrap();
+
+        // Test get method
+        let event = ring_buffer.get(0);
+        assert_eq!(event.value, 0); // Default value
+
+        // Test get_mut method (unsafe)
+        unsafe {
+            let event_mut = ring_buffer.get_mut(0);
+            event_mut.value = 999;
+        }
+
+        // Verify the change
+        let event = ring_buffer.get(0);
+        assert_eq!(event.value, 999);
+    }
+
+    #[test]
+    fn test_dummy_data_provider() {
+        let provider = DummyDataProvider::<TestEvent>::new();
+
+        // Test get method
+        let event = provider.get(0);
+        assert_eq!(event.value, 0); // Default value
+
+        // Test get_mut method (unsafe)
+        unsafe {
+            let event_mut = provider.get_mut(0);
+            event_mut.value = 777;
+        }
+
+        // Note: DummyDataProvider uses static storage, so changes persist
+        unsafe {
+            let event_mut = provider.get_mut(1);
+            assert_eq!(event_mut.value, 777);
+        }
     }
 }

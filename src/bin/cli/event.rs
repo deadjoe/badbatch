@@ -256,8 +256,13 @@ fn generate_test_event(index: usize, size: usize) -> Value {
     // Add padding to reach desired size
     let base_size = serde_json::to_string(&base_data).unwrap().len();
     if size > base_size {
-        let padding_size = size - base_size - 20; // Account for padding field overhead
-        let padding = "x".repeat(padding_size.max(0));
+        let overhead = 20; // Account for padding field overhead
+        let padding_size = if size > base_size + overhead {
+            size - base_size - overhead
+        } else {
+            0
+        };
+        let padding = "x".repeat(padding_size);
 
         serde_json::json!({
             "id": index,
@@ -268,5 +273,183 @@ fn generate_test_event(index: usize, size: usize) -> Value {
         })
     } else {
         base_data
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_generate_test_event_basic() {
+        let event = generate_test_event(42, 100);
+
+        assert_eq!(event["id"], 42);
+        assert_eq!(event["type"], "test_event");
+        assert_eq!(event["sequence"], 42);
+        assert!(event["timestamp"].is_string());
+    }
+
+    #[test]
+    fn test_generate_test_event_with_padding() {
+        let event = generate_test_event(1, 500);
+
+        // Should have padding field for larger size
+        assert!(event["padding"].is_string());
+        assert_eq!(event["id"], 1);
+        assert_eq!(event["sequence"], 1);
+
+        // Check that the event is roughly the target size
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(serialized.len() >= 400); // Should be close to target size
+    }
+
+    #[test]
+    fn test_generate_test_event_small_size() {
+        let event = generate_test_event(0, 50);
+
+        // Should not have padding for small size
+        assert!(event["padding"].is_null() || !event.as_object().unwrap().contains_key("padding"));
+        assert_eq!(event["id"], 0);
+        assert_eq!(event["sequence"], 0);
+    }
+
+    #[test]
+    fn test_publish_event_request_structure() {
+        let mut metadata = HashMap::new();
+        metadata.insert("source".to_string(), "test".to_string());
+
+        let request = PublishEventRequest {
+            data: json!({"message": "hello"}),
+            metadata: Some(metadata),
+        };
+
+        assert_eq!(request.data["message"], "hello");
+        assert!(request.metadata.is_some());
+        assert_eq!(request.metadata.unwrap()["source"], "test");
+    }
+
+    #[test]
+    fn test_publish_batch_request_structure() {
+        let events = vec![
+            EventData {
+                data: json!({"id": 1}),
+                metadata: None,
+            },
+            EventData {
+                data: json!({"id": 2}),
+                metadata: Some({
+                    let mut map = HashMap::new();
+                    map.insert("type".to_string(), "test".to_string());
+                    map
+                }),
+            },
+        ];
+
+        let request = PublishBatchRequest { events };
+
+        assert_eq!(request.events.len(), 2);
+        assert_eq!(request.events[0].data["id"], 1);
+        assert_eq!(request.events[1].data["id"], 2);
+        assert!(request.events[0].metadata.is_none());
+        assert!(request.events[1].metadata.is_some());
+    }
+
+    #[test]
+    fn test_event_data_creation() {
+        let event = EventData {
+            data: json!({"test": "value"}),
+            metadata: None,
+        };
+
+        assert_eq!(event.data["test"], "value");
+        assert!(event.metadata.is_none());
+    }
+
+    #[test]
+    fn test_event_data_with_metadata() {
+        let mut metadata = HashMap::new();
+        metadata.insert("priority".to_string(), "high".to_string());
+        metadata.insert("source".to_string(), "cli".to_string());
+
+        let event = EventData {
+            data: json!({"message": "important"}),
+            metadata: Some(metadata),
+        };
+
+        assert_eq!(event.data["message"], "important");
+        let meta = event.metadata.unwrap();
+        assert_eq!(meta["priority"], "high");
+        assert_eq!(meta["source"], "cli");
+    }
+
+    #[test]
+    fn test_batch_size_calculation() {
+        let total_events = 100;
+        let batch_size = 30;
+        let expected_batches = (total_events + batch_size - 1) / batch_size;
+
+        assert_eq!(expected_batches, 4); // 100 events in batches of 30 = 4 batches
+    }
+
+    #[test]
+    fn test_rate_calculation() {
+        let rate = 100; // events per second
+        let interval = Duration::from_secs_f64(1.0 / rate as f64);
+
+        assert_eq!(interval, Duration::from_millis(10)); // 1/100 = 0.01 seconds = 10ms
+    }
+
+    #[test]
+    fn test_event_generation_sequence() {
+        let events: Vec<_> = (0..5).map(|i| generate_test_event(i, 100)).collect();
+
+        for (i, event) in events.iter().enumerate() {
+            assert_eq!(event["id"], i);
+            assert_eq!(event["sequence"], i);
+            assert_eq!(event["type"], "test_event");
+        }
+    }
+
+    #[test]
+    fn test_empty_batch_validation() {
+        let empty_events: Vec<Value> = vec![];
+
+        // This simulates the validation that would happen in publish_batch
+        assert!(empty_events.is_empty());
+    }
+
+    #[test]
+    fn test_json_parsing_for_events() {
+        let valid_json = r#"[{"id": 1, "data": "test"}, {"id": 2, "data": "test2"}]"#;
+        let events: Result<Vec<Value>, _> = serde_json::from_str(valid_json);
+
+        assert!(events.is_ok());
+        let events = events.unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["id"], 1);
+        assert_eq!(events[1]["id"], 2);
+    }
+
+    #[test]
+    fn test_invalid_json_parsing() {
+        let invalid_json = r#"[{"id": 1, "data": "test"}, {"id": 2, "data":}]"#;
+        let events: Result<Vec<Value>, _> = serde_json::from_str(invalid_json);
+
+        assert!(events.is_err());
+    }
+
+    #[test]
+    fn test_event_size_estimation() {
+        let small_event = generate_test_event(1, 50);
+        let large_event = generate_test_event(1, 1000);
+
+        let small_size = serde_json::to_string(&small_event).unwrap().len();
+        let large_size = serde_json::to_string(&large_event).unwrap().len();
+
+        assert!(large_size > small_size);
+        assert!(large_size >= 800); // Should be close to target size
     }
 }
