@@ -4,9 +4,10 @@
 //! including creation, deletion, starting, stopping, and status queries.
 
 use axum::{
-    extract::{Path, Query, Json as ExtractJson},
+    extract::{Path, Query, Json as ExtractJson, State},
     response::Json,
 };
+use std::sync::{Arc, Mutex};
 use crate::api::{
     ApiResponse,
     models::{
@@ -15,6 +16,7 @@ use crate::api::{
     },
     handlers::ApiResult,
     global_manager::get_global_manager,
+    manager::DisruptorManager,
 };
 
 /// Create a new Disruptor instance
@@ -162,6 +164,16 @@ pub async fn get_disruptor_status(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorStatus>>> {
     let manager = get_global_manager();
+    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let disruptor_info = manager.get_disruptor_info(&id)?;
+    Ok(Json(ApiResponse::success(disruptor_info.status)))
+}
+
+/// Get Disruptor status (with state management)
+pub async fn get_disruptor_status_with_state(
+    State(manager): State<Arc<Mutex<DisruptorManager>>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<ApiResponse<DisruptorStatus>>> {
     let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
     let disruptor_info = manager.get_disruptor_info(&id)?;
     Ok(Json(ApiResponse::success(disruptor_info.status)))

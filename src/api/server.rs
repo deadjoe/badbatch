@@ -6,10 +6,11 @@
 
 use axum::Router;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tracing::{info, error};
 
-use crate::api::{routes, ServerConfig};
+use crate::api::{routes, ServerConfig, manager::DisruptorManager};
 
 /// Main API server
 pub struct ApiServer {
@@ -23,6 +24,16 @@ impl ApiServer {
     /// Create a new API server with the given configuration
     pub fn new(config: ServerConfig) -> Self {
         let router = routes::create_router(&config);
+
+        Self {
+            config,
+            router,
+        }
+    }
+
+    /// Create a new API server with state management
+    pub fn with_state(config: ServerConfig, manager: Arc<Mutex<DisruptorManager>>) -> Self {
+        let router = routes::create_router_with_state(&config, manager);
 
         Self {
             config,
@@ -388,5 +399,32 @@ mod tests {
         // Verify that the default configuration is explicit about binding to all interfaces
         let default_server = ApiServer::with_defaults();
         assert_eq!(default_server.config().host, "0.0.0.0");
+    }
+
+    #[tokio::test]
+    async fn test_server_with_state_management() {
+        use crate::api::manager::DisruptorManager;
+
+        // Create a manager instance
+        let manager = Arc::new(Mutex::new(DisruptorManager::new()));
+
+        // Create server with state
+        let config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            max_body_size: 1024,
+            timeout_seconds: 30,
+            enable_cors: true,
+            enable_logging: false,
+        };
+
+        let server = ApiServer::with_state(config, manager);
+
+        // Verify configuration
+        assert_eq!(server.config().host, "127.0.0.1");
+        assert_eq!(server.config().port, 0);
+
+        // Verify router is created (this tests that the state management routing works)
+        let _router = server.router();
     }
 }

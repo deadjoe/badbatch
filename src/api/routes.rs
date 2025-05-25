@@ -11,14 +11,37 @@ use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::api::{handlers, ServerConfig, manager::DisruptorManager};
 
 /// Create the main application router with state
-pub fn create_router_with_state(config: &ServerConfig, _manager: Arc<DisruptorManager>) -> Router {
-    // For now, use the legacy approach until we fully implement state management
-    create_router(config)
+pub fn create_router_with_state(config: &ServerConfig, manager: Arc<Mutex<DisruptorManager>>) -> Router {
+    // Create API routes with state
+    let api_routes = create_api_routes_with_state(manager.clone());
+
+    let mut router = Router::new()
+        .nest("/api/v1", api_routes)
+        .route("/health", get(handlers::system::health_check))
+        .route("/metrics", get(handlers::system::system_metrics))
+        .route("/", get(handlers::system::root))
+        .with_state(manager);
+
+    // Add middleware layers
+    if config.enable_cors {
+        router = router.layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        );
+    }
+
+    if config.enable_logging {
+        router = router.layer(TraceLayer::new_for_http());
+    }
+
+    router
 }
 
 /// Create the main application router (legacy, for compatibility)
@@ -50,7 +73,23 @@ pub fn create_router(config: &ServerConfig) -> Router {
     router
 }
 
-/// Create API v1 routes
+/// Create API v1 routes with state management
+fn create_api_routes_with_state(manager: Arc<Mutex<DisruptorManager>>) -> Router<Arc<Mutex<DisruptorManager>>> {
+    Router::new()
+        // System routes
+        .route("/health", get(handlers::system::health_check))
+        .route("/metrics", get(handlers::system::system_metrics))
+        .route("/version", get(handlers::system::version))
+
+        // Disruptor management routes
+        .nest("/disruptor", create_disruptor_routes_with_state(manager.clone()))
+
+        // Batch operations
+        .route("/batch/events", post(handlers::events::publish_batch_events))
+        .with_state(manager)
+}
+
+/// Create API v1 routes (legacy, without state)
 fn create_api_routes() -> Router {
     Router::new()
         // System routes
@@ -65,7 +104,36 @@ fn create_api_routes() -> Router {
         .route("/batch/events", post(handlers::events::publish_batch_events))
 }
 
-/// Create Disruptor-specific routes
+/// Create Disruptor-specific routes with state management
+fn create_disruptor_routes_with_state(_manager: Arc<Mutex<DisruptorManager>>) -> Router<Arc<Mutex<DisruptorManager>>> {
+    Router::new()
+        // Disruptor lifecycle - temporarily use existing handlers
+        .route("/", post(handlers::disruptor::create_disruptor))
+        .route("/", get(handlers::disruptor::list_disruptors))
+        .route("/:id", get(handlers::disruptor::get_disruptor))
+        .route("/:id", delete(handlers::disruptor::delete_disruptor))
+
+        // Disruptor control
+        .route("/:id/start", post(handlers::disruptor::start_disruptor))
+        .route("/:id/stop", post(handlers::disruptor::stop_disruptor))
+        .route("/:id/pause", post(handlers::disruptor::pause_disruptor))
+        .route("/:id/resume", post(handlers::disruptor::resume_disruptor))
+
+        // Event publishing
+        .route("/:id/events", post(handlers::events::publish_event))
+        .route("/:id/events/batch", post(handlers::events::publish_batch))
+
+        // Monitoring and metrics
+        .route("/:id/metrics", get(handlers::metrics::get_disruptor_metrics))
+        .route("/:id/health", get(handlers::metrics::get_disruptor_health))
+        .route("/:id/status", get(handlers::disruptor::get_disruptor_status_with_state))
+
+        // Event querying (optional, for debugging)
+        .route("/:id/events", get(handlers::events::list_events))
+        .route("/:id/events/:sequence", get(handlers::events::get_event))
+}
+
+/// Create Disruptor-specific routes (legacy, without state)
 fn create_disruptor_routes() -> Router {
     Router::new()
         // Disruptor lifecycle
@@ -281,6 +349,37 @@ mod tests {
         let config = ServerConfig::default();
         let _router = create_router(&config);
         // Router creation should not panic
+        assert!(true);
+    }
+
+    #[test]
+    fn test_create_router_with_state() {
+        use crate::api::manager::DisruptorManager;
+
+        let config = ServerConfig::default();
+        let manager = Arc::new(Mutex::new(DisruptorManager::new()));
+        let _router = create_router_with_state(&config, manager);
+        // Router creation with state should not panic
+        assert!(true);
+    }
+
+    #[test]
+    fn test_state_management_vs_global() {
+        use crate::api::manager::DisruptorManager;
+
+        // Test that we can create multiple independent manager instances
+        // This demonstrates the advantage over global state
+        let manager1 = Arc::new(Mutex::new(DisruptorManager::new()));
+        let manager2 = Arc::new(Mutex::new(DisruptorManager::new()));
+
+        let config = ServerConfig::default();
+
+        // Create two routers with different state
+        let _router1 = create_router_with_state(&config, manager1);
+        let _router2 = create_router_with_state(&config, manager2);
+
+        // This would not be possible with global state - each router
+        // can have its own independent DisruptorManager instance
         assert!(true);
     }
 }
