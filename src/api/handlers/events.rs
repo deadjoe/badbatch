@@ -284,6 +284,7 @@ fn get_next_sequence(disruptor_id: &str) -> ApiResult<i64> {
 
     // Get the Disruptor instance
     let disruptor = manager.get_disruptor(disruptor_id)?;
+    let disruptor = disruptor.lock().map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
 
     // Use the Disruptor's sequencer to get the next sequence
     // This provides a preview of what the next sequence would be
@@ -301,6 +302,7 @@ fn publish_event_to_disruptor(disruptor_id: &str, event_data: &EventData) -> Api
 
     // Get the Disruptor instance
     let disruptor = manager.get_disruptor(disruptor_id)?;
+    let disruptor = disruptor.lock().map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
 
     // Prepare data for the event translator
     let event_data_clone = event_data.data.clone();
