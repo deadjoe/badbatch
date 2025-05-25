@@ -11,11 +11,20 @@ use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
 };
+use std::sync::Arc;
 
-use crate::api::{handlers, ServerConfig};
+use crate::api::{handlers, ServerConfig, manager::DisruptorManager};
 
-/// Create the main application router
+/// Create the main application router with state
+pub fn create_router_with_state(config: &ServerConfig, _manager: Arc<DisruptorManager>) -> Router {
+    // For now, use the legacy approach until we fully implement state management
+    create_router(config)
+}
+
+/// Create the main application router (legacy, for compatibility)
 pub fn create_router(config: &ServerConfig) -> Router {
+    // For now, create routes without state management
+    // TODO: This needs to be updated to use the manager properly
     let api_routes = create_api_routes();
 
     let mut router = Router::new()

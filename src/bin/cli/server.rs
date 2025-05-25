@@ -19,13 +19,15 @@ pub async fn start_server(
     println!("  Bind address: {}", bind_addr);
 
     if cluster_mode {
-        println!("  Cluster mode: enabled");
-        println!("  Cluster bind: {}", cluster_bind);
+        eprintln!("⚠️  Warning: Cluster mode requested but not yet implemented");
+        eprintln!("   Cluster functionality is planned for a future release");
+        eprintln!("   Starting in single-node mode instead");
+        eprintln!("   Requested cluster bind: {}", cluster_bind);
         if !seed_nodes.is_empty() {
-            println!("  Seed nodes: {:?}", seed_nodes);
+            eprintln!("   Requested seed nodes: {:?}", seed_nodes);
         }
     } else {
-        println!("  Cluster mode: disabled");
+        println!("  Cluster mode: disabled (single-node mode)");
     }
 
     if let Some(config_path) = config_file {

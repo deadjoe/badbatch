@@ -94,7 +94,7 @@ pub struct DisruptorInfo {
 }
 
 /// Disruptor status
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum DisruptorStatus {
     /// Disruptor is created but not started
