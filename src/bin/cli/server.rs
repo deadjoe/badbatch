@@ -18,16 +18,53 @@ pub async fn start_server(
     println!("Starting BadBatch server...");
     println!("  Bind address: {}", bind_addr);
 
-    if cluster_mode {
-        eprintln!("⚠️  Warning: Cluster mode requested but not yet implemented");
-        eprintln!("   Cluster functionality is planned for a future release");
-        eprintln!("   Starting in single-node mode instead");
-        eprintln!("   Requested cluster bind: {}", cluster_bind);
+    #[cfg(feature = "cluster")]
+    let cluster_instance = if cluster_mode {
+        println!("  Cluster mode: enabled");
+        println!("  Cluster bind: {}", cluster_bind);
         if !seed_nodes.is_empty() {
-            eprintln!("   Requested seed nodes: {:?}", seed_nodes);
+            println!("  Seed nodes: {:?}", seed_nodes);
         }
+
+        // Parse cluster bind address
+        let cluster_socket: SocketAddr = cluster_bind.parse()
+            .map_err(|e| crate::cli::CliError::invalid_input(format!("Invalid cluster bind address: {}", e)))?;
+
+        // Create cluster configuration
+        let mut cluster_config = badbatch::cluster::ClusterConfig::default();
+        cluster_config.bind_addr = cluster_socket;
+        cluster_config.seed_nodes = seed_nodes.iter()
+            .map(|addr| addr.parse())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| crate::cli::CliError::invalid_input(format!("Invalid seed node address: {}", e)))?;
+
+        // Create and start cluster
+        let cluster = badbatch::cluster::Cluster::new(cluster_config).await
+            .map_err(|e| crate::cli::CliError::operation(format!("Failed to create cluster: {}", e)))?;
+
+        cluster.start().await
+            .map_err(|e| crate::cli::CliError::operation(format!("Failed to start cluster: {}", e)))?;
+
+        Some(cluster)
     } else {
         println!("  Cluster mode: disabled (single-node mode)");
+        None
+    };
+
+    #[cfg(not(feature = "cluster"))]
+    {
+        if cluster_mode {
+            eprintln!("⚠️  Warning: Cluster mode requested but not compiled in");
+            eprintln!("   Cluster functionality requires the 'cluster' feature");
+            eprintln!("   Compile with: cargo build --features cluster");
+            eprintln!("   Starting in single-node mode instead");
+            eprintln!("   Requested cluster bind: {}", cluster_bind);
+            if !seed_nodes.is_empty() {
+                eprintln!("   Requested seed nodes: {:?}", seed_nodes);
+            }
+        } else {
+            println!("  Cluster mode: disabled (single-node mode)");
+        }
     }
 
     if let Some(config_path) = config_file {
@@ -61,6 +98,15 @@ pub async fn start_server(
     server.start_with_shutdown(shutdown_signal).await.map_err(|e| {
         crate::cli::CliError::operation(format!("Server error: {}", e))
     })?;
+
+    // Stop cluster if it was started
+    #[cfg(feature = "cluster")]
+    if let Some(cluster) = cluster_instance {
+        println!("Stopping cluster...");
+        cluster.stop().await
+            .map_err(|e| crate::cli::CliError::operation(format!("Failed to stop cluster: {}", e)))?;
+        println!("✓ Cluster stopped");
+    }
 
     println!("✓ Server stopped");
 
