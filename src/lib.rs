@@ -86,6 +86,7 @@
 
 pub mod disruptor;
 pub mod api;
+#[cfg(feature = "cluster")]
 pub mod cluster;
 
 // Re-export the main types for convenience

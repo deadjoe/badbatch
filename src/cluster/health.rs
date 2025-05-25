@@ -60,6 +60,8 @@ pub struct HealthChecker {
     node_health: Arc<RwLock<HashMap<NodeId, HealthCheckResult>>>,
     /// Running state
     running: Arc<std::sync::atomic::AtomicBool>,
+    /// Background task handles
+    task_handles: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl HealthChecker {
@@ -69,6 +71,7 @@ impl HealthChecker {
             config,
             node_health: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            task_handles: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -79,6 +82,32 @@ impl HealthChecker {
         }
 
         self.running.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        // Start health check background task
+        let health_task = {
+            let config = self.config.clone();
+            let _node_health = self.node_health.clone();
+            let running = self.running.clone();
+
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(config.probe_interval);
+
+                while running.load(std::sync::atomic::Ordering::SeqCst) {
+                    interval.tick().await;
+
+                    // Placeholder for actual health checking logic
+                    // In a real implementation, this would check all known nodes
+                    tracing::debug!("Health check round completed");
+                }
+            })
+        };
+
+        // Store task handle for proper cleanup
+        {
+            let mut handles = self.task_handles.write().await;
+            handles.push(health_task);
+        }
+
         tracing::info!("Health checker started");
         Ok(())
     }
@@ -90,6 +119,15 @@ impl HealthChecker {
         }
 
         self.running.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // Wait for all background tasks to complete
+        let mut handles = self.task_handles.write().await;
+        while let Some(handle) = handles.pop() {
+            if let Err(e) = handle.await {
+                tracing::warn!("Health checker background task failed to complete cleanly: {}", e);
+            }
+        }
+
         tracing::info!("Health checker stopped");
         Ok(())
     }
