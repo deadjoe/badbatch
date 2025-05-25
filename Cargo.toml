@@ -17,6 +17,10 @@ path = "src/lib.rs"
 name = "badbatch"
 path = "src/bin/badbatch.rs"
 
+[features]
+default = []
+cluster = []
+
 [dependencies]
 # Core dependencies
 tokio = { version = "1.0", features = ["full"] }
