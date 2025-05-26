@@ -2,18 +2,16 @@
 //!
 //! Common utility functions used across CLI commands.
 
+use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
-use serde_json::Value;
 
 use crate::cli::{CliError, CliResult};
 use badbatch::disruptor::is_power_of_two;
 
 /// Validate that a string is valid JSON
 pub fn validate_json(data: &str) -> CliResult<Value> {
-    serde_json::from_str(data).map_err(|e| {
-        CliError::invalid_input(format!("Invalid JSON: {}", e))
-    })
+    serde_json::from_str(data).map_err(|e| CliError::invalid_input(format!("Invalid JSON: {}", e)))
 }
 
 /// Parse key-value pairs from command line arguments
@@ -38,17 +36,25 @@ pub fn parse_key_value_pairs(pairs: &[String]) -> CliResult<HashMap<String, Stri
 /// Validate disruptor name
 pub fn validate_disruptor_name(name: &str) -> CliResult<()> {
     if name.is_empty() {
-        return Err(CliError::invalid_input("Disruptor name cannot be empty".to_string()));
+        return Err(CliError::invalid_input(
+            "Disruptor name cannot be empty".to_string(),
+        ));
     }
 
     if name.len() > 64 {
-        return Err(CliError::invalid_input("Disruptor name cannot exceed 64 characters".to_string()));
+        return Err(CliError::invalid_input(
+            "Disruptor name cannot exceed 64 characters".to_string(),
+        ));
     }
 
     // Check for valid characters (alphanumeric, dash, underscore)
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(CliError::invalid_input(
-            "Disruptor name can only contain alphanumeric characters, dashes, and underscores".to_string()
+            "Disruptor name can only contain alphanumeric characters, dashes, and underscores"
+                .to_string(),
         ));
     }
 
@@ -58,21 +64,27 @@ pub fn validate_disruptor_name(name: &str) -> CliResult<()> {
 /// Validate buffer size (must be power of 2)
 pub fn validate_buffer_size(size: usize) -> CliResult<()> {
     if size == 0 {
-        return Err(CliError::invalid_input("Buffer size cannot be zero".to_string()));
+        return Err(CliError::invalid_input(
+            "Buffer size cannot be zero".to_string(),
+        ));
     }
 
     if !is_power_of_two(size) {
         return Err(CliError::invalid_input(
-            "Buffer size must be a power of 2 (e.g., 1024, 2048, 4096)".to_string()
+            "Buffer size must be a power of 2 (e.g., 1024, 2048, 4096)".to_string(),
         ));
     }
 
     if size < 2 {
-        return Err(CliError::invalid_input("Buffer size must be at least 2".to_string()));
+        return Err(CliError::invalid_input(
+            "Buffer size must be at least 2".to_string(),
+        ));
     }
 
     if size > 1024 * 1024 * 1024 {
-        return Err(CliError::invalid_input("Buffer size cannot exceed 1GB".to_string()));
+        return Err(CliError::invalid_input(
+            "Buffer size cannot exceed 1GB".to_string(),
+        ));
     }
 
     Ok(())
@@ -83,14 +95,14 @@ pub fn confirm_action(message: &str) -> CliResult<bool> {
     use std::io::{self, Write};
 
     print!("{} [y/N]: ", message);
-    io::stdout().flush().map_err(|e| {
-        CliError::operation(format!("Failed to flush stdout: {}", e))
-    })?;
+    io::stdout()
+        .flush()
+        .map_err(|e| CliError::operation(format!("Failed to flush stdout: {}", e)))?;
 
     let mut input = String::new();
-    io::stdin().read_line(&mut input).map_err(|e| {
-        CliError::operation(format!("Failed to read input: {}", e))
-    })?;
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| CliError::operation(format!("Failed to read input: {}", e)))?;
 
     let input = input.trim().to_lowercase();
     Ok(input == "y" || input == "yes")
@@ -226,6 +238,9 @@ mod tests {
     #[test]
     fn test_truncate_string() {
         assert_eq!(truncate_string("short", 10), "short");
-        assert_eq!(truncate_string("this is a very long string", 10), "this is...");
+        assert_eq!(
+            truncate_string("this is a very long string", 10),
+            "this is..."
+        );
     }
 }

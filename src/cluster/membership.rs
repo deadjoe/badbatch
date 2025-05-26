@@ -5,10 +5,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc, broadcast};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::time::{interval, Duration};
 
-use crate::cluster::{Node, NodeId, NodeInfo, NodeState, ClusterResult};
+use crate::cluster::{ClusterResult, Node, NodeId, NodeInfo, NodeState};
 
 /// Membership events
 #[derive(Debug, Clone)]
@@ -67,7 +67,8 @@ impl ClusterMembership {
 
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
         *self.shutdown_tx.write().await = Some(shutdown_tx);
-        self.running.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
 
         // Start membership maintenance task
         let _maintenance_task = {
@@ -103,7 +104,8 @@ impl ClusterMembership {
             return Ok(());
         }
 
-        self.running.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
 
         if let Some(shutdown_tx) = self.shutdown_tx.write().await.take() {
             let _ = shutdown_tx.send(()).await;
@@ -147,7 +149,9 @@ impl ClusterMembership {
         if let Some(node) = members.get_mut(node_id) {
             if node.state != NodeState::Dead {
                 node.state = NodeState::Dead;
-                let _ = self.event_tx.send(MembershipEvent::NodeFailed(node.clone()));
+                let _ = self
+                    .event_tx
+                    .send(MembershipEvent::NodeFailed(node.clone()));
             }
         }
 
@@ -162,7 +166,9 @@ impl ClusterMembership {
             if node.state != NodeState::Alive {
                 node.state = NodeState::Alive;
                 node.last_seen = chrono::Utc::now();
-                let _ = self.event_tx.send(MembershipEvent::NodeRecovered(node.clone()));
+                let _ = self
+                    .event_tx
+                    .send(MembershipEvent::NodeRecovered(node.clone()));
             }
         }
 
@@ -172,7 +178,10 @@ impl ClusterMembership {
     /// Get all cluster members
     pub async fn get_members(&self) -> Vec<Node> {
         let members = self.members.read().await;
-        members.values().map(|info| Node::from_info(info.clone())).collect()
+        members
+            .values()
+            .map(|info| Node::from_info(info.clone()))
+            .collect()
     }
 
     /// Get healthy members
@@ -188,7 +197,9 @@ impl ClusterMembership {
     /// Get member by ID
     pub async fn get_member(&self, node_id: &NodeId) -> Option<Node> {
         let members = self.members.read().await;
-        members.get(node_id).map(|info| Node::from_info(info.clone()))
+        members
+            .get(node_id)
+            .map(|info| Node::from_info(info.clone()))
     }
 
     /// Get member count
@@ -244,10 +255,16 @@ impl ClusterMembership {
                 // Check if node has been inactive for too long
                 let inactive_duration = now - node_info.last_seen;
 
-                if inactive_duration > chrono::Duration::seconds(60) && node_info.state == NodeState::Alive {
+                if inactive_duration > chrono::Duration::seconds(60)
+                    && node_info.state == NodeState::Alive
+                {
                     // Mark as suspect first
                     // In a real implementation, this would trigger failure detection
-                    tracing::warn!("Node {} has been inactive for {:?}", node_id, inactive_duration);
+                    tracing::warn!(
+                        "Node {} has been inactive for {:?}",
+                        node_id,
+                        inactive_duration
+                    );
                 }
 
                 if inactive_duration > chrono::Duration::seconds(300) {

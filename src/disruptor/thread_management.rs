@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 ///
 /// This follows the disruptor-rs pattern for thread configuration,
 /// allowing fine-grained control over thread naming and CPU affinity.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ThreadContext {
     /// CPU core affinity (optional)
     affinity: Option<CoreId>,
@@ -18,16 +18,6 @@ pub struct ThreadContext {
     name: Option<String>,
     /// Thread ID counter for automatic naming
     id: usize,
-}
-
-impl Default for ThreadContext {
-    fn default() -> Self {
-        Self {
-            affinity: None,
-            name: None,
-            id: 0,
-        }
-    }
 }
 
 impl ThreadContext {
@@ -108,7 +98,7 @@ impl ManagedThread {
 
     /// Check if the thread is still running
     pub fn is_running(&self) -> bool {
-        self.join_handle.as_ref().map_or(false, |h| !h.is_finished())
+        self.join_handle.as_ref().is_some_and(|h| !h.is_finished())
     }
 }
 
@@ -300,7 +290,9 @@ mod tests {
         assert!(managed_thread.is_running());
 
         // Wait for thread to complete
-        managed_thread.join().expect("Thread should complete successfully");
+        managed_thread
+            .join()
+            .expect("Thread should complete successfully");
 
         assert_eq!(*counter.lock().unwrap(), 42);
     }

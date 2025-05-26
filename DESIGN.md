@@ -241,10 +241,13 @@ let consumer = ElegantConsumer::with_affinity(ring_buffer,
 - **ABA Prevention**: Careful handling of sequence wraparound
 
 ### Testing Strategy
-- **Unit Tests**: 319 tests covering all components
-- **Integration Tests**: End-to-end scenarios
-- **Property Tests**: Invariant checking
-- **Performance Tests**: Latency and throughput validation with criterion.rs
+- **Unit Tests**: 149 tests covering all core components
+- **CLI Tests**: 110 tests for command-line interface functionality
+- **Integration Tests**: 12 end-to-end scenarios with multiple producers/consumers
+- **Documentation Tests**: 10 tests validating API examples and documentation
+- **Property Tests**: Invariant checking with proptest for sequence ordering and ring buffer behavior
+- **Performance Tests**: Latency and throughput validation with criterion.rs benchmarks
+- **Quality Assurance**: Comprehensive pipeline with security audits, dependency checks, and coverage analysis
 
 ## Dependencies
 
@@ -489,10 +492,13 @@ pub enum Commands {
 ## Testing and Validation
 
 ### Test Coverage
-- **Unit Tests**: 319 tests covering all core components
-- **Integration Tests**: End-to-end scenarios with multiple producers/consumers
-- **Property Tests**: Invariant checking for sequence ordering
-- **Performance Tests**: Latency and throughput validation with criterion.rs
+- **Unit Tests**: 149 tests covering all core components
+- **CLI Tests**: 110 tests for command-line interface functionality
+- **Integration Tests**: 12 end-to-end scenarios with multiple producers/consumers
+- **Documentation Tests**: 10 tests validating API examples and documentation
+- **Property Tests**: Invariant checking with proptest for sequence ordering and ring buffer behavior
+- **Performance Tests**: Latency and throughput validation with criterion.rs benchmarks
+- **Quality Assurance**: Comprehensive pipeline with security audits, dependency checks, and coverage analysis
 
 ### Continuous Integration
 - **Rust Versions**: Tested on stable, beta, and nightly

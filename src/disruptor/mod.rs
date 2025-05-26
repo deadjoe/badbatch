@@ -1,7 +1,7 @@
 //! BadBatch Disruptor Implementation
 //!
 //! This module provides a complete Rust implementation of the LMAX Disruptor pattern,
-//! strictly following the original design from https://github.com/LMAX-Exchange/disruptor
+//! strictly following the original design from <https://github.com/LMAX-Exchange/disruptor>
 //!
 //! ## Core Architecture
 //!
@@ -34,8 +34,8 @@ pub mod core_interfaces;
 pub mod ring_buffer;
 
 // Event handling interfaces
-pub mod event_handler;
 pub mod event_factory;
+pub mod event_handler;
 pub mod event_translator;
 
 // Sequencer implementations
@@ -72,27 +72,33 @@ pub mod thread_management;
 pub mod elegant_consumer;
 
 // Main Disruptor DSL
+#[allow(clippy::module_inception)]
 pub mod disruptor;
 
 // Re-export core types for convenience
 pub use sequence::Sequence;
 // pub use core_interfaces::{Cursored, Sequenced, DataProvider, EventSink}; // Temporarily disabled
-pub use ring_buffer::RingBuffer;
-pub use event_handler::{EventHandler, NoOpEventHandler};
-pub use event_factory::{EventFactory, DefaultEventFactory};
-pub use event_translator::{EventTranslator, EventTranslatorOneArg, EventTranslatorTwoArg, EventTranslatorThreeArg};
-pub use sequencer::{Sequencer, SingleProducerSequencer, MultiProducerSequencer};
-pub use wait_strategy::{WaitStrategy, BlockingWaitStrategy, YieldingWaitStrategy, BusySpinWaitStrategy, SleepingWaitStrategy};
-pub use event_processor::{EventProcessor, BatchEventProcessor};
-pub use sequence_barrier::{SequenceBarrier, ProcessingSequenceBarrier};
-pub use exception_handler::{ExceptionHandler, DefaultExceptionHandler};
-pub use producer_type::ProducerType;
 pub use disruptor::Disruptor;
+pub use event_factory::{DefaultEventFactory, EventFactory};
+pub use event_handler::{EventHandler, NoOpEventHandler};
+pub use event_processor::{BatchEventProcessor, EventProcessor};
+pub use event_translator::{
+    EventTranslator, EventTranslatorOneArg, EventTranslatorThreeArg, EventTranslatorTwoArg,
+};
+pub use exception_handler::{DefaultExceptionHandler, ExceptionHandler};
+pub use producer_type::ProducerType;
+pub use ring_buffer::RingBuffer;
+pub use sequence_barrier::{ProcessingSequenceBarrier, SequenceBarrier};
+pub use sequencer::{MultiProducerSequencer, Sequencer, SingleProducerSequencer};
+pub use wait_strategy::{
+    BlockingWaitStrategy, BusySpinWaitStrategy, SleepingWaitStrategy, WaitStrategy,
+    YieldingWaitStrategy,
+};
 
 // Re-export builder functions and producer types (inspired by disruptor-rs)
-pub use builder::{build_single_producer, build_multi_producer, CloneableProducer};
-pub use producer::{Producer, SimpleProducer, RingBufferFull, MissingFreeSlots};
+pub use builder::{build_multi_producer, build_single_producer, CloneableProducer};
 pub use elegant_consumer::ElegantConsumer;
+pub use producer::{MissingFreeSlots, Producer, RingBufferFull, SimpleProducer};
 
 /// The initial cursor value for sequences (matches LMAX Disruptor)
 pub const INITIAL_CURSOR_VALUE: i64 = -1;
@@ -129,6 +135,9 @@ pub type Result<T> = std::result::Result<T, DisruptorError>;
 pub fn is_power_of_two(n: usize) -> bool {
     n != 0 && (n & (n - 1)) == 0
 }
+
+#[cfg(test)]
+pub mod property_tests;
 
 #[cfg(test)]
 mod tests {

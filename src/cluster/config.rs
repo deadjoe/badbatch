@@ -3,12 +3,12 @@
 //! This module defines configuration structures for the distributed cluster,
 //! including gossip protocol settings, health check parameters, and replication options.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
 
-use crate::cluster::{NodeId, GossipConfig};
+use crate::cluster::{GossipConfig, NodeId};
 
 /// Main cluster configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -362,22 +362,28 @@ mod tests {
 
     #[test]
     fn test_config_validation() {
-        let mut config = ClusterConfig::default();
-
-        // Test invalid gossip interval
-        config.gossip_interval = Duration::from_millis(10);
+        let config = ClusterConfig {
+            gossip_interval: Duration::from_millis(10),
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
 
         // Test invalid probe timeout
-        config.gossip_interval = Duration::from_millis(200);
-        config.probe_timeout = config.probe_interval;
-        assert!(config.validate().is_err());
+        let config2 = ClusterConfig {
+            gossip_interval: Duration::from_millis(200),
+            probe_timeout: Duration::from_millis(200), // Same as probe_interval default
+            ..Default::default()
+        };
+        assert!(config2.validate().is_err());
 
         // Test encryption without key
-        config.probe_timeout = Duration::from_millis(100);
-        config.enable_encryption = true;
-        config.encryption_key = None;
-        assert!(config.validate().is_err());
+        let config3 = ClusterConfig {
+            probe_timeout: Duration::from_millis(100),
+            enable_encryption: true,
+            encryption_key: None,
+            ..Default::default()
+        };
+        assert!(config3.validate().is_err());
     }
 
     #[test]
@@ -394,6 +400,9 @@ mod tests {
         assert_eq!(config.seed_nodes.len(), 1);
         assert_eq!(config.gossip_interval, Duration::from_millis(150));
         assert!(!config.enable_compression);
-        assert_eq!(config.metadata.get("datacenter"), Some(&"us-west-1".to_string()));
+        assert_eq!(
+            config.metadata.get("datacenter"),
+            Some(&"us-west-1".to_string())
+        );
     }
 }

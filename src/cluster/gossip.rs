@@ -4,16 +4,16 @@
 //! across the cluster. It follows the SWIM (Scalable Weakly-consistent Infection-style
 //! Process Group Membership) protocol with optimizations for performance and reliability.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{mpsc, RwLock};
 use tokio::time::interval;
-use serde::{Deserialize, Serialize};
 
-use crate::cluster::{Node, NodeId, NodeInfo, ClusterError, ClusterResult};
+use crate::cluster::{ClusterError, ClusterResult, Node, NodeId, NodeInfo};
 
 /// Gossip protocol configuration
 #[derive(Debug, Clone)]
@@ -55,24 +55,16 @@ pub enum GossipMessage {
         sequence: u64,
     },
     /// Node state update
-    StateUpdate {
-        node: NodeInfo,
-        incarnation: u64,
-    },
+    StateUpdate { node: NodeInfo, incarnation: u64 },
     /// Join request
-    JoinRequest {
-        node: NodeInfo,
-    },
+    JoinRequest { node: NodeInfo },
     /// Join response
     JoinResponse {
         nodes: Vec<NodeInfo>,
         accepted: bool,
     },
     /// Leave notification
-    Leave {
-        node_id: NodeId,
-        incarnation: u64,
-    },
+    Leave { node_id: NodeId, incarnation: u64 },
     /// Suspect notification
     Suspect {
         node_id: NodeId,
@@ -80,10 +72,7 @@ pub enum GossipMessage {
         from: NodeId,
     },
     /// Alive notification (refutes suspect)
-    Alive {
-        node_id: NodeId,
-        incarnation: u64,
-    },
+    Alive { node_id: NodeId, incarnation: u64 },
     /// Dead notification
     Dead {
         node_id: NodeId,
@@ -125,10 +114,7 @@ struct PendingAck {
 
 impl GossipProtocol {
     /// Create a new gossip protocol instance
-    pub async fn new(
-        config: GossipConfig,
-        local_node: Arc<RwLock<Node>>,
-    ) -> ClusterResult<Self> {
+    pub async fn new(config: GossipConfig, local_node: Arc<RwLock<Node>>) -> ClusterResult<Self> {
         let bind_addr = {
             let node = local_node.read().await;
             node.bind_addr()
@@ -162,7 +148,8 @@ impl GossipProtocol {
 
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
         *self.shutdown_tx.write().await = Some(shutdown_tx);
-        self.running.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
 
         // Start gossip timer
         let gossip_task = {
@@ -218,7 +205,9 @@ impl GossipProtocol {
                                 &nodes,
                                 &pending_acks,
                                 &socket,
-                            ).await {
+                            )
+                            .await
+                            {
                                 tracing::warn!("Failed to handle message from {}: {}", addr, e);
                             }
                         }
@@ -247,7 +236,8 @@ impl GossipProtocol {
             return Ok(());
         }
 
-        self.running.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
 
         // Send shutdown signal
         if let Some(shutdown_tx) = self.shutdown_tx.write().await.take() {
@@ -355,7 +345,11 @@ impl GossipProtocol {
             .map_err(|e| ClusterError::protocol(format!("Invalid message format: {}", e)))?;
 
         match message {
-            GossipMessage::Ping { from, sequence, timestamp: _ } => {
+            GossipMessage::Ping {
+                from,
+                sequence,
+                timestamp: _,
+            } => {
                 let ack = GossipMessage::Ack {
                     from: local_node.read().await.id().clone(),
                     to: from,
@@ -365,7 +359,12 @@ impl GossipProtocol {
                 Self::send_message_to(&ack, from_addr, socket).await?;
             }
 
-            GossipMessage::Ack { from: _, to: _, sequence, timestamp: _ } => {
+            GossipMessage::Ack {
+                from: _,
+                to: _,
+                sequence,
+                timestamp: _,
+            } => {
                 let mut pending = pending_acks.write().await;
                 pending.remove(&sequence);
             }
@@ -390,7 +389,10 @@ impl GossipProtocol {
                 Self::send_message_to(&response, from_addr, socket).await?;
             }
 
-            GossipMessage::JoinResponse { nodes: node_list, accepted } => {
+            GossipMessage::JoinResponse {
+                nodes: node_list,
+                accepted,
+            } => {
                 if accepted {
                     let mut nodes_map = nodes.write().await;
                     for node in node_list {
@@ -399,7 +401,10 @@ impl GossipProtocol {
                 }
             }
 
-            GossipMessage::StateUpdate { node, incarnation: _ } => {
+            GossipMessage::StateUpdate {
+                node,
+                incarnation: _,
+            } => {
                 let mut nodes_map = nodes.write().await;
                 nodes_map.insert(node.id.clone(), node);
             }
@@ -422,7 +427,8 @@ impl GossipProtocol {
         let data = serde_json::to_vec(message)
             .map_err(|e| ClusterError::protocol(format!("Failed to serialize message: {}", e)))?;
 
-        socket.send_to(&data, addr)
+        socket
+            .send_to(&data, addr)
             .await
             .map_err(|e| ClusterError::network(format!("Failed to send message: {}", e)))?;
 
@@ -480,7 +486,11 @@ mod tests {
         let deserialized: GossipMessage = serde_json::from_slice(&serialized).unwrap();
 
         match deserialized {
-            GossipMessage::Ping { sequence, timestamp, .. } => {
+            GossipMessage::Ping {
+                sequence,
+                timestamp,
+                ..
+            } => {
                 assert_eq!(sequence, 123);
                 assert_eq!(timestamp, 1234567890);
             }

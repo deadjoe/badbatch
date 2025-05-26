@@ -33,16 +33,15 @@ pub mod routes;
 pub mod server;
 
 // Re-export main types
-pub use server::ApiServer;
-pub use models::*;
 pub use error::ApiError;
+pub use models::*;
+pub use server::ApiServer;
 
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
-
 
 /// API version
 pub const API_VERSION: &str = "v1";

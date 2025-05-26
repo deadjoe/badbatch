@@ -10,7 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use std::time::Instant;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 /// Request ID header name
@@ -96,7 +96,7 @@ pub async fn metrics_collection(request: Request, next: Next) -> Response {
     let status = response.status();
 
     // Collect metrics (in a real implementation, this would update metrics storage)
-    collect_request_metrics(&method.to_string(), &uri, status.as_u16(), duration);
+    collect_request_metrics(method.as_ref(), &uri, status.as_u16(), duration);
 
     response
 }
@@ -115,7 +115,10 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
         "Strict-Transport-Security",
         "max-age=31536000; includeSubDomains".parse().unwrap(),
     );
-    headers.insert("Referrer-Policy", "strict-origin-when-cross-origin".parse().unwrap());
+    headers.insert(
+        "Referrer-Policy",
+        "strict-origin-when-cross-origin".parse().unwrap(),
+    );
 
     response
 }
@@ -130,7 +133,8 @@ pub async fn rate_limiting(request: Request, next: Next) -> Response {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             "Rate limit exceeded. Please try again later.",
-        ).into_response();
+        )
+            .into_response();
     }
 
     // Record request for rate limiting
@@ -193,8 +197,8 @@ fn extract_api_key(headers: &axum::http::HeaderMap) -> Option<String> {
     // Check Authorization header for Bearer token
     if let Some(auth_header) = headers.get("Authorization") {
         if let Ok(auth_str) = auth_header.to_str() {
-            if auth_str.starts_with("Bearer ") {
-                return Some(auth_str[7..].to_string());
+            if let Some(stripped) = auth_str.strip_prefix("Bearer ") {
+                return Some(stripped.to_string());
             }
         }
     }
@@ -252,7 +256,12 @@ fn extract_client_id(request: &Request) -> String {
     // Try to get client IP from headers (considering proxies)
     if let Some(forwarded_for) = request.headers().get("X-Forwarded-For") {
         if let Ok(ip_str) = forwarded_for.to_str() {
-            return ip_str.split(',').next().unwrap_or("unknown").trim().to_string();
+            return ip_str
+                .split(',')
+                .next()
+                .unwrap_or("unknown")
+                .trim()
+                .to_string();
         }
     }
 
@@ -277,8 +286,6 @@ fn is_rate_limited(_client_id: &str) -> bool {
 fn record_request(_client_id: &str) {
     // In a real implementation, this would update rate limiting counters
 }
-
-
 
 /// Collect request metrics (placeholder implementation)
 fn collect_request_metrics(
@@ -338,8 +345,8 @@ mod tests {
 
     #[test]
     fn test_extract_client_id_unknown() {
-        use axum::http::Request;
         use axum::body::Body;
+        use axum::http::Request;
         let request = Request::builder().body(Body::empty()).unwrap();
         let client_id = extract_client_id(&request);
         assert_eq!(client_id, "unknown");
@@ -364,7 +371,10 @@ mod tests {
 
         // Test Authorization Bearer header
         let mut headers = HeaderMap::new();
-        headers.insert("Authorization", HeaderValue::from_static("Bearer bearer-token"));
+        headers.insert(
+            "Authorization",
+            HeaderValue::from_static("Bearer bearer-token"),
+        );
         assert_eq!(extract_api_key(&headers), Some("bearer-token".to_string()));
 
         // Test no headers

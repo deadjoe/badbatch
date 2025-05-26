@@ -4,14 +4,14 @@
 //! handling their lifecycle, state tracking, and coordination with the API layer.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use uuid::Uuid;
 
-use crate::api::error::{ApiResult, ApiError};
-use crate::api::models::{DisruptorInfo, DisruptorStatus, DisruptorConfig};
+use crate::api::error::{ApiError, ApiResult};
+use crate::api::models::{DisruptorConfig, DisruptorInfo, DisruptorStatus};
 use crate::disruptor::{
-    Disruptor, ProducerType, WaitStrategy, DefaultEventFactory,
-    BlockingWaitStrategy, YieldingWaitStrategy, BusySpinWaitStrategy, SleepingWaitStrategy,
+    BlockingWaitStrategy, BusySpinWaitStrategy, DefaultEventFactory, Disruptor, ProducerType,
+    SleepingWaitStrategy, WaitStrategy, YieldingWaitStrategy,
 };
 
 /// Event type used for API-managed Disruptors
@@ -59,28 +59,37 @@ impl DisruptorManager {
     ) -> ApiResult<DisruptorInfo> {
         // Validate buffer size
         if !crate::disruptor::is_power_of_two(buffer_size) {
-            return Err(ApiError::invalid_request("buffer_size must be a power of 2"));
+            return Err(ApiError::invalid_request(
+                "buffer_size must be a power of 2",
+            ));
         }
 
-        if buffer_size < 2 || buffer_size > 1024 * 1024 {
-            return Err(ApiError::invalid_request("buffer_size must be between 2 and 1048576"));
+        if !(2..=1024 * 1024).contains(&buffer_size) {
+            return Err(ApiError::invalid_request(
+                "buffer_size must be between 2 and 1048576",
+            ));
         }
 
         // Parse producer type
         let producer_type_enum = match producer_type.to_lowercase().as_str() {
             "single" => ProducerType::Single,
             "multi" => ProducerType::Multi,
-            _ => return Err(ApiError::invalid_request("Invalid producer_type. Must be 'single' or 'multi'")),
+            _ => {
+                return Err(ApiError::invalid_request(
+                    "Invalid producer_type. Must be 'single' or 'multi'",
+                ))
+            }
         };
 
         // Create wait strategy
-        let wait_strategy_impl: Box<dyn WaitStrategy> = match wait_strategy.to_lowercase().as_str() {
+        let wait_strategy_impl: Box<dyn WaitStrategy> = match wait_strategy.to_lowercase().as_str()
+        {
             "blocking" => Box::new(BlockingWaitStrategy::new()),
             "yielding" => Box::new(YieldingWaitStrategy::new()),
             "busy_spin" => Box::new(BusySpinWaitStrategy::new()),
             "sleeping" => Box::new(SleepingWaitStrategy::new()),
             _ => return Err(ApiError::invalid_request(
-                "Invalid wait_strategy. Must be 'blocking', 'yielding', 'busy_spin', or 'sleeping'"
+                "Invalid wait_strategy. Must be 'blocking', 'yielding', 'busy_spin', or 'sleeping'",
             )),
         };
 
@@ -94,7 +103,8 @@ impl DisruptorManager {
             buffer_size,
             producer_type_enum,
             wait_strategy_impl,
-        ).map_err(|e| ApiError::internal(format!("Failed to create Disruptor: {}", e)))?
+        )
+        .map_err(|e| ApiError::internal(format!("Failed to create Disruptor: {}", e)))?
         .handle_events_with(NoOpEventHandler::<ApiEvent>::new())
         .build();
 
@@ -122,7 +132,9 @@ impl DisruptorManager {
 
         // Store in manager
         {
-            let mut disruptors = self.disruptors.write()
+            let mut disruptors = self
+                .disruptors
+                .write()
                 .map_err(|_| ApiError::internal("Failed to acquire write lock"))?;
             disruptors.insert(disruptor_id, managed);
         }
@@ -132,7 +144,9 @@ impl DisruptorManager {
 
     /// Get Disruptor information by ID
     pub fn get_disruptor_info(&self, id: &str) -> ApiResult<DisruptorInfo> {
-        let disruptors = self.disruptors.read()
+        let disruptors = self
+            .disruptors
+            .read()
             .map_err(|_| ApiError::internal("Failed to acquire read lock"))?;
 
         match disruptors.get(id) {
@@ -143,7 +157,9 @@ impl DisruptorManager {
 
     /// Update Disruptor status
     pub fn update_status(&self, id: &str, status: DisruptorStatus) -> ApiResult<()> {
-        let mut disruptors = self.disruptors.write()
+        let mut disruptors = self
+            .disruptors
+            .write()
             .map_err(|_| ApiError::internal("Failed to acquire write lock"))?;
 
         match disruptors.get_mut(id) {
@@ -158,20 +174,27 @@ impl DisruptorManager {
 
     /// Start a Disruptor instance
     pub fn start_disruptor(&self, id: &str) -> ApiResult<DisruptorInfo> {
-        let mut disruptors = self.disruptors.write()
+        let mut disruptors = self
+            .disruptors
+            .write()
             .map_err(|_| ApiError::internal("Failed to acquire write lock"))?;
 
         match disruptors.get_mut(id) {
             Some(managed) => {
                 match managed.info.status {
-                    DisruptorStatus::Created | DisruptorStatus::Stopped | DisruptorStatus::Paused => {
+                    DisruptorStatus::Created
+                    | DisruptorStatus::Stopped
+                    | DisruptorStatus::Paused => {
                         // Actually start the Disruptor with event processors
-                        let mut disruptor = managed.disruptor.lock()
+                        let mut disruptor = managed
+                            .disruptor
+                            .lock()
                             .map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
 
                         // Start the disruptor (this will start all event processors)
-                        disruptor.start()
-                            .map_err(|e| ApiError::internal(format!("Failed to start Disruptor: {}", e)))?;
+                        disruptor.start().map_err(|e| {
+                            ApiError::internal(format!("Failed to start Disruptor: {}", e))
+                        })?;
 
                         // Update status
                         managed.info.status = DisruptorStatus::Running;
@@ -184,9 +207,9 @@ impl DisruptorManager {
                     DisruptorStatus::Stopping => {
                         Err(ApiError::invalid_request("Disruptor is currently stopping"))
                     }
-                    DisruptorStatus::Error => {
-                        Err(ApiError::invalid_request("Disruptor is in error state. Delete and recreate."))
-                    }
+                    DisruptorStatus::Error => Err(ApiError::invalid_request(
+                        "Disruptor is in error state. Delete and recreate.",
+                    )),
                 }
             }
             None => Err(ApiError::disruptor_not_found(id)),
@@ -195,7 +218,9 @@ impl DisruptorManager {
 
     /// Stop a Disruptor instance
     pub fn stop_disruptor(&self, id: &str) -> ApiResult<DisruptorInfo> {
-        let mut disruptors = self.disruptors.write()
+        let mut disruptors = self
+            .disruptors
+            .write()
             .map_err(|_| ApiError::internal("Failed to acquire write lock"))?;
 
         match disruptors.get_mut(id) {
@@ -207,12 +232,15 @@ impl DisruptorManager {
                         managed.info.last_activity = chrono::Utc::now();
 
                         // Actually stop the Disruptor
-                        let mut disruptor = managed.disruptor.lock()
+                        let mut disruptor = managed
+                            .disruptor
+                            .lock()
                             .map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
 
                         // Shutdown the disruptor (this will stop all event processors)
-                        disruptor.shutdown()
-                            .map_err(|e| ApiError::internal(format!("Failed to stop Disruptor: {}", e)))?;
+                        disruptor.shutdown().map_err(|e| {
+                            ApiError::internal(format!("Failed to stop Disruptor: {}", e))
+                        })?;
 
                         // Update status to stopped
                         managed.info.status = DisruptorStatus::Stopped;
@@ -222,9 +250,9 @@ impl DisruptorManager {
                     DisruptorStatus::Stopped => {
                         Err(ApiError::invalid_request("Disruptor is already stopped"))
                     }
-                    DisruptorStatus::Created => {
-                        Err(ApiError::invalid_request("Disruptor has not been started yet"))
-                    }
+                    DisruptorStatus::Created => Err(ApiError::invalid_request(
+                        "Disruptor has not been started yet",
+                    )),
                     DisruptorStatus::Stopping => {
                         Err(ApiError::invalid_request("Disruptor is already stopping"))
                     }
@@ -239,10 +267,13 @@ impl DisruptorManager {
 
     /// List all Disruptors
     pub fn list_disruptors(&self) -> ApiResult<Vec<DisruptorInfo>> {
-        let disruptors = self.disruptors.read()
+        let disruptors = self
+            .disruptors
+            .read()
             .map_err(|_| ApiError::internal("Failed to acquire read lock"))?;
 
-        let infos: Vec<DisruptorInfo> = disruptors.values()
+        let infos: Vec<DisruptorInfo> = disruptors
+            .values()
             .map(|managed| managed.info.clone())
             .collect();
 
@@ -251,7 +282,9 @@ impl DisruptorManager {
 
     /// Remove a Disruptor instance
     pub fn remove_disruptor(&self, id: &str) -> ApiResult<()> {
-        let mut disruptors = self.disruptors.write()
+        let mut disruptors = self
+            .disruptors
+            .write()
             .map_err(|_| ApiError::internal("Failed to acquire write lock"))?;
 
         match disruptors.get_mut(id) {
@@ -260,12 +293,18 @@ impl DisruptorManager {
                 match managed.info.status {
                     DisruptorStatus::Running | DisruptorStatus::Paused => {
                         // Force stop the disruptor before removal
-                        let mut disruptor = managed.disruptor.lock()
+                        let mut disruptor = managed
+                            .disruptor
+                            .lock()
                             .map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
 
                         // Shutdown the disruptor
-                        disruptor.shutdown()
-                            .map_err(|e| ApiError::internal(format!("Failed to stop Disruptor during removal: {}", e)))?;
+                        disruptor.shutdown().map_err(|e| {
+                            ApiError::internal(format!(
+                                "Failed to stop Disruptor during removal: {}",
+                                e
+                            ))
+                        })?;
 
                         managed.info.status = DisruptorStatus::Stopped;
                     }
@@ -291,7 +330,9 @@ impl DisruptorManager {
     /// clones the Arc to minimize lock holding time.
     pub fn get_disruptor(&self, id: &str) -> ApiResult<Arc<Mutex<Disruptor<ApiEvent>>>> {
         // Use a read lock for concurrent access
-        let disruptors = self.disruptors.read()
+        let disruptors = self
+            .disruptors
+            .read()
             .map_err(|_| ApiError::internal("Failed to acquire read lock"))?;
 
         match disruptors.get(id) {
@@ -316,7 +357,9 @@ impl DisruptorManager {
 
     /// Get Disruptor status quickly without locking the Disruptor instance
     pub fn get_disruptor_status(&self, id: &str) -> ApiResult<DisruptorStatus> {
-        let disruptors = self.disruptors.read()
+        let disruptors = self
+            .disruptors
+            .read()
             .map_err(|_| ApiError::internal("Failed to acquire read lock"))?;
 
         match disruptors.get(id) {
@@ -348,13 +391,9 @@ mod tests {
         let manager = DisruptorManager::new();
         let config = DisruptorConfig::default();
 
-        let info = manager.create_disruptor(
-            Some("test".to_string()),
-            1024,
-            "single",
-            "blocking",
-            config,
-        ).unwrap();
+        let info = manager
+            .create_disruptor(Some("test".to_string()), 1024, "single", "blocking", config)
+            .unwrap();
 
         assert_eq!(info.buffer_size, 1024);
         assert_eq!(info.producer_type, "single");
@@ -368,11 +407,8 @@ mod tests {
         let config = DisruptorConfig::default();
 
         let result = manager.create_disruptor(
-            None,
-            1023, // Not a power of 2
-            "single",
-            "blocking",
-            config,
+            None, 1023, // Not a power of 2
+            "single", "blocking", config,
         );
 
         assert!(result.is_err());
@@ -384,13 +420,15 @@ mod tests {
         let config = DisruptorConfig::default();
 
         // Create a disruptor
-        let info = manager.create_disruptor(
-            Some("lifecycle-test".to_string()),
-            1024,
-            "single",
-            "blocking",
-            config,
-        ).unwrap();
+        let info = manager
+            .create_disruptor(
+                Some("lifecycle-test".to_string()),
+                1024,
+                "single",
+                "blocking",
+                config,
+            )
+            .unwrap();
 
         assert_eq!(info.status, DisruptorStatus::Created);
         let disruptor_id = info.id.clone();
@@ -426,13 +464,15 @@ mod tests {
         let config = DisruptorConfig::default();
 
         // Create and start a disruptor
-        let info = manager.create_disruptor(
-            Some("remove-test".to_string()),
-            512,
-            "single",
-            "blocking",
-            config,
-        ).unwrap();
+        let info = manager
+            .create_disruptor(
+                Some("remove-test".to_string()),
+                512,
+                "single",
+                "blocking",
+                config,
+            )
+            .unwrap();
 
         let disruptor_id = info.id.clone();
         manager.start_disruptor(&disruptor_id).unwrap();
@@ -452,13 +492,15 @@ mod tests {
         let config = DisruptorConfig::default();
 
         // Create a disruptor
-        let info = manager.create_disruptor(
-            Some("event-test".to_string()),
-            1024,
-            "single",
-            "blocking",
-            config,
-        ).unwrap();
+        let info = manager
+            .create_disruptor(
+                Some("event-test".to_string()),
+                1024,
+                "single",
+                "blocking",
+                config,
+            )
+            .unwrap();
 
         let disruptor_id = info.id.clone();
 
