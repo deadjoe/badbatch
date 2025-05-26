@@ -25,7 +25,7 @@ pub async fn create_disruptor(
 ) -> ApiResult<Json<ApiResponse<CreateDisruptorResponse>>> {
     // Get the global manager
     let manager = get_global_manager();
-    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let manager = manager.lock().await;
 
     // Create the Disruptor using the manager
     let disruptor_info = manager.create_disruptor(
@@ -51,7 +51,7 @@ pub async fn list_disruptors(
 ) -> ApiResult<Json<ApiResponse<DisruptorList>>> {
     // Get the global manager
     let manager = get_global_manager();
-    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let manager = manager.lock().await;
 
     // Get all Disruptor instances from manager
     let all_disruptors = manager.list_disruptors()?;
@@ -100,7 +100,7 @@ pub async fn get_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
     let manager = get_global_manager();
-    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let manager = manager.lock().await;
     let disruptor_info = manager.get_disruptor_info(&id)?;
     Ok(Json(ApiResponse::success(disruptor_info)))
 }
@@ -110,7 +110,7 @@ pub async fn delete_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<()>>> {
     let manager = get_global_manager();
-    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let manager = manager.lock().await;
     manager.remove_disruptor(&id)?;
     Ok(Json(ApiResponse::success(())))
 }
@@ -120,7 +120,7 @@ pub async fn start_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
     let manager = get_global_manager();
-    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let manager = manager.lock().await;
     let disruptor_info = manager.start_disruptor(&id)?;
     Ok(Json(ApiResponse::success(disruptor_info)))
 }
@@ -130,7 +130,7 @@ pub async fn stop_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
     let manager = get_global_manager();
-    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let manager = manager.lock().await;
     let disruptor_info = manager.stop_disruptor(&id)?;
     Ok(Json(ApiResponse::success(disruptor_info)))
 }
@@ -140,7 +140,7 @@ pub async fn pause_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
     let manager = get_global_manager();
-    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let manager = manager.lock().await;
     let _disruptor_info = manager.get_disruptor_info(&id)?;
     manager.update_status(&id, DisruptorStatus::Paused)?;
     let updated_info = manager.get_disruptor_info(&id)?;
@@ -152,7 +152,7 @@ pub async fn resume_disruptor(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
     let manager = get_global_manager();
-    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let manager = manager.lock().await;
     let _disruptor_info = manager.get_disruptor_info(&id)?;
     manager.update_status(&id, DisruptorStatus::Running)?;
     let updated_info = manager.get_disruptor_info(&id)?;
@@ -164,7 +164,7 @@ pub async fn get_disruptor_status(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorStatus>>> {
     let manager = get_global_manager();
-    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let manager = manager.lock().await;
     let disruptor_info = manager.get_disruptor_info(&id)?;
     Ok(Json(ApiResponse::success(disruptor_info.status)))
 }

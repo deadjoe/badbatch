@@ -54,7 +54,7 @@ tower-http = { version = "0.6.4", features = ["cors", "trace", "timeout", "limit
 
 [dev-dependencies]
 # Testing and benchmarking
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 tokio-test = "0.4"
 crossbeam = "0.8"  # For performance comparison benchmarks
 
@@ -69,6 +69,10 @@ harness = false
 
 [[bench]]
 name = "throughput_comparison"
+harness = false
+
+[[bench]]
+name = "simple_benchmark"
 harness = false
 
 [profile.release]
