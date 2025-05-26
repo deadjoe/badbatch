@@ -4,9 +4,8 @@
   # BadBatch Disruptor Engine
 
   [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-  [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
+  [![Rust MSRV](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
   [![CI](https://github.com/deadjoe/badbatch/workflows/CI/badge.svg)](https://github.com/deadjoe/badbatch/actions)
-  [![Tests](https://img.shields.io/badge/tests-271%20passing-brightgreen.svg)](https://github.com/deadjoe/badbatch)
 
 </div>
 
@@ -408,25 +407,6 @@ BadBatch is designed for high-performance event processing with the following ch
 - **Batch Processing**: Automatic batching reduces coordination overhead
 - **Bit Manipulation**: Fast modulo operations using bit masks for power-of-2 buffer sizes
 - **Memory Layout**: Optimal data structures (`Box<[UnsafeCell<T>]>`) for better cache locality
-
-### Current Status
-
-- **271 tests passing**: Comprehensive test coverage ensures correctness
-  - 149 unit tests covering all core components
-  - 110 CLI tests for command-line interface functionality
-  - 12 integration tests for end-to-end scenarios
-  - 10 documentation tests for API examples
-  - Property-based testing with proptest for invariant checking
-- **LMAX Algorithm Compliance**: Faithful implementation of proven algorithms
-- **disruptor-rs Optimizations**: Modern Rust patterns for improved usability
-- **Production Ready**: Core engine is stable and feature-complete
-- **Performance Benchmarks**: Integrated criterion.rs benchmarks for performance testing
-- **Async/Await Support**: Full async integration with tokio for modern Rust applications
-- **Security Features**: API key authentication and authorization middleware
-- **Cluster Support**: Distributed capabilities with gossip protocol and health monitoring
-- **Quality Assurance**: Comprehensive testing pipeline with security audits and dependency checks
-
-> **Recent Improvements**: Established comprehensive testing infrastructure with cargo-llvm-cov coverage analysis, cargo-audit security scanning, cargo-deny dependency management, and automated quality checks. Fixed critical thread safety issues, implemented batch publishing optimizations, and enhanced cluster functionality with proper JoinHandle management.
 
 ## 🤝 Contributing
 
