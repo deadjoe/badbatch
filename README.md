@@ -7,7 +7,6 @@
   [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
   [![CI](https://github.com/deadjoe/badbatch/workflows/CI/badge.svg)](https://github.com/deadjoe/badbatch/actions)
   [![Tests](https://img.shields.io/badge/tests-271%20passing-brightgreen.svg)](https://github.com/deadjoe/badbatch)
-  [![codecov](https://codecov.io/gh/deadjoe/badbatch/branch/main/graph/badge.svg)](https://codecov.io/gh/deadjoe/badbatch)
 
 </div>
 
@@ -463,7 +462,7 @@ See the [LICENSE](LICENSE) file for details.
 
 - 🐛 [Issue Tracker](https://github.com/deadjoe/badbatch/issues)
 - 💬 [Discussions](https://github.com/deadjoe/badbatch/discussions)
-- 📖 [DESIGN.md](DESIGN.md) - Comprehensive design documentation
+- 📖 [DESIGN.md](docs/DESIGN.md) - Comprehensive design documentation
 
 ---
 
