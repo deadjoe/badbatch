@@ -130,6 +130,15 @@ pub trait Sequencer: Send + Sync + std::fmt::Debug {
     /// # Returns
     /// The remaining capacity in the buffer
     fn remaining_capacity(&self) -> i64;
+
+    /// Check if there's available capacity for the required number of sequences
+    ///
+    /// # Arguments
+    /// * `required_capacity` - The number of sequences needed
+    ///
+    /// # Returns
+    /// True if the buffer has capacity, false otherwise
+    fn has_available_capacity(&self, required_capacity: usize) -> bool;
 }
 
 /// Single producer sequencer
@@ -328,6 +337,10 @@ impl Sequencer for SingleProducerSequencer {
 
         let used_capacity = next_value.saturating_sub(consumed);
         (self.buffer_size as i64).saturating_sub(used_capacity)
+    }
+
+    fn has_available_capacity(&self, required_capacity: usize) -> bool {
+        self.has_available_capacity_internal(required_capacity, false)
     }
 }
 
@@ -571,8 +584,19 @@ impl Sequencer for MultiProducerSequencer {
         self.wait_strategy.signal_all_when_blocking();
     }
 
-    fn publish_range(&self, _low: i64, high: i64) {
-        self.publish(high);
+    fn publish_range(&self, low: i64, high: i64) {
+        if low > high {
+            return; // Invalid range
+        }
+
+        // Mark all sequences in the range as available
+        // This follows the LMAX Disruptor MultiProducerSequencer.publish(long lo, long hi) logic
+        for sequence in low..=high {
+            self.set_available(sequence);
+        }
+
+        // Signal waiting consumers once after marking all sequences
+        self.wait_strategy.signal_all_when_blocking();
     }
 
     fn is_available(&self, sequence: i64) -> bool {
@@ -640,6 +664,12 @@ impl Sequencer for MultiProducerSequencer {
 
         let used_capacity = next_value.saturating_sub(consumed);
         (self.buffer_size as i64).saturating_sub(used_capacity)
+    }
+
+    fn has_available_capacity(&self, required_capacity: usize) -> bool {
+        let gating_sequences = self.gating_sequences.read();
+        let cursor_value = self.cursor.get();
+        self.has_available_capacity_internal(&gating_sequences, required_capacity, cursor_value)
     }
 }
 

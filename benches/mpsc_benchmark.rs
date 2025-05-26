@@ -222,7 +222,7 @@ fn badbatch_mpsc_modern(group: &mut BenchmarkGroup<WallTime>, params: (i64, u64)
 
     let processor = {
         let sink = Arc::clone(&sink);
-        move |event: &Event, _sequence: i64, _end_of_batch: bool| {
+        move |event: &mut Event, _sequence: i64, _end_of_batch: bool| {
             // Black box event to avoid dead code elimination
             black_box(event.data);
             sink.fetch_add(1, Release);
