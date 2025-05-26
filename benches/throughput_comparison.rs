@@ -103,7 +103,7 @@ fn badbatch_spsc_modern() {
     // Consumer
     let processor = {
         let sink = Arc::clone(&sink);
-        move |event: &Event, _sequence: i64, _end_of_batch: bool| {
+        move |event: &mut Event, _sequence: i64, _end_of_batch: bool| {
             sink.fetch_add(event.val, Ordering::Release);
         }
     };
@@ -138,7 +138,7 @@ fn badbatch_mpsc_modern() {
     // Consumer
     let processor = {
         let sink = Arc::clone(&sink);
-        move |event: &Event, _sequence: i64, _end_of_batch: bool| {
+        move |event: &mut Event, _sequence: i64, _end_of_batch: bool| {
             sink.fetch_add(event.val, Ordering::Release);
         }
     };

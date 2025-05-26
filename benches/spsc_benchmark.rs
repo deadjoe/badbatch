@@ -134,7 +134,7 @@ fn badbatch_spsc_modern(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64)
 
     let processor = {
         let sink = Arc::clone(&sink);
-        move |event: &Event, _sequence: i64, _end_of_batch: bool| {
+        move |event: &mut Event, _sequence: i64, _end_of_batch: bool| {
             sink.store(event.data, Ordering::Release);
         }
     };

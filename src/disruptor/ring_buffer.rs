@@ -5,8 +5,10 @@
 //! and provides lock-free access through careful use of memory barriers.
 
 use crate::disruptor::{Result, DisruptorError, EventFactory, is_power_of_two};
-use std::sync::Arc;
 use std::cell::UnsafeCell;
+
+#[cfg(feature = "shared-ring-buffer")]
+use std::sync::Arc;
 
 /// The core ring buffer for storing events
 ///
@@ -258,6 +260,11 @@ unsafe impl<T: Send + Sync> Sync for RingBuffer<T> {}
 ///
 /// This provides shared access to the ring buffer across multiple threads
 /// using Arc and appropriate synchronization primitives.
+///
+/// **Warning**: This implementation uses locks and violates the lock-free
+/// principle of the Disruptor pattern. It's provided for compatibility
+/// but should be avoided in performance-critical scenarios.
+#[cfg(feature = "shared-ring-buffer")]
 #[derive(Debug)]
 pub struct SharedRingBuffer<T>
 where
@@ -266,6 +273,7 @@ where
     inner: Arc<parking_lot::RwLock<RingBuffer<T>>>,
 }
 
+#[cfg(feature = "shared-ring-buffer")]
 impl<T> SharedRingBuffer<T>
 where
     T: Send + Sync,
@@ -345,6 +353,7 @@ where
     }
 }
 
+#[cfg(feature = "shared-ring-buffer")]
 impl<T> Clone for SharedRingBuffer<T>
 where
     T: Send + Sync,
@@ -411,6 +420,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "shared-ring-buffer")]
     fn test_shared_ring_buffer() {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let shared_buffer = SharedRingBuffer::new(8, factory).unwrap();
