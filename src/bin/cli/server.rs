@@ -8,10 +8,7 @@ use std::path::PathBuf;
 use crate::cli::CliResult;
 
 /// Start BadBatch server
-pub async fn start_server(
-    config_file: Option<PathBuf>,
-    bind_addr: String,
-) -> CliResult<()> {
+pub async fn start_server(config_file: Option<PathBuf>, bind_addr: String) -> CliResult<()> {
     println!("Starting BadBatch server...");
     println!("  Bind address: {}", bind_addr);
     println!("  Mode: single-node");
@@ -120,8 +117,6 @@ mod tests {
         assert_eq!(server_config.port, 8080);
     }
 
-
-
     #[test]
     fn test_config_file_path_handling() {
         let config_paths = [
@@ -172,8 +167,6 @@ mod tests {
             assert_eq!(socket_addr.ip().to_string(), *expected_ip);
         }
     }
-
-
 
     #[test]
     fn test_default_server_config() {

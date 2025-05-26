@@ -84,8 +84,6 @@ async fn show_disruptor_metrics(
     Ok(())
 }
 
-
-
 async fn watch_metrics(
     client: &BadBatchClient,
     interval: u64,
@@ -389,8 +387,6 @@ mod tests {
         assert!(prometheus.contains("badbatch_memory_usage_bytes 1048576"));
     }
 
-
-
     #[test]
     fn test_export_data_structure() {
         let export_data = serde_json::json!({
@@ -412,19 +408,13 @@ mod tests {
 
         for monitor_type in &valid_types {
             // This simulates the validation logic in watch_metrics
-            let is_valid = matches!(
-                monitor_type.to_lowercase().as_str(),
-                "system" | "disruptor"
-            );
+            let is_valid = matches!(monitor_type.to_lowercase().as_str(), "system" | "disruptor");
             assert!(is_valid, "Monitor type '{}' should be valid", monitor_type);
         }
 
         let invalid_types = ["invalid", "unknown", "cluster", ""];
         for monitor_type in &invalid_types {
-            let is_valid = matches!(
-                monitor_type.to_lowercase().as_str(),
-                "system" | "disruptor"
-            );
+            let is_valid = matches!(monitor_type.to_lowercase().as_str(), "system" | "disruptor");
             assert!(
                 !is_valid,
                 "Monitor type '{}' should be invalid",
