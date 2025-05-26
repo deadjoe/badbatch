@@ -241,10 +241,10 @@ let consumer = ElegantConsumer::with_affinity(ring_buffer,
 - **ABA Prevention**: Careful handling of sequence wraparound
 
 ### Testing Strategy
-- **Unit Tests**: 146+ tests covering all components
+- **Unit Tests**: 319 tests covering all components
 - **Integration Tests**: End-to-end scenarios
 - **Property Tests**: Invariant checking
-- **Performance Tests**: Latency and throughput validation
+- **Performance Tests**: Latency and throughput validation with criterion.rs
 
 ## Dependencies
 
@@ -489,10 +489,10 @@ pub enum Commands {
 ## Testing and Validation
 
 ### Test Coverage
-- **Unit Tests**: 146 tests covering all core components
+- **Unit Tests**: 319 tests covering all core components
 - **Integration Tests**: End-to-end scenarios with multiple producers/consumers
 - **Property Tests**: Invariant checking for sequence ordering
-- **Performance Tests**: Latency and throughput validation
+- **Performance Tests**: Latency and throughput validation with criterion.rs
 
 ### Continuous Integration
 - **Rust Versions**: Tested on stable, beta, and nightly

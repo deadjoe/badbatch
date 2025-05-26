@@ -5,7 +5,7 @@
 
   [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
   [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
-  [![Tests](https://img.shields.io/badge/tests-146%20passing-brightgreen.svg)](https://github.com/deadjoe/badbatch)
+  [![Tests](https://img.shields.io/badge/tests-319%20passing-brightgreen.svg)](https://github.com/deadjoe/badbatch)
 
 </div>
 
@@ -386,12 +386,16 @@ BadBatch is designed for high-performance event processing with the following ch
 
 ### Current Status
 
-- **146 tests passing**: Comprehensive test coverage ensures correctness
+- **319 tests passing**: Comprehensive test coverage ensures correctness
 - **LMAX Algorithm Compliance**: Faithful implementation of proven algorithms
 - **disruptor-rs Optimizations**: Modern Rust patterns for improved usability
 - **Production Ready**: Core engine is stable and feature-complete
+- **Performance Benchmarks**: Integrated criterion.rs benchmarks for performance testing
+- **Async/Await Support**: Full async integration with tokio for modern Rust applications
+- **Security Features**: API key authentication and authorization middleware
+- **Cluster Support**: Distributed capabilities with gossip protocol and health monitoring
 
-> **Note**: Comprehensive benchmarks comparing BadBatch with other Disruptor implementations are planned for future releases. The current focus has been on correctness, safety, and feature completeness.
+> **Recent Improvements**: Fixed critical thread safety issues, implemented batch publishing optimizations, added comprehensive authentication mechanisms, and enhanced cluster functionality with proper JoinHandle management.
 
 ## 🤝 Contributing
 

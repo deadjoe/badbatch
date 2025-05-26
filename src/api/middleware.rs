@@ -139,27 +139,82 @@ pub async fn rate_limiting(request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
-/// Authentication middleware (placeholder)
+/// Authentication middleware with API key support
+///
+/// This middleware checks for API keys in the Authorization header or X-API-Key header.
+/// If authentication is enabled in the configuration, it validates the API key.
+/// If disabled, it allows all requests through (for development/testing).
 pub async fn authentication(request: Request, next: Next) -> Response {
-    // Extract authentication token
-    let auth_header = request.headers().get("Authorization");
+    // Check if authentication is enabled (can be configured via environment)
+    let auth_enabled = std::env::var("BADBATCH_AUTH_ENABLED")
+        .unwrap_or_else(|_| "false".to_string())
+        .parse::<bool>()
+        .unwrap_or(false);
 
-    if let Some(auth_value) = auth_header {
-        if let Ok(auth_str) = auth_value.to_str() {
+    if !auth_enabled {
+        // Authentication disabled - allow all requests
+        return next.run(request).await;
+    }
+
+    // Extract API key from headers
+    let headers = request.headers();
+    let api_key = extract_api_key(headers);
+
+    match api_key {
+        Some(key) => {
+            if validate_api_key(&key) {
+                // Valid API key - proceed with request
+                next.run(request).await
+            } else {
+                // Invalid API key
+                tracing::warn!("Invalid API key attempted: {}", key);
+                (StatusCode::UNAUTHORIZED, "Invalid API key").into_response()
+            }
+        }
+        None => {
+            // No API key provided
+            tracing::warn!("Request without API key when authentication is enabled");
+            (StatusCode::UNAUTHORIZED, "API key required").into_response()
+        }
+    }
+}
+
+/// Extract API key from request headers
+///
+/// Checks both Authorization header (Bearer token) and X-API-Key header
+fn extract_api_key(headers: &axum::http::HeaderMap) -> Option<String> {
+    // Check X-API-Key header first
+    if let Some(api_key) = headers.get("X-API-Key") {
+        if let Ok(key_str) = api_key.to_str() {
+            return Some(key_str.to_string());
+        }
+    }
+
+    // Check Authorization header for Bearer token
+    if let Some(auth_header) = headers.get("Authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
             if auth_str.starts_with("Bearer ") {
-                let token = &auth_str[7..];
-
-                // Validate token (placeholder implementation)
-                if validate_token(token) {
-                    return next.run(request).await;
-                }
+                return Some(auth_str[7..].to_string());
             }
         }
     }
 
-    // For now, allow all requests (authentication is optional)
-    // In production, you might want to require authentication for certain endpoints
-    next.run(request).await
+    None
+}
+
+/// Validate API key against configured keys
+///
+/// In a production system, this would check against a database or key management service.
+/// For now, it checks against environment variables or a default development key.
+fn validate_api_key(api_key: &str) -> bool {
+    // Get valid API keys from environment (comma-separated)
+    let valid_keys = std::env::var("BADBATCH_API_KEYS")
+        .unwrap_or_else(|_| "dev-key-12345,admin-key-67890".to_string());
+
+    valid_keys
+        .split(',')
+        .map(|key| key.trim())
+        .any(|valid_key| valid_key == api_key)
 }
 
 /// CORS middleware (custom implementation)
@@ -223,12 +278,7 @@ fn record_request(_client_id: &str) {
     // In a real implementation, this would update rate limiting counters
 }
 
-/// Validate authentication token (placeholder implementation)
-fn validate_token(_token: &str) -> bool {
-    // In a real implementation, this would validate JWT tokens or API keys
-    // For now, accept any token
-    true
-}
+
 
 /// Collect request metrics (placeholder implementation)
 fn collect_request_metrics(
@@ -296,8 +346,30 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_token_placeholder() {
-        assert!(validate_token("any_token"));
+    fn test_validate_api_key() {
+        // Test with default development keys
+        assert!(validate_api_key("dev-key-12345"));
+        assert!(validate_api_key("admin-key-67890"));
+        assert!(!validate_api_key("invalid-key"));
+    }
+
+    #[test]
+    fn test_extract_api_key() {
+        use axum::http::{HeaderMap, HeaderValue};
+
+        // Test X-API-Key header
+        let mut headers = HeaderMap::new();
+        headers.insert("X-API-Key", HeaderValue::from_static("test-key"));
+        assert_eq!(extract_api_key(&headers), Some("test-key".to_string()));
+
+        // Test Authorization Bearer header
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", HeaderValue::from_static("Bearer bearer-token"));
+        assert_eq!(extract_api_key(&headers), Some("bearer-token".to_string()));
+
+        // Test no headers
+        let headers = HeaderMap::new();
+        assert_eq!(extract_api_key(&headers), None);
     }
 
     #[test]
