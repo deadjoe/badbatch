@@ -38,16 +38,16 @@ check_tools() {
 
     local missing_tools=()
 
-    # 检查cargo子命令
-    if ! cargo --list | grep -q "llvm-cov"; then
+    # 检查cargo子命令 - 使用更可靠的方法
+    if ! cargo llvm-cov --version >/dev/null 2>&1; then
         missing_tools+=("cargo-llvm-cov")
     fi
 
-    if ! cargo --list | grep -q "audit"; then
+    if ! cargo audit --version >/dev/null 2>&1; then
         missing_tools+=("cargo-audit")
     fi
 
-    if ! cargo --list | grep -q "deny"; then
+    if ! cargo deny --version >/dev/null 2>&1; then
         missing_tools+=("cargo-deny")
     fi
 
@@ -120,17 +120,44 @@ coverage_test() {
             fi
         fi
     else
-        # 对于Homebrew安装的Rust，设置LLVM工具路径
-        if [ -f "/opt/homebrew/bin/llvm-cov" ]; then
-            export LLVM_COV="/opt/homebrew/bin/llvm-cov"
-            export LLVM_PROFDATA="/opt/homebrew/bin/llvm-profdata"
-            print_success "使用Homebrew LLVM工具: $LLVM_COV"
-        elif [ -f "/opt/homebrew/Cellar/llvm/20.1.5/bin/llvm-cov" ]; then
-            export LLVM_COV="/opt/homebrew/Cellar/llvm/20.1.5/bin/llvm-cov"
-            export LLVM_PROFDATA="/opt/homebrew/Cellar/llvm/20.1.5/bin/llvm-profdata"
-            print_success "使用Homebrew LLVM工具: $LLVM_COV"
+        # 对于非rustup安装的Rust，尝试查找LLVM工具
+        local llvm_cov_found=""
+        local llvm_profdata_found=""
+
+        # 检查常见的LLVM工具位置
+        local search_paths=(
+            "/opt/homebrew/bin"                    # macOS Homebrew (Apple Silicon)
+            "/usr/local/bin"                       # macOS Homebrew (Intel) / Linux
+            "/usr/bin"                             # Linux 系统包管理器
+            "/opt/homebrew/Cellar/llvm/*/bin"      # macOS Homebrew Cellar (动态版本)
+            "/usr/local/Cellar/llvm/*/bin"         # macOS Homebrew Cellar (Intel)
+        )
+
+        # 首先检查直接路径
+        for path in "/opt/homebrew/bin" "/usr/local/bin" "/usr/bin"; do
+            if [ -f "$path/llvm-cov" ] && [ -f "$path/llvm-profdata" ]; then
+                llvm_cov_found="$path/llvm-cov"
+                llvm_profdata_found="$path/llvm-profdata"
+                break
+            fi
+        done
+
+        # 如果直接路径没找到，尝试动态查找
+        if [ -z "$llvm_cov_found" ]; then
+            llvm_cov_found=$(find /opt/homebrew/Cellar/llvm /usr/local/Cellar/llvm -name "llvm-cov" -type f 2>/dev/null | head -1)
+            llvm_profdata_found=$(find /opt/homebrew/Cellar/llvm /usr/local/Cellar/llvm -name "llvm-profdata" -type f 2>/dev/null | head -1)
+        fi
+
+        if [ -n "$llvm_cov_found" ] && [ -n "$llvm_profdata_found" ]; then
+            export LLVM_COV="$llvm_cov_found"
+            export LLVM_PROFDATA="$llvm_profdata_found"
+            print_success "使用系统LLVM工具: $LLVM_COV"
         else
             print_warning "未找到LLVM工具，跳过覆盖率测试"
+            print_warning "安装建议:"
+            print_warning "  macOS: brew install llvm"
+            print_warning "  Ubuntu/Debian: sudo apt install llvm"
+            print_warning "  或使用rustup: rustup component add llvm-tools-preview"
             return 0
         fi
     fi
