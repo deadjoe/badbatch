@@ -246,9 +246,303 @@ where
     }
 }
 
-// TODO: Re-enable tests after fixing builder.rs to create proper Sequencer instances
 #[cfg(test)]
 mod tests {
-    // Tests temporarily disabled due to SimpleProducer now requiring a Sequencer
-    // Will be re-enabled after builder.rs is fixed to create proper Sequencer instances
+    use super::*;
+    use crate::disruptor::{
+        event_factory::DefaultEventFactory,
+        sequencer::{MultiProducerSequencer, SingleProducerSequencer},
+        wait_strategy::BusySpinWaitStrategy,
+    };
+    use std::sync::Arc;
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct TestEvent {
+        value: i64,
+        data: String,
+    }
+
+    impl Default for TestEvent {
+        fn default() -> Self {
+            Self {
+                value: -1,
+                data: String::new(),
+            }
+        }
+    }
+
+    fn create_test_producer() -> SimpleProducer<TestEvent> {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let ring_buffer =
+            Arc::new(RingBuffer::new(8, factory).expect("Failed to create ring buffer"));
+        let sequencer = Arc::new(SingleProducerSequencer::new(
+            8,
+            Arc::new(BusySpinWaitStrategy),
+        ));
+        SimpleProducer::new(ring_buffer, sequencer)
+    }
+
+    fn create_multi_producer_test_producer() -> SimpleProducer<TestEvent> {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let ring_buffer =
+            Arc::new(RingBuffer::new(16, factory).expect("Failed to create ring buffer"));
+        let sequencer = Arc::new(MultiProducerSequencer::new(
+            16,
+            Arc::new(BusySpinWaitStrategy),
+        ));
+        SimpleProducer::new(ring_buffer, sequencer)
+    }
+
+    #[test]
+    fn test_simple_producer_creation() {
+        let producer = create_test_producer();
+
+        // Should start with sequence -1 (no events published yet)
+        assert_eq!(producer.current_sequence(), -1);
+    }
+
+    #[test]
+    fn test_try_publish_success() {
+        let mut producer = create_test_producer();
+
+        let result = producer.try_publish(|event| {
+            event.value = 42;
+            event.data = "test".to_string();
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0); // First sequence should be 0
+        assert_eq!(producer.current_sequence(), 0);
+    }
+
+    #[test]
+    fn test_try_publish_multiple() {
+        let mut producer = create_test_producer();
+
+        // Publish multiple events
+        for i in 0..5 {
+            let result = producer.try_publish(|event| {
+                event.value = i;
+                event.data = format!("event_{}", i);
+            });
+
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), i);
+        }
+
+        assert_eq!(producer.current_sequence(), 4);
+    }
+
+    #[test]
+    fn test_publish_blocking() {
+        let mut producer = create_test_producer();
+
+        // Publish an event (should not block for first few events)
+        producer.publish(|event| {
+            event.value = 100;
+            event.data = "blocking_test".to_string();
+        });
+
+        assert_eq!(producer.current_sequence(), 0);
+    }
+
+    #[test]
+    fn test_try_batch_publish_success() {
+        let mut producer = create_test_producer();
+
+        let result = producer.try_batch_publish(3, |iter| {
+            for (i, event) in iter.enumerate() {
+                event.value = i as i64;
+                event.data = format!("batch_{}", i);
+            }
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 2); // End sequence should be 2 (0, 1, 2)
+        assert_eq!(producer.current_sequence(), 2);
+    }
+
+    #[test]
+    fn test_try_batch_publish_zero_size() {
+        let mut producer = create_test_producer();
+
+        let result = producer.try_batch_publish(0, |iter| {
+            // Iterator should be empty for zero-size batch
+            assert_eq!(iter.count(), 0);
+        });
+
+        // Zero-size batch behavior depends on sequencer implementation
+        // Some sequencers may return an error for zero-size requests
+        if result.is_err() {
+            // This is acceptable behavior for zero-size batches
+            assert!(matches!(result, Err(MissingFreeSlots(_))));
+        } else {
+            // If it succeeds, sequence should not advance
+            assert_eq!(producer.current_sequence(), -1);
+        }
+    }
+
+    #[test]
+    fn test_batch_publish_blocking() {
+        let mut producer = create_test_producer();
+
+        // Publish a batch (should not block for first batch)
+        producer.batch_publish(2, |iter| {
+            for (i, event) in iter.enumerate() {
+                event.value = (i + 10) as i64;
+                event.data = format!("blocking_batch_{}", i);
+            }
+        });
+
+        assert_eq!(producer.current_sequence(), 1); // End sequence for batch of 2
+    }
+
+    #[test]
+    fn test_producer_with_multi_producer_sequencer() {
+        let mut producer = create_multi_producer_test_producer();
+
+        // Should work the same way with multi-producer sequencer
+        let result = producer.try_publish(|event| {
+            event.value = 999;
+            event.data = "multi_producer_test".to_string();
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(producer.current_sequence(), 0);
+    }
+
+    #[test]
+    fn test_error_types() {
+        // Test RingBufferFull error
+        let ring_buffer_full = RingBufferFull;
+        assert_eq!(ring_buffer_full.to_string(), "Ring Buffer is full");
+
+        // Test MissingFreeSlots error
+        let missing_slots = MissingFreeSlots(5);
+        assert_eq!(
+            missing_slots.to_string(),
+            "Missing free slots in Ring Buffer: 5"
+        );
+    }
+
+    #[test]
+    fn test_producer_trait_methods() {
+        let mut producer = create_test_producer();
+
+        // Test all Producer trait methods
+
+        // try_publish - publishes to sequence 0
+        let result1 = Producer::try_publish(&mut producer, |event| {
+            event.value = 1;
+        });
+        assert!(result1.is_ok());
+        assert_eq!(result1.unwrap(), 0);
+
+        // publish - publishes to sequence 1
+        Producer::publish(&mut producer, |event| {
+            event.value = 2;
+        });
+        assert_eq!(producer.current_sequence(), 1);
+
+        // try_batch_publish - publishes 2 events to sequences 2, 3
+        let result2 = Producer::try_batch_publish(&mut producer, 2, |iter| {
+            for (i, event) in iter.enumerate() {
+                event.value = (i + 10) as i64;
+            }
+        });
+        assert!(result2.is_ok());
+        assert_eq!(result2.unwrap(), 3); // End sequence of batch
+
+        // batch_publish - publishes 1 event to sequence 4
+        Producer::batch_publish(&mut producer, 1, |iter| {
+            for event in iter {
+                event.value = 99;
+            }
+        });
+
+        // Should have published 5 events total (1 + 1 + 2 + 1) with final sequence 4
+        assert_eq!(producer.current_sequence(), 4);
+    }
+
+    #[test]
+    fn test_concurrent_access_safety() {
+        // This test ensures that the producer can be safely used
+        // even when the underlying structures are shared
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let ring_buffer =
+            Arc::new(RingBuffer::new(64, factory).expect("Failed to create ring buffer"));
+        let sequencer = Arc::new(MultiProducerSequencer::new(
+            64,
+            Arc::new(BusySpinWaitStrategy),
+        ));
+
+        let mut producer1 = SimpleProducer::new(ring_buffer.clone(), sequencer.clone());
+        let mut producer2 = SimpleProducer::new(ring_buffer.clone(), sequencer.clone());
+
+        // Both producers should be able to publish
+        let result1 = producer1.try_publish(|event| event.value = 1);
+        let result2 = producer2.try_publish(|event| event.value = 2);
+
+        assert!(result1.is_ok());
+        assert!(result2.is_ok());
+
+        // Sequences should be different
+        assert_ne!(result1.unwrap(), result2.unwrap());
+    }
+
+    #[test]
+    fn test_large_batch_publish() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let ring_buffer =
+            Arc::new(RingBuffer::new(1024, factory).expect("Failed to create ring buffer"));
+        let sequencer = Arc::new(SingleProducerSequencer::new(
+            1024,
+            Arc::new(BusySpinWaitStrategy),
+        ));
+        let mut producer = SimpleProducer::new(ring_buffer, sequencer);
+
+        // Test large batch
+        let batch_size = 100;
+        let result = producer.try_batch_publish(batch_size, |iter| {
+            for (i, event) in iter.enumerate() {
+                event.value = i as i64;
+                event.data = format!("large_batch_{}", i);
+            }
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), (batch_size - 1) as i64);
+        assert_eq!(producer.current_sequence(), (batch_size - 1) as i64);
+    }
+
+    #[test]
+    fn test_producer_sequence_consistency() {
+        let mut producer = create_test_producer();
+        let mut expected_sequence = 0i64;
+
+        // Mix single and batch publishes
+        for i in 0..5 {
+            if i % 2 == 0 {
+                // Single publish
+                let result = producer.try_publish(|event| {
+                    event.value = i;
+                });
+                assert_eq!(result.unwrap(), expected_sequence);
+                expected_sequence += 1;
+            } else {
+                // Batch publish of 2
+                let result = producer.try_batch_publish(2, |iter| {
+                    for (j, event) in iter.enumerate() {
+                        event.value = i * 10 + j as i64;
+                    }
+                });
+                expected_sequence += 1; // End sequence of batch
+                assert_eq!(result.unwrap(), expected_sequence);
+                expected_sequence += 1; // Prepare for next
+            }
+        }
+
+        assert_eq!(producer.current_sequence(), expected_sequence - 1);
+    }
 }
