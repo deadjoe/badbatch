@@ -2,21 +2,22 @@
 //!
 //! Tests for the API layer integration with the Disruptor manager.
 
-use badbatch::api::{ApiServer, ServerConfig};
 use badbatch::api::models::{CreateDisruptorRequest, DisruptorConfig};
-use reqwest;
-use serde_json;
-use std::time::Duration;
+use badbatch::api::{ApiServer, ServerConfig};
+
 use std::collections::HashMap;
+use std::time::Duration;
 use tokio::time::timeout;
 
 /// Test that the API server can start and handle basic requests
 #[tokio::test]
 async fn test_api_server_basic_functionality() {
     // Create server configuration
-    let mut config = ServerConfig::default();
-    config.port = 0; // Use random available port
-    config.host = "127.0.0.1".to_string();
+    let config = ServerConfig {
+        port: 0, // Use random available port
+        host: "127.0.0.1".to_string(),
+        ..Default::default()
+    };
 
     // Create and start server
     let server = ApiServer::new(config);
@@ -36,8 +37,9 @@ async fn test_api_server_basic_functionality() {
     let client = reqwest::Client::new();
     let _health_response = timeout(
         Duration::from_secs(1),
-        client.get("http://127.0.0.1:8080/health").send()
-    ).await;
+        client.get("http://127.0.0.1:8080/health").send(),
+    )
+    .await;
 
     // The test might fail if port 8080 is not available, which is expected
     // This test mainly verifies that the server can be created and started
@@ -52,8 +54,8 @@ async fn test_disruptor_creation_api() {
     // This test verifies that the Disruptor manager integration works
     // by testing the handlers directly (without starting a full server)
 
-    use badbatch::api::handlers::disruptor::create_disruptor;
     use axum::extract::Json as ExtractJson;
+    use badbatch::api::handlers::disruptor::create_disruptor;
 
     let request = CreateDisruptorRequest {
         buffer_size: 1024,
@@ -76,14 +78,19 @@ async fn test_disruptor_creation_api() {
     assert_eq!(disruptor_response.config.buffer_size, 1024);
     assert_eq!(disruptor_response.config.producer_type, "single");
     assert_eq!(disruptor_response.config.wait_strategy, "blocking");
-    assert_eq!(disruptor_response.config.name, Some("test-disruptor".to_string()));
+    assert_eq!(
+        disruptor_response.config.name,
+        Some("test-disruptor".to_string())
+    );
 }
 
 /// Test Disruptor lifecycle through API handlers
 #[tokio::test]
 async fn test_disruptor_lifecycle_api() {
-    use badbatch::api::handlers::disruptor::{create_disruptor, get_disruptor, start_disruptor, stop_disruptor, delete_disruptor};
     use axum::extract::{Json as ExtractJson, Path};
+    use badbatch::api::handlers::disruptor::{
+        create_disruptor, delete_disruptor, get_disruptor, start_disruptor, stop_disruptor,
+    };
 
     // Create a disruptor
     let request = CreateDisruptorRequest {
@@ -105,21 +112,30 @@ async fn test_disruptor_lifecycle_api() {
 
     let disruptor_info = get_result.unwrap().0.data.unwrap();
     assert_eq!(disruptor_info.id, disruptor_id);
-    assert_eq!(disruptor_info.status, badbatch::api::models::DisruptorStatus::Created);
+    assert_eq!(
+        disruptor_info.status,
+        badbatch::api::models::DisruptorStatus::Created
+    );
 
     // Start the disruptor
     let start_result = start_disruptor(Path(disruptor_id.clone())).await;
     assert!(start_result.is_ok());
 
     let started_info = start_result.unwrap().0.data.unwrap();
-    assert_eq!(started_info.status, badbatch::api::models::DisruptorStatus::Running);
+    assert_eq!(
+        started_info.status,
+        badbatch::api::models::DisruptorStatus::Running
+    );
 
     // Stop the disruptor
     let stop_result = stop_disruptor(Path(disruptor_id.clone())).await;
     assert!(stop_result.is_ok());
 
     let stopped_info = stop_result.unwrap().0.data.unwrap();
-    assert_eq!(stopped_info.status, badbatch::api::models::DisruptorStatus::Stopped);
+    assert_eq!(
+        stopped_info.status,
+        badbatch::api::models::DisruptorStatus::Stopped
+    );
 
     // Delete the disruptor
     let delete_result = delete_disruptor(Path(disruptor_id)).await;
@@ -129,9 +145,9 @@ async fn test_disruptor_lifecycle_api() {
 /// Test event publishing validation
 #[tokio::test]
 async fn test_event_publishing_validation() {
+    use axum::extract::{Json as ExtractJson, Path};
     use badbatch::api::handlers::events::publish_event;
     use badbatch::api::models::PublishEventRequest;
-    use axum::extract::{Json as ExtractJson, Path};
 
     // Try to publish to non-existent disruptor
     let request = PublishEventRequest {
@@ -140,10 +156,7 @@ async fn test_event_publishing_validation() {
         correlation_id: None,
     };
 
-    let result = publish_event(
-        Path("non-existent-id".to_string()),
-        ExtractJson(request)
-    ).await;
+    let result = publish_event(Path("non-existent-id".to_string()), ExtractJson(request)).await;
 
     // Should fail because disruptor doesn't exist
     assert!(result.is_err());
@@ -152,8 +165,8 @@ async fn test_event_publishing_validation() {
 /// Test invalid buffer size handling
 #[tokio::test]
 async fn test_invalid_buffer_size() {
-    use badbatch::api::handlers::disruptor::create_disruptor;
     use axum::extract::Json as ExtractJson;
+    use badbatch::api::handlers::disruptor::create_disruptor;
 
     let request = CreateDisruptorRequest {
         buffer_size: 1023, // Not a power of 2
@@ -172,10 +185,10 @@ async fn test_invalid_buffer_size() {
 /// Test thread safety of sequence generation
 #[tokio::test]
 async fn test_sequence_generation_thread_safety() {
+    use axum::extract::{Json as ExtractJson, Path};
     use badbatch::api::handlers::disruptor::create_disruptor;
     use badbatch::api::handlers::events::publish_event;
     use badbatch::api::models::{CreateDisruptorRequest, DisruptorConfig, PublishEventRequest};
-    use axum::extract::{Json as ExtractJson, Path};
     use std::sync::Arc;
     use tokio::sync::Barrier;
 
@@ -215,10 +228,7 @@ async fn test_sequence_generation_thread_safety() {
                 correlation_id: Some(format!("thread-{}", i)),
             };
 
-            publish_event(
-                Path(disruptor_id),
-                ExtractJson(request)
-            ).await
+            publish_event(Path(disruptor_id), ExtractJson(request)).await
         });
 
         handles.push(handle);
@@ -237,10 +247,10 @@ async fn test_sequence_generation_thread_safety() {
 /// Test real event publishing functionality
 #[tokio::test]
 async fn test_real_event_publishing() {
+    use axum::extract::{Json as ExtractJson, Path};
     use badbatch::api::handlers::disruptor::{create_disruptor, start_disruptor};
     use badbatch::api::handlers::events::publish_event;
     use badbatch::api::models::{CreateDisruptorRequest, DisruptorConfig, PublishEventRequest};
-    use axum::extract::{Json as ExtractJson, Path};
 
     // Create a disruptor
     let request = CreateDisruptorRequest {
@@ -276,10 +286,8 @@ async fn test_real_event_publishing() {
         correlation_id: Some("test-correlation-123".to_string()),
     };
 
-    let publish_result = publish_event(
-        Path(disruptor_id.clone()),
-        ExtractJson(event_request)
-    ).await;
+    let publish_result =
+        publish_event(Path(disruptor_id.clone()), ExtractJson(event_request)).await;
 
     // Should succeed with real implementation
     if let Err(ref e) = publish_result {
@@ -291,6 +299,9 @@ async fn test_real_event_publishing() {
     assert!(response.data.is_some());
 
     let event_response = response.data.unwrap();
-    assert_eq!(event_response.correlation_id, Some("test-correlation-123".to_string()));
+    assert_eq!(
+        event_response.correlation_id,
+        Some("test-correlation-123".to_string())
+    );
     assert!(event_response.sequence >= 0);
 }

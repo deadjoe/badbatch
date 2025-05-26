@@ -4,16 +4,15 @@
 //! for configuring and using the Disruptor pattern. It provides a DSL-style
 //! interface for setting up the ring buffer, sequencers, and event processors.
 
-use crate::disruptor::{
-    Result, DisruptorError, EventFactory, EventHandler, ProducerType,
-    RingBuffer, Sequencer, SingleProducerSequencer, MultiProducerSequencer, WaitStrategy,
-    BlockingWaitStrategy, EventProcessor, BatchEventProcessor, Sequence,
-    is_power_of_two,
-};
 use crate::disruptor::event_processor::DataProvider;
+use crate::disruptor::{
+    is_power_of_two, BatchEventProcessor, BlockingWaitStrategy, DisruptorError, EventFactory,
+    EventHandler, EventProcessor, MultiProducerSequencer, ProducerType, Result, RingBuffer,
+    Sequence, Sequencer, SingleProducerSequencer, WaitStrategy,
+};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The main Disruptor class
 ///
@@ -201,7 +200,8 @@ where
         let processor = Arc::new(processor);
 
         // Add the processor's sequence as a gating sequence
-        self.sequencer.add_gating_sequences(&[processor_sequence.clone()]);
+        self.sequencer
+            .add_gating_sequences(&[processor_sequence.clone()]);
 
         self.event_processors.push(processor.clone());
 
@@ -392,7 +392,10 @@ where
         H: EventHandler<T> + 'static,
     {
         // Create a barrier that depends on the last processor sequences
-        let barrier = self.disruptor.sequencer.new_barrier(self.last_processor_sequences.clone());
+        let barrier = self
+            .disruptor
+            .sequencer
+            .new_barrier(self.last_processor_sequences.clone());
 
         // Create the event processor
         let processor = BatchEventProcessor::new(
@@ -406,7 +409,9 @@ where
         let processor = Arc::new(processor);
 
         // Add the processor's sequence as a gating sequence
-        self.disruptor.sequencer.add_gating_sequences(&[processor_sequence.clone()]);
+        self.disruptor
+            .sequencer
+            .add_gating_sequences(&[processor_sequence.clone()]);
 
         self.disruptor.event_processors.push(processor);
         self.last_processor_sequences = vec![processor_sequence];
@@ -442,7 +447,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::disruptor::{DefaultEventFactory, NoOpEventHandler, YieldingWaitStrategy, SleepingWaitStrategy};
+    use crate::disruptor::{
+        DefaultEventFactory, NoOpEventHandler, SleepingWaitStrategy, YieldingWaitStrategy,
+    };
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -461,7 +468,8 @@ mod tests {
             1024,
             ProducerType::Single,
             Box::new(BlockingWaitStrategy::new()),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(disruptor.get_buffer_size(), 1024);
         assert!(!disruptor.started);
@@ -475,7 +483,8 @@ mod tests {
             512,
             ProducerType::Multi,
             Box::new(YieldingWaitStrategy::new()),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(disruptor.get_buffer_size(), 512);
         assert!(!disruptor.started);
@@ -500,7 +509,10 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), DisruptorError::InvalidBufferSize(1023)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DisruptorError::InvalidBufferSize(1023)
+        ));
     }
 
     #[test]
@@ -514,7 +526,10 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), DisruptorError::InvalidBufferSize(0)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DisruptorError::InvalidBufferSize(0)
+        ));
     }
 
     #[test]
@@ -604,7 +619,8 @@ mod tests {
             64,
             ProducerType::Single,
             Box::new(SleepingWaitStrategy::new()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(disruptor1.get_buffer_size(), 64);
 
         // Test with YieldingWaitStrategy
@@ -613,7 +629,8 @@ mod tests {
             128,
             ProducerType::Multi,
             Box::new(YieldingWaitStrategy::new()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(disruptor2.get_buffer_size(), 128);
     }
 
@@ -637,7 +654,12 @@ mod tests {
     }
 
     impl crate::disruptor::EventHandler<TestEvent> for CountingEventHandler {
-        fn on_event(&mut self, _event: &mut TestEvent, _sequence: i64, _end_of_batch: bool) -> crate::disruptor::Result<()> {
+        fn on_event(
+            &mut self,
+            _event: &mut TestEvent,
+            _sequence: i64,
+            _end_of_batch: bool,
+        ) -> crate::disruptor::Result<()> {
             self.count.fetch_add(1, Ordering::Release);
             Ok(())
         }

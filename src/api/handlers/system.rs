@@ -3,20 +3,16 @@
 //! This module provides handlers for system-level operations like health checks,
 //! metrics, and general system information.
 
-use axum::{
-    response::{Html, Json},
-};
+use axum::response::{Html, Json};
 use serde_json::json;
 use std::time::SystemTime;
 
-use crate::api::{
-    ApiResponse, HealthResponse, MetricsResponse, MemoryUsage,
-    handlers::ApiResult,
-};
+use crate::api::{handlers::ApiResult, ApiResponse, HealthResponse, MemoryUsage, MetricsResponse};
 
 /// Root endpoint handler
 pub async fn root() -> Html<&'static str> {
-    Html(r#"
+    Html(
+        r#"
 <!DOCTYPE html>
 <html>
 <head>
@@ -61,7 +57,8 @@ pub async fn root() -> Html<&'static str> {
     <p>For complete API documentation, visit the endpoints above or check the project repository.</p>
 </body>
 </html>
-    "#)
+    "#,
+    )
 }
 
 /// System health check handler
@@ -113,7 +110,7 @@ fn get_uptime_seconds() -> u64 {
     // In a real application, you would track the actual start time
     static START_TIME: std::sync::OnceLock<SystemTime> = std::sync::OnceLock::new();
 
-    let start_time = START_TIME.get_or_init(|| SystemTime::now());
+    let start_time = START_TIME.get_or_init(SystemTime::now);
 
     SystemTime::now()
         .duration_since(*start_time)

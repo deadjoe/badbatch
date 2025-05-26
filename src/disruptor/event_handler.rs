@@ -274,11 +274,12 @@ mod tests {
 
     #[test]
     fn test_closure_event_handler() {
-        let mut handler = ClosureEventHandler::new(|event: &mut TestEvent, sequence, _end_of_batch| {
-            event.value = sequence;
-            event.processed = true;
-            Ok(())
-        });
+        let mut handler =
+            ClosureEventHandler::new(|event: &mut TestEvent, sequence, _end_of_batch| {
+                event.value = sequence;
+                event.processed = true;
+                Ok(())
+            });
 
         let mut event = TestEvent::default();
         handler.on_event(&mut event, 42, false).unwrap();
@@ -290,7 +291,10 @@ mod tests {
     #[test]
     fn test_no_op_event_handler() {
         let mut handler = NoOpEventHandler::<TestEvent>::new();
-        let mut event = TestEvent { value: 123, processed: false };
+        let mut event = TestEvent {
+            value: 123,
+            processed: false,
+        };
 
         handler.on_event(&mut event, 42, false).unwrap();
 
@@ -301,14 +305,18 @@ mod tests {
 
     #[test]
     fn test_clearing_event_handler() {
-        let inner_handler = ClosureEventHandler::new(|event: &mut TestEvent, sequence, _end_of_batch| {
-            event.value = sequence;
-            event.processed = true;
-            Ok(())
-        });
+        let inner_handler =
+            ClosureEventHandler::new(|event: &mut TestEvent, sequence, _end_of_batch| {
+                event.value = sequence;
+                event.processed = true;
+                Ok(())
+            });
 
         let mut handler = ClearingEventHandler::new(inner_handler);
-        let mut event = TestEvent { value: 999, processed: false };
+        let mut event = TestEvent {
+            value: 999,
+            processed: false,
+        };
 
         handler.on_event(&mut event, 42, false).unwrap();
 
@@ -319,9 +327,8 @@ mod tests {
 
     #[test]
     fn test_sequence_callback() {
-        let mut handler = ClosureEventHandler::new(|_event: &mut TestEvent, _sequence, _end_of_batch| {
-            Ok(())
-        });
+        let mut handler =
+            ClosureEventHandler::new(|_event: &mut TestEvent, _sequence, _end_of_batch| Ok(()));
 
         let sequence = Arc::new(Sequence::new(0));
         handler.set_sequence_callback(Arc::clone(&sequence));

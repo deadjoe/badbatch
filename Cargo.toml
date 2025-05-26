@@ -2,6 +2,7 @@
 name = "badbatch"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.70"
 authors = ["BadBatch Team"]
 description = "High-Performance Disruptor Engine - A complete Rust implementation of the LMAX Disruptor pattern"
 license = "AGPL-3.0"
@@ -58,6 +59,7 @@ tower-http = { version = "0.6.4", features = ["cors", "trace", "timeout", "limit
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 tokio-test = "0.4"
 crossbeam = "0.8"  # For performance comparison benchmarks
+proptest = "1.0"  # Property-based testing
 
 # Benchmark configurations
 [[bench]]

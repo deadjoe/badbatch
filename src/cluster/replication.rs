@@ -3,13 +3,13 @@
 //! This module provides event replication capabilities across cluster nodes,
 //! ensuring data consistency and fault tolerance.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
 
-use crate::cluster::{NodeId, ClusterResult};
 use crate::cluster::config::ReplicationConfig;
+use crate::cluster::{ClusterResult, NodeId};
 
 /// Replication event
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,7 +65,8 @@ impl EventReplicator {
             return Ok(());
         }
 
-        self.running.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         tracing::info!("Event replicator started");
         Ok(())
     }
@@ -76,7 +77,8 @@ impl EventReplicator {
             return Ok(());
         }
 
-        self.running.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         tracing::info!("Event replicator stopped");
         Ok(())
     }
@@ -136,8 +138,8 @@ impl EventReplicator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cluster::NodeId;
     use crate::cluster::config::ConsistencyLevel;
+    use crate::cluster::NodeId;
     use std::time::Duration;
 
     #[tokio::test]
@@ -156,7 +158,10 @@ mod tests {
         let source_node = NodeId::generate();
         let target_nodes = vec![NodeId::generate(), NodeId::generate()];
 
-        replicator.replicate_event(event_id.clone(), data, source_node, target_nodes).await.unwrap();
+        replicator
+            .replicate_event(event_id.clone(), data, source_node, target_nodes)
+            .await
+            .unwrap();
 
         let status = replicator.get_replication_status(&event_id).await;
         assert_eq!(status, Some(ReplicationStatus::Pending));

@@ -41,16 +41,12 @@ impl BadBatchClient {
         if status.is_success() {
             response.json().await.map_err(CliError::from)
         } else {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             Err(CliError::server(status.as_u16(), error_text))
         }
-    }
-
-    /// Get system health
-    pub async fn get_health(&self) -> CliResult<HealthResponse> {
-        let url = self.base_url.join("/health")?;
-        let response = self.client.get(url).send().await?;
-        Self::handle_response(response).await
     }
 
     /// Get system metrics
@@ -69,7 +65,10 @@ impl BadBatchClient {
     }
 
     /// Create a disruptor
-    pub async fn create_disruptor(&self, request: CreateDisruptorRequest) -> CliResult<DisruptorResponse> {
+    pub async fn create_disruptor(
+        &self,
+        request: CreateDisruptorRequest,
+    ) -> CliResult<DisruptorResponse> {
         let url = self.base_url.join("/api/v1/disruptor")?;
         let response = self.client.post(url).json(&request).send().await?;
         Self::handle_response(response).await
@@ -98,84 +97,121 @@ impl BadBatchClient {
         if status.is_success() {
             Ok(())
         } else {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             Err(CliError::server(status.as_u16(), error_text))
         }
     }
 
     /// Start disruptor
     pub async fn start_disruptor(&self, id: &str) -> CliResult<()> {
-        let url = self.base_url.join(&format!("/api/v1/disruptor/{}/start", id))?;
+        let url = self
+            .base_url
+            .join(&format!("/api/v1/disruptor/{}/start", id))?;
         let response = self.client.post(url).send().await?;
 
         let status = response.status();
         if status.is_success() {
             Ok(())
         } else {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             Err(CliError::server(status.as_u16(), error_text))
         }
     }
 
     /// Stop disruptor
     pub async fn stop_disruptor(&self, id: &str) -> CliResult<()> {
-        let url = self.base_url.join(&format!("/api/v1/disruptor/{}/stop", id))?;
+        let url = self
+            .base_url
+            .join(&format!("/api/v1/disruptor/{}/stop", id))?;
         let response = self.client.post(url).send().await?;
 
         let status = response.status();
         if status.is_success() {
             Ok(())
         } else {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             Err(CliError::server(status.as_u16(), error_text))
         }
     }
 
     /// Pause disruptor
     pub async fn pause_disruptor(&self, id: &str) -> CliResult<()> {
-        let url = self.base_url.join(&format!("/api/v1/disruptor/{}/pause", id))?;
+        let url = self
+            .base_url
+            .join(&format!("/api/v1/disruptor/{}/pause", id))?;
         let response = self.client.post(url).send().await?;
 
         let status = response.status();
         if status.is_success() {
             Ok(())
         } else {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             Err(CliError::server(status.as_u16(), error_text))
         }
     }
 
     /// Resume disruptor
     pub async fn resume_disruptor(&self, id: &str) -> CliResult<()> {
-        let url = self.base_url.join(&format!("/api/v1/disruptor/{}/resume", id))?;
+        let url = self
+            .base_url
+            .join(&format!("/api/v1/disruptor/{}/resume", id))?;
         let response = self.client.post(url).send().await?;
 
         let status = response.status();
         if status.is_success() {
             Ok(())
         } else {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             Err(CliError::server(status.as_u16(), error_text))
         }
     }
 
     /// Publish single event
-    pub async fn publish_event(&self, disruptor_id: &str, request: PublishEventRequest) -> CliResult<PublishResponse> {
-        let url = self.base_url.join(&format!("/api/v1/disruptor/{}/events", disruptor_id))?;
+    pub async fn publish_event(
+        &self,
+        disruptor_id: &str,
+        request: PublishEventRequest,
+    ) -> CliResult<PublishResponse> {
+        let url = self
+            .base_url
+            .join(&format!("/api/v1/disruptor/{}/events", disruptor_id))?;
         let response = self.client.post(url).json(&request).send().await?;
         Self::handle_response(response).await
     }
 
     /// Publish batch events
-    pub async fn publish_batch(&self, disruptor_id: &str, request: PublishBatchRequest) -> CliResult<PublishBatchResponse> {
-        let url = self.base_url.join(&format!("/api/v1/disruptor/{}/events/batch", disruptor_id))?;
+    pub async fn publish_batch(
+        &self,
+        disruptor_id: &str,
+        request: PublishBatchRequest,
+    ) -> CliResult<PublishBatchResponse> {
+        let url = self
+            .base_url
+            .join(&format!("/api/v1/disruptor/{}/events/batch", disruptor_id))?;
         let response = self.client.post(url).json(&request).send().await?;
         Self::handle_response(response).await
     }
 
     /// Get disruptor metrics
     pub async fn get_disruptor_metrics(&self, id: &str) -> CliResult<DisruptorMetrics> {
-        let url = self.base_url.join(&format!("/api/v1/disruptor/{}/metrics", id))?;
+        let url = self
+            .base_url
+            .join(&format!("/api/v1/disruptor/{}/metrics", id))?;
         let response = self.client.get(url).send().await?;
         Self::handle_response(response).await
     }
@@ -183,7 +219,9 @@ impl BadBatchClient {
     /// Get disruptor health
     #[allow(dead_code)]
     pub async fn get_disruptor_health(&self, id: &str) -> CliResult<DisruptorHealth> {
-        let url = self.base_url.join(&format!("/api/v1/disruptor/{}/health", id))?;
+        let url = self
+            .base_url
+            .join(&format!("/api/v1/disruptor/{}/health", id))?;
         let response = self.client.get(url).send().await?;
         Self::handle_response(response).await
     }

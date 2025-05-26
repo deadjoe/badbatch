@@ -4,14 +4,13 @@
 //! It allows for easy configuration of producers, consumers, and their dependencies.
 
 use crate::disruptor::{
-    RingBuffer, WaitStrategy, EventHandler,
-    producer::{Producer, SimpleProducer},
     event_factory::ClosureEventFactory,
-    sequencer::{SingleProducerSequencer, MultiProducerSequencer},
-    Sequencer,
+    producer::{Producer, SimpleProducer},
+    sequencer::{MultiProducerSequencer, SingleProducerSequencer},
+    EventHandler, RingBuffer, Sequencer, WaitStrategy,
 };
-use std::sync::Arc;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 /// Build a single producer Disruptor
 ///
@@ -154,8 +153,7 @@ where
         // Create the ring buffer with a closure event factory
         let closure_factory = ClosureEventFactory::new(self.event_factory);
         let ring_buffer = Arc::new(
-            RingBuffer::new(self.size, closure_factory)
-                .expect("Failed to create ring buffer")
+            RingBuffer::new(self.size, closure_factory).expect("Failed to create ring buffer"),
         );
 
         // Create a single producer sequencer
@@ -242,8 +240,7 @@ where
         // Create the ring buffer with a closure event factory
         let closure_factory = ClosureEventFactory::new(self.event_factory);
         let ring_buffer = Arc::new(
-            RingBuffer::new(self.size, closure_factory)
-                .expect("Failed to create ring buffer")
+            RingBuffer::new(self.size, closure_factory).expect("Failed to create ring buffer"),
         );
 
         // Create a multi producer sequencer
@@ -275,7 +272,10 @@ where
     E: Send + Sync,
 {
     fn new(ring_buffer: Arc<RingBuffer<E>>, sequencer: Arc<dyn Sequencer>) -> Self {
-        Self { ring_buffer, sequencer }
+        Self {
+            ring_buffer,
+            sequencer,
+        }
     }
 
     /// Create a new SimpleProducer for this thread
@@ -292,7 +292,10 @@ where
     E: Send + Sync,
 {
     /// Publish an event using a closure (simplified API)
-    pub fn try_publish<F>(&self, update: F) -> std::result::Result<i64, crate::disruptor::producer::RingBufferFull>
+    pub fn try_publish<F>(
+        &self,
+        update: F,
+    ) -> std::result::Result<i64, crate::disruptor::producer::RingBufferFull>
     where
         F: FnOnce(&mut E),
     {
@@ -310,7 +313,11 @@ where
     }
 
     /// Try to publish a batch of events
-    pub fn try_batch_publish<F>(&self, n: usize, update: F) -> std::result::Result<i64, crate::disruptor::producer::MissingFreeSlots>
+    pub fn try_batch_publish<F>(
+        &self,
+        n: usize,
+        update: F,
+    ) -> std::result::Result<i64, crate::disruptor::producer::MissingFreeSlots>
     where
         F: for<'a> FnOnce(crate::disruptor::ring_buffer::BatchIterMut<'a, E>),
     {
@@ -356,7 +363,12 @@ where
     E: Send + Sync,
     F: FnMut(&mut E, i64, bool) + Send + Sync,
 {
-    fn on_event(&mut self, event: &mut E, sequence: i64, end_of_batch: bool) -> crate::disruptor::Result<()> {
+    fn on_event(
+        &mut self,
+        event: &mut E,
+        sequence: i64,
+        end_of_batch: bool,
+    ) -> crate::disruptor::Result<()> {
         (self.handler)(event, sequence, end_of_batch);
         Ok(())
     }

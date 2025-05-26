@@ -5,10 +5,10 @@
 //! sequence barriers to ensure proper ordering and dependencies.
 
 use crate::disruptor::{
-    Result, DisruptorError, EventHandler, ExceptionHandler, SequenceBarrier, Sequence,
+    DisruptorError, EventHandler, ExceptionHandler, Result, Sequence, SequenceBarrier,
 };
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 /// Trait for event processors
@@ -68,18 +68,19 @@ pub trait DataProvider<T>: Send + Sync {
     /// A reference to the event at the specified sequence
     fn get(&self, sequence: i64) -> &T;
 
-    /// Get a mutable reference to the event at the specified sequence
+    /// Get mutable access to an event at the specified sequence
     ///
     /// # Arguments
-    /// * `sequence` - The sequence number of the event
+    /// * `sequence` - The sequence number of the event to access
     ///
     /// # Returns
-    /// A mutable reference to the event at the specified sequence
+    /// A mutable reference to the event
     ///
     /// # Safety
     /// This method is unsafe because it allows mutable access to events
     /// that might be accessed concurrently. The caller must ensure that
     /// only one thread accesses the event mutably at a time.
+    #[allow(clippy::mut_from_ref)]
     unsafe fn get_mut(&self, sequence: i64) -> &mut T;
 }
 
@@ -201,9 +202,8 @@ where
             let batch_size = end_of_batch_sequence - *next_sequence + 1;
             let available_size = available_sequence - *next_sequence + 1;
 
-            if let Err(e) = self.event_handler.on_batch_start(batch_size, available_size) {
-                return Err(e);
-            }
+            self.event_handler
+                .on_batch_start(batch_size, available_size)?;
         }
 
         // Process all events in this batch
@@ -214,7 +214,8 @@ where
             let event = unsafe { self.data_provider.get_mut(*next_sequence) };
 
             // Process the event
-            self.event_handler.on_event(event, *next_sequence, end_of_batch)?;
+            self.event_handler
+                .on_event(event, *next_sequence, end_of_batch)?;
 
             *next_sequence += 1;
         }
@@ -228,11 +229,13 @@ where
     /// Handle event processing exceptions
     fn handle_event_exception(&mut self, error: DisruptorError, sequence: i64, event: Option<&T>) {
         if let Some(event) = event {
-            self.exception_handler.handle_event_exception(error, sequence, event);
+            self.exception_handler
+                .handle_event_exception(error, sequence, event);
         } else {
             // If we don't have the event, get it for error reporting
             let event = self.data_provider.get(sequence);
-            self.exception_handler.handle_event_exception(error, sequence, event);
+            self.exception_handler
+                .handle_event_exception(error, sequence, event);
         }
     }
 
@@ -263,7 +266,11 @@ where
 
     fn run(&mut self) -> Result<()> {
         // Check if already running
-        if self.running.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        if self
+            .running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return Err(DisruptorError::InvalidSequence(-1)); // Already running
         }
 
@@ -354,7 +361,6 @@ impl<T> BatchEventProcessor<T>
 where
     T: Send + Sync,
 {
-
     /// Spawn this processor in a new thread
     ///
     /// # Returns
@@ -371,8 +377,8 @@ where
 mod tests {
     use super::*;
     use crate::disruptor::{
-        BlockingWaitStrategy, DefaultExceptionHandler, NoOpEventHandler,
-        ProcessingSequenceBarrier, INITIAL_CURSOR_VALUE,
+        BlockingWaitStrategy, DefaultExceptionHandler, NoOpEventHandler, ProcessingSequenceBarrier,
+        INITIAL_CURSOR_VALUE,
     };
     use std::sync::atomic::AtomicI64;
 

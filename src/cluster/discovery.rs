@@ -3,10 +3,10 @@
 //! This module provides service discovery capabilities for the cluster,
 //! allowing services to register themselves and discover other services.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
 
 use crate::cluster::{ClusterMembership, ClusterResult, NodeId};
 
@@ -34,6 +34,7 @@ pub struct ServiceInfo {
 }
 
 /// Service registry
+#[derive(Default)]
 pub struct ServiceRegistry {
     /// Registered services
     services: Arc<RwLock<HashMap<String, ServiceInfo>>>,
@@ -44,10 +45,7 @@ pub struct ServiceRegistry {
 impl ServiceRegistry {
     /// Create a new service registry
     pub fn new() -> Self {
-        Self {
-            services: Arc::new(RwLock::new(HashMap::new())),
-            services_by_name: Arc::new(RwLock::new(HashMap::new())),
-        }
+        Self::default()
     }
 
     /// Register a service
@@ -62,7 +60,10 @@ impl ServiceRegistry {
 
         {
             let mut by_name = self.services_by_name.write().await;
-            by_name.entry(service_name).or_insert_with(Vec::new).push(service_id);
+            by_name
+                .entry(service_name)
+                .or_insert_with(Vec::new)
+                .push(service_id);
         }
 
         Ok(())
@@ -247,8 +248,8 @@ mod tests {
     async fn test_service_discovery() {
         use crate::cluster::membership::ClusterMembership;
         use crate::cluster::node::Node;
-        use tokio::sync::RwLock;
         use std::sync::Arc;
+        use tokio::sync::RwLock;
 
         use crate::cluster::node::NodeId;
         let node_id = NodeId::generate();
@@ -304,7 +305,7 @@ mod tests {
                 let service = create_test_service(
                     &format!("service-{}", i),
                     "concurrent-service",
-                    8000 + i as u16
+                    8000 + i as u16,
                 );
                 registry_clone.register(service).await.unwrap();
             });

@@ -3,22 +3,22 @@
 //! This benchmark compares BadBatch Disruptor performance against crossbeam channels
 //! in single producer, single consumer scenarios with various burst sizes and pause intervals.
 
-use std::sync::Arc;
+use criterion::measurement::WallTime;
+use criterion::{
+    black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
+};
+use crossbeam::channel::TrySendError::Full;
+use crossbeam::channel::{
+    bounded,
+    TryRecvError::{Disconnected, Empty},
+};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use criterion::{
-    black_box, criterion_group, criterion_main, Criterion, BenchmarkId,
-    Throughput, BenchmarkGroup
-};
-use criterion::measurement::WallTime;
-use crossbeam::channel::TrySendError::Full;
-use crossbeam::channel::{bounded, TryRecvError::{Empty, Disconnected}};
 
 // BadBatch Disruptor imports
-use badbatch::disruptor::{
-    build_single_producer, Producer, BusySpinWaitStrategy,
-};
+use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy, Producer};
 
 // Benchmark configuration
 const DATA_STRUCTURE_SIZE: usize = 128;
@@ -89,13 +89,11 @@ fn crossbeam_spsc(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), para
 
     let receiver = {
         let sink = Arc::clone(&sink);
-        thread::spawn(move || {
-            loop {
-                match r.try_recv() {
-                    Ok(event) => sink.store(event.data, Ordering::Release),
-                    Err(Empty) => continue,
-                    Err(Disconnected) => break,
-                }
+        thread::spawn(move || loop {
+            match r.try_recv() {
+                Ok(event) => sink.store(event.data, Ordering::Release),
+                Err(Empty) => continue,
+                Err(Disconnected) => break,
             }
         })
     };
@@ -107,12 +105,11 @@ fn crossbeam_spsc(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), para
             let start = Instant::now();
             for _ in 0..iters {
                 for data in 1..=*size {
-                    let mut event = Event { data: black_box(data) };
-                    loop {
-                        match s.try_send(event) {
-                            Err(Full(e)) => event = e,
-                            _ => break,
-                        }
+                    let mut event = Event {
+                        data: black_box(data),
+                    };
+                    while let Err(Full(e)) = s.try_send(event) {
+                        event = e;
                     }
                 }
                 // Wait for the last data element to be received in the receiver thread
@@ -165,10 +162,13 @@ fn badbatch_spsc_modern(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64)
 }
 
 /// BadBatch Disruptor SPSC benchmark using traditional LMAX API
-fn badbatch_spsc_traditional(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &str) {
+fn badbatch_spsc_traditional(
+    group: &mut BenchmarkGroup<WallTime>,
+    inputs: (i64, u64),
+    param: &str,
+) {
     use badbatch::disruptor::{
-        Disruptor, ProducerType, BlockingWaitStrategy,
-        EventHandler, EventTranslator, Result,
+        BlockingWaitStrategy, Disruptor, EventHandler, EventTranslator, ProducerType, Result,
     };
 
     // Event handler implementation
@@ -177,7 +177,12 @@ fn badbatch_spsc_traditional(group: &mut BenchmarkGroup<WallTime>, inputs: (i64,
     }
 
     impl EventHandler<Event> for BenchEventHandler {
-        fn on_event(&mut self, event: &mut Event, _sequence: i64, _end_of_batch: bool) -> Result<()> {
+        fn on_event(
+            &mut self,
+            event: &mut Event,
+            _sequence: i64,
+            _end_of_batch: bool,
+        ) -> Result<()> {
             self.sink.store(event.data, Ordering::Release);
             Ok(())
         }
@@ -196,14 +201,17 @@ fn badbatch_spsc_traditional(group: &mut BenchmarkGroup<WallTime>, inputs: (i64,
 
     let sink = Arc::new(AtomicI64::new(0));
     let factory = badbatch::disruptor::DefaultEventFactory::<Event>::new();
-    let handler = BenchEventHandler { sink: Arc::clone(&sink) };
+    let handler = BenchEventHandler {
+        sink: Arc::clone(&sink),
+    };
 
     let mut disruptor = Disruptor::new(
         factory,
         DATA_STRUCTURE_SIZE,
         ProducerType::Single,
         Box::new(BlockingWaitStrategy::new()),
-    ).unwrap()
+    )
+    .unwrap()
     .handle_events_with(handler)
     .build();
 
@@ -216,7 +224,9 @@ fn badbatch_spsc_traditional(group: &mut BenchmarkGroup<WallTime>, inputs: (i64,
             let start = Instant::now();
             for _ in 0..iters {
                 for data in 1..=*size {
-                    let translator = BenchEventTranslator { data: black_box(data) };
+                    let translator = BenchEventTranslator {
+                        data: black_box(data),
+                    };
                     disruptor.publish_event(translator).unwrap();
                 }
                 // Wait for the last data element to be processed

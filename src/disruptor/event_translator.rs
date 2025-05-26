@@ -225,7 +225,7 @@ where
 }
 
 /// Convenience functions for creating event translators
-
+///
 /// Create an event translator from a closure
 pub fn event_translator<T, F>(translator_fn: F) -> ClosureEventTranslator<T, F>
 where
@@ -243,7 +243,9 @@ where
 }
 
 /// Create an event translator with two arguments from a closure
-pub fn event_translator_two_arg<T, A, B, F>(translator_fn: F) -> ClosureEventTranslatorTwoArg<T, A, B, F>
+pub fn event_translator_two_arg<T, A, B, F>(
+    translator_fn: F,
+) -> ClosureEventTranslatorTwoArg<T, A, B, F>
 where
     F: Fn(&mut T, i64, A, B) + Send + Sync,
 {
@@ -277,10 +279,11 @@ mod tests {
 
     #[test]
     fn test_closure_event_translator_one_arg() {
-        let translator = ClosureEventTranslatorOneArg::new(|event: &mut TestEvent, sequence, name: String| {
-            event.value = sequence;
-            event.name = name;
-        });
+        let translator =
+            ClosureEventTranslatorOneArg::new(|event: &mut TestEvent, sequence, name: String| {
+                event.value = sequence;
+                event.name = name;
+            });
 
         let mut event = TestEvent::default();
         translator.translate_to(&mut event, 42, "test_name".to_string());
@@ -291,11 +294,13 @@ mod tests {
 
     #[test]
     fn test_closure_event_translator_two_arg() {
-        let translator = ClosureEventTranslatorTwoArg::new(|event: &mut TestEvent, sequence, name: String, count: u32| {
-            event.value = sequence;
-            event.name = name;
-            event.count = count;
-        });
+        let translator = ClosureEventTranslatorTwoArg::new(
+            |event: &mut TestEvent, sequence, name: String, count: u32| {
+                event.value = sequence;
+                event.name = name;
+                event.count = count;
+            },
+        );
 
         let mut event = TestEvent::default();
         translator.translate_to(&mut event, 42, "test_name".to_string(), 100);
@@ -315,9 +320,10 @@ mod tests {
         translator.translate_to(&mut event, 21);
         assert_eq!(event.value, 42);
 
-        let translator_one = event_translator_one_arg(|event: &mut TestEvent, sequence, multiplier: i64| {
-            event.value = sequence * multiplier;
-        });
+        let translator_one =
+            event_translator_one_arg(|event: &mut TestEvent, sequence, multiplier: i64| {
+                event.value = sequence * multiplier;
+            });
 
         let mut event = TestEvent::default();
         translator_one.translate_to(&mut event, 21, 3);

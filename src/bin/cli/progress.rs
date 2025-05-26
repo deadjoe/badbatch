@@ -2,7 +2,7 @@
 //!
 //! Progress bars and spinners for CLI operations.
 
-use indicatif::{ProgressBar, ProgressStyle, ProgressState};
+use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use std::fmt::Write;
 
 /// Create a spinner for indeterminate progress
@@ -11,9 +11,7 @@ pub fn create_spinner(message: &str) -> ProgressBar {
     spinner.set_style(
         ProgressStyle::with_template("{spinner:.green} {msg}")
             .unwrap()
-            .tick_strings(&[
-                "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-            ]),
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
     );
     spinner.set_message(message.to_string());
     spinner.enable_steady_tick(std::time::Duration::from_millis(100));
@@ -25,7 +23,7 @@ pub fn create_progress_bar(total: u64, message: &str) -> ProgressBar {
     let progress_bar = ProgressBar::new(total);
     progress_bar.set_style(
         ProgressStyle::with_template(
-            "{msg} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})"
+            "{msg} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
         )
         .unwrap()
         .with_key("eta", |state: &ProgressState, w: &mut dyn Write| {
@@ -79,7 +77,7 @@ pub fn create_simple_progress_bar(total: u64, message: &str) -> ProgressBar {
     let progress_bar = ProgressBar::new(total);
     progress_bar.set_style(
         ProgressStyle::with_template(
-            "{msg} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len}"
+            "{msg} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len}",
         )
         .unwrap()
         .progress_chars("#>-"),
@@ -96,20 +94,14 @@ pub fn create_multi_progress() -> indicatif::MultiProgress {
 
 /// Finish a progress bar with a success message
 pub fn finish_progress_with_message(progress_bar: &ProgressBar, message: &str) {
-    progress_bar.set_style(
-        ProgressStyle::with_template("{msg}")
-            .unwrap()
-    );
+    progress_bar.set_style(ProgressStyle::with_template("{msg}").unwrap());
     progress_bar.finish_with_message(format!("✓ {}", message));
 }
 
 /// Finish a progress bar with an error message
 #[allow(dead_code)]
 pub fn finish_progress_with_error(progress_bar: &ProgressBar, message: &str) {
-    progress_bar.set_style(
-        ProgressStyle::with_template("{msg}")
-            .unwrap()
-    );
+    progress_bar.set_style(ProgressStyle::with_template("{msg}").unwrap());
     progress_bar.finish_with_message(format!("✗ {}", message));
 }
 
@@ -136,9 +128,7 @@ pub fn create_server_progress_bar(message: &str) -> ProgressBar {
     progress_bar.set_style(
         ProgressStyle::with_template("{spinner:.green} {msg}")
             .unwrap()
-            .tick_strings(&[
-                "🌍", "🌎", "🌏", "🌍", "🌎", "🌏",
-            ]),
+            .tick_strings(&["🌍", "🌎", "🌏", "🌍", "🌎", "🌏"]),
     );
     progress_bar.set_message(message.to_string());
     progress_bar.enable_steady_tick(std::time::Duration::from_millis(500));

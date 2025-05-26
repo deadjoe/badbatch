@@ -3,14 +3,14 @@
 //! This module provides health checking capabilities for cluster nodes,
 //! including failure detection and recovery monitoring.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
 
-use crate::cluster::{NodeId, ClusterResult};
 use crate::cluster::config::HealthConfig;
+use crate::cluster::{ClusterResult, NodeId};
 
 /// Health status for cluster nodes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,7 +81,8 @@ impl HealthChecker {
             return Ok(());
         }
 
-        self.running.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
 
         // Start health check background task
         let health_task = {
@@ -118,13 +119,17 @@ impl HealthChecker {
             return Ok(());
         }
 
-        self.running.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
 
         // Wait for all background tasks to complete
         let mut handles = self.task_handles.write().await;
         while let Some(handle) = handles.pop() {
             if let Err(e) = handle.await {
-                tracing::warn!("Health checker background task failed to complete cleanly: {}", e);
+                tracing::warn!(
+                    "Health checker background task failed to complete cleanly: {}",
+                    e
+                );
             }
         }
 

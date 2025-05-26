@@ -2,15 +2,15 @@
 //!
 //! Command handlers for monitoring and metrics operations.
 
+use serde_json::Value;
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::time::sleep;
 use tabled::Tabled;
-use serde_json::Value;
+use tokio::time::sleep;
 
-use crate::{MonitorCommands};
-use crate::cli::client::{BadBatchClient, SystemMetrics, DisruptorMetrics};
-use crate::cli::{CliResult, format, utils};
+use crate::cli::client::{BadBatchClient, DisruptorMetrics, SystemMetrics};
+use crate::cli::{format, utils, CliResult};
+use crate::MonitorCommands;
 
 /// Handle monitor commands
 pub async fn handle_monitor_command(
@@ -21,7 +21,9 @@ pub async fn handle_monitor_command(
     match command {
         MonitorCommands::System => show_system_metrics(client, output_format).await,
 
-        MonitorCommands::Disruptor { id } => show_disruptor_metrics(client, &id, output_format).await,
+        MonitorCommands::Disruptor { id } => {
+            show_disruptor_metrics(client, &id, output_format).await
+        }
 
         MonitorCommands::Cluster => show_cluster_metrics(client, output_format).await,
 
@@ -29,7 +31,16 @@ pub async fn handle_monitor_command(
             interval,
             monitor_type,
             target,
-        } => watch_metrics(client, interval, &monitor_type, target.as_deref(), output_format).await,
+        } => {
+            watch_metrics(
+                client,
+                interval,
+                &monitor_type,
+                target.as_deref(),
+                output_format,
+            )
+            .await
+        }
 
         MonitorCommands::Export { output, format } => {
             export_metrics(client, &output, &format).await
@@ -100,7 +111,10 @@ async fn watch_metrics(
     target: Option<&str>,
     output_format: &str,
 ) -> CliResult<()> {
-    println!("Watching {} metrics (refresh every {}s). Press Ctrl+C to stop.", monitor_type, interval);
+    println!(
+        "Watching {} metrics (refresh every {}s). Press Ctrl+C to stop.",
+        monitor_type, interval
+    );
     println!();
 
     let sleep_duration = Duration::from_secs(interval);
@@ -110,7 +124,10 @@ async fn watch_metrics(
         print!("\x1B[2J\x1B[1;1H");
 
         // Show timestamp
-        println!("Last updated: {}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"));
+        println!(
+            "Last updated: {}",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+        );
         println!();
 
         match monitor_type.to_lowercase().as_str() {
@@ -121,7 +138,9 @@ async fn watch_metrics(
             }
             "disruptor" => {
                 if let Some(disruptor_id) = target {
-                    if let Err(e) = show_disruptor_metrics(client, disruptor_id, output_format).await {
+                    if let Err(e) =
+                        show_disruptor_metrics(client, disruptor_id, output_format).await
+                    {
                         eprintln!("Error fetching disruptor metrics: {}", e);
                     }
                 } else {
@@ -151,7 +170,10 @@ async fn export_metrics(
     output_path: &PathBuf,
     export_format: &str,
 ) -> CliResult<()> {
-    println!("Exporting metrics to {:?} in {} format...", output_path, export_format);
+    println!(
+        "Exporting metrics to {:?} in {} format...",
+        output_path, export_format
+    );
 
     // Collect all metrics
     let system_metrics = client.get_system_metrics().await?;
@@ -181,10 +203,12 @@ async fn export_metrics(
         "yaml" => serde_yaml::to_string(&export_data)?,
         "csv" => export_to_csv(&export_data)?,
         "prometheus" => export_to_prometheus(&export_data)?,
-        _ => return Err(crate::cli::CliError::invalid_input(format!(
-            "Unsupported export format: {}. Supported formats: json, yaml, csv, prometheus",
-            export_format
-        ))),
+        _ => {
+            return Err(crate::cli::CliError::invalid_input(format!(
+                "Unsupported export format: {}. Supported formats: json, yaml, csv, prometheus",
+                export_format
+            )))
+        }
     };
 
     tokio::fs::write(output_path, content).await?;
@@ -200,13 +224,22 @@ fn export_to_csv(data: &Value) -> CliResult<String> {
 
     if let Some(system_metrics) = data.get("system_metrics") {
         if let Some(uptime) = system_metrics.get("uptime_seconds") {
-            csv.push_str(&format!("system,uptime_seconds,{},{}\n", uptime, data["timestamp"]));
+            csv.push_str(&format!(
+                "system,uptime_seconds,{},{}\n",
+                uptime, data["timestamp"]
+            ));
         }
         if let Some(memory) = system_metrics.get("memory_usage_bytes") {
-            csv.push_str(&format!("system,memory_usage_bytes,{},{}\n", memory, data["timestamp"]));
+            csv.push_str(&format!(
+                "system,memory_usage_bytes,{},{}\n",
+                memory, data["timestamp"]
+            ));
         }
         if let Some(cpu) = system_metrics.get("cpu_usage_percent") {
-            csv.push_str(&format!("system,cpu_usage_percent,{},{}\n", cpu, data["timestamp"]));
+            csv.push_str(&format!(
+                "system,cpu_usage_percent,{},{}\n",
+                cpu, data["timestamp"]
+            ));
         }
     }
 
@@ -219,14 +252,14 @@ fn export_to_prometheus(data: &Value) -> CliResult<String> {
 
     if let Some(system_metrics) = data.get("system_metrics") {
         if let Some(uptime) = system_metrics.get("uptime_seconds") {
-            prometheus.push_str(&format!("# HELP badbatch_uptime_seconds System uptime in seconds\n"));
-            prometheus.push_str(&format!("# TYPE badbatch_uptime_seconds counter\n"));
+            prometheus.push_str("# HELP badbatch_uptime_seconds System uptime in seconds\n");
+            prometheus.push_str("# TYPE badbatch_uptime_seconds counter\n");
             prometheus.push_str(&format!("badbatch_uptime_seconds {}\n", uptime));
         }
 
         if let Some(memory) = system_metrics.get("memory_usage_bytes") {
-            prometheus.push_str(&format!("# HELP badbatch_memory_usage_bytes Memory usage in bytes\n"));
-            prometheus.push_str(&format!("# TYPE badbatch_memory_usage_bytes gauge\n"));
+            prometheus.push_str("# HELP badbatch_memory_usage_bytes Memory usage in bytes\n");
+            prometheus.push_str("# TYPE badbatch_memory_usage_bytes gauge\n");
             prometheus.push_str(&format!("badbatch_memory_usage_bytes {}\n", memory));
         }
     }
@@ -416,20 +449,24 @@ mod tests {
 
         for monitor_type in &valid_types {
             // This simulates the validation logic in watch_metrics
-            let is_valid = match monitor_type.to_lowercase().as_str() {
-                "system" | "disruptor" | "cluster" => true,
-                _ => false,
-            };
+            let is_valid = matches!(
+                monitor_type.to_lowercase().as_str(),
+                "system" | "disruptor" | "cluster"
+            );
             assert!(is_valid, "Monitor type '{}' should be valid", monitor_type);
         }
 
         let invalid_types = ["invalid", "unknown", ""];
         for monitor_type in &invalid_types {
-            let is_valid = match monitor_type.to_lowercase().as_str() {
-                "system" | "disruptor" | "cluster" => true,
-                _ => false,
-            };
-            assert!(!is_valid, "Monitor type '{}' should be invalid", monitor_type);
+            let is_valid = matches!(
+                monitor_type.to_lowercase().as_str(),
+                "system" | "disruptor" | "cluster"
+            );
+            assert!(
+                !is_valid,
+                "Monitor type '{}' should be invalid",
+                monitor_type
+            );
         }
     }
 
@@ -438,19 +475,19 @@ mod tests {
         let valid_formats = ["json", "yaml", "csv", "prometheus"];
 
         for format in &valid_formats {
-            let is_valid = match format.to_lowercase().as_str() {
-                "json" | "yaml" | "csv" | "prometheus" => true,
-                _ => false,
-            };
+            let is_valid = matches!(
+                format.to_lowercase().as_str(),
+                "json" | "yaml" | "csv" | "prometheus"
+            );
             assert!(is_valid, "Export format '{}' should be valid", format);
         }
 
         let invalid_formats = ["xml", "binary", ""];
         for format in &invalid_formats {
-            let is_valid = match format.to_lowercase().as_str() {
-                "json" | "yaml" | "csv" | "prometheus" => true,
-                _ => false,
-            };
+            let is_valid = matches!(
+                format.to_lowercase().as_str(),
+                "json" | "yaml" | "csv" | "prometheus"
+            );
             assert!(!is_valid, "Export format '{}' should be invalid", format);
         }
     }
@@ -509,8 +546,14 @@ mod tests {
         let lines: Vec<&str> = prometheus.lines().collect();
 
         // Should have HELP and TYPE comments
-        let help_lines: Vec<_> = lines.iter().filter(|line| line.starts_with("# HELP")).collect();
-        let type_lines: Vec<_> = lines.iter().filter(|line| line.starts_with("# TYPE")).collect();
+        let help_lines: Vec<_> = lines
+            .iter()
+            .filter(|line| line.starts_with("# HELP"))
+            .collect();
+        let type_lines: Vec<_> = lines
+            .iter()
+            .filter(|line| line.starts_with("# TYPE"))
+            .collect();
 
         assert!(!help_lines.is_empty());
         assert!(!type_lines.is_empty());
