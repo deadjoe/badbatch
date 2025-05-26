@@ -458,18 +458,6 @@ pub struct ApiServer {
 }
 ```
 
-### Cluster Support (`src/cluster/`)
-Distributed capabilities with Gossip-based discovery:
-
-```rust
-pub struct ClusterNode {
-    node_id: String,
-    disruptor: Arc<Disruptor<ClusterEvent>>,
-    gossip: GossipProtocol,
-    // ... other fields
-}
-```
-
 ### CLI Interface (`src/bin/`)
 Command-line interface for management and monitoring:
 
