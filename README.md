@@ -4,7 +4,6 @@
   # BadBatch Disruptor Engine
 
   [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-  [![Rust MSRV](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
   [![CI](https://github.com/deadjoe/badbatch/workflows/CI/badge.svg)](https://github.com/deadjoe/badbatch/actions)
 
 </div>
