@@ -2,15 +2,15 @@
 //!
 //! Command handlers for event publishing operations.
 
+use serde_json::Value;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::fs;
 use tokio::time::sleep;
-use serde_json::Value;
 
-use crate::{EventCommands};
-use crate::cli::client::{BadBatchClient, PublishEventRequest, PublishBatchRequest, EventData};
-use crate::cli::{CliResult, format, utils, progress};
+use crate::cli::client::{BadBatchClient, EventData, PublishBatchRequest, PublishEventRequest};
+use crate::cli::{format, progress, utils, CliResult};
+use crate::EventCommands;
 
 /// Handle event commands
 pub async fn handle_event_command(
@@ -95,7 +95,11 @@ async fn publish_file(
         return Ok(());
     }
 
-    println!("Publishing {} events from file in batches of {}...", events.len(), batch_size);
+    println!(
+        "Publishing {} events from file in batches of {}...",
+        events.len(),
+        batch_size
+    );
 
     let total_batches = (events.len() + batch_size - 1) / batch_size;
     let progress_bar = progress::create_progress_bar(total_batches as u64, "Publishing batches");
@@ -103,7 +107,7 @@ async fn publish_file(
     let mut total_published = 0;
     let start_time = Instant::now();
 
-    for (_batch_idx, chunk) in events.chunks(batch_size).enumerate() {
+    for chunk in events.chunks(batch_size) {
         let batch_events: Vec<EventData> = chunk
             .iter()
             .map(|data| EventData {
@@ -154,7 +158,9 @@ async fn publish_batch(
     let events: Vec<Value> = serde_json::from_str(data)?;
 
     if events.is_empty() {
-        return Err(crate::cli::CliError::invalid_input("Event array cannot be empty"));
+        return Err(crate::cli::CliError::invalid_input(
+            "Event array cannot be empty",
+        ));
     }
 
     let spinner = progress::create_spinner(&format!("Publishing {} events...", events.len()));
@@ -172,7 +178,10 @@ async fn publish_batch(
     };
 
     let response = client.publish_batch(disruptor, request).await?;
-    progress::finish_progress_with_message(&spinner, &format!("Published {} events successfully", response.count));
+    progress::finish_progress_with_message(
+        &spinner,
+        &format!("Published {} events successfully", response.count),
+    );
 
     let output = format::format_output(&response, output_format)?;
     println!("{}", output);
@@ -187,7 +196,10 @@ async fn generate_events(
     rate: usize,
     size: usize,
 ) -> CliResult<()> {
-    println!("Generating {} events at {} events/sec with {} bytes each...", count, rate, size);
+    println!(
+        "Generating {} events at {} events/sec with {} bytes each...",
+        count, rate, size
+    );
 
     let progress_bar = progress::create_progress_bar(count as u64, "Generating events");
     let start_time = Instant::now();

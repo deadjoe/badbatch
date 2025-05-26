@@ -8,9 +8,9 @@ use axum::Router;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
-use tracing::{info, error};
+use tracing::{error, info};
 
-use crate::api::{routes, ServerConfig, manager::DisruptorManager};
+use crate::api::{manager::DisruptorManager, routes, ServerConfig};
 
 /// Main API server
 pub struct ApiServer {
@@ -25,20 +25,14 @@ impl ApiServer {
     pub fn new(config: ServerConfig) -> Self {
         let router = routes::create_router(&config);
 
-        Self {
-            config,
-            router,
-        }
+        Self { config, router }
     }
 
     /// Create a new API server with state management
     pub fn with_state(config: ServerConfig, manager: Arc<Mutex<DisruptorManager>>) -> Self {
         let router = routes::create_router_with_state(&config, manager);
 
-        Self {
-            config,
-            router,
-        }
+        Self { config, router }
     }
 
     /// Create a new API server with default configuration
@@ -52,8 +46,10 @@ impl ApiServer {
         let addr = format!("{}:{}", self.config.host, self.config.port)
             .parse::<SocketAddr>()
             .map_err(|e| ApiServerError::ConfigError {
-                message: format!("Invalid host:port combination '{}:{}': {}",
-                    self.config.host, self.config.port, e)
+                message: format!(
+                    "Invalid host:port combination '{}:{}': {}",
+                    self.config.host, self.config.port, e
+                ),
             })?;
 
         info!(
@@ -91,8 +87,10 @@ impl ApiServer {
         let addr = format!("{}:{}", self.config.host, self.config.port)
             .parse::<SocketAddr>()
             .map_err(|e| ApiServerError::ConfigError {
-                message: format!("Invalid host:port combination '{}:{}': {}",
-                    self.config.host, self.config.port, e)
+                message: format!(
+                    "Invalid host:port combination '{}:{}': {}",
+                    self.config.host, self.config.port, e
+                ),
             })?;
 
         info!(
@@ -213,7 +211,7 @@ impl Default for ApiServerBuilder {
 }
 
 /// Utility functions for server management
-
+///
 /// Create a shutdown signal that triggers on CTRL+C
 pub async fn shutdown_signal() {
     let ctrl_c = async {

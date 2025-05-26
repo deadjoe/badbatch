@@ -6,7 +6,7 @@
 //! This implementation has been corrected to properly integrate with the Sequencer
 //! component, following the LMAX Disruptor design principles.
 
-use crate::disruptor::{RingBuffer, ring_buffer::BatchIterMut, Sequencer};
+use crate::disruptor::{ring_buffer::BatchIterMut, RingBuffer, Sequencer};
 use std::sync::Arc;
 
 /// Error indicating that the ring buffer is full
@@ -70,7 +70,11 @@ where
     ///     }
     /// })?;
     /// ```
-    fn try_batch_publish<'a, F>(&'a mut self, n: usize, update: F) -> std::result::Result<i64, MissingFreeSlots>
+    fn try_batch_publish<'a, F>(
+        &'a mut self,
+        n: usize,
+        update: F,
+    ) -> std::result::Result<i64, MissingFreeSlots>
     where
         E: 'a,
         F: FnOnce(BatchIterMut<'a, E>);
@@ -143,11 +147,6 @@ where
         self.sequencer.get_cursor().get()
     }
 
-    /// Check if we have capacity for n events using the sequencer
-    fn has_capacity(&self, n: usize) -> bool {
-        self.sequencer.has_available_capacity(n)
-    }
-
     // Note: wait_for_capacity is no longer needed as we use sequencer.next() which blocks
 }
 
@@ -175,7 +174,11 @@ where
         Ok(sequence)
     }
 
-    fn try_batch_publish<'a, F>(&'a mut self, n: usize, update: F) -> std::result::Result<i64, MissingFreeSlots>
+    fn try_batch_publish<'a, F>(
+        &'a mut self,
+        n: usize,
+        update: F,
+    ) -> std::result::Result<i64, MissingFreeSlots>
     where
         T: 'a,
         F: FnOnce(BatchIterMut<'a, T>),
@@ -192,7 +195,10 @@ where
         let start_sequence = end_sequence - (n as i64 - 1);
 
         // SAFETY: We have exclusive access to this sequence range from the sequencer
-        let iter = unsafe { self.ring_buffer.batch_iter_mut(start_sequence, end_sequence) };
+        let iter = unsafe {
+            self.ring_buffer
+                .batch_iter_mut(start_sequence, end_sequence)
+        };
         update(iter);
 
         // Publish the entire range to make it available to consumers
@@ -222,11 +228,17 @@ where
         F: FnOnce(BatchIterMut<'a, T>),
     {
         // Claim n sequences from the sequencer (blocking)
-        let end_sequence = self.sequencer.next_n(n as i64).expect("Failed to claim sequences");
+        let end_sequence = self
+            .sequencer
+            .next_n(n as i64)
+            .expect("Failed to claim sequences");
         let start_sequence = end_sequence - (n as i64 - 1);
 
         // SAFETY: We have exclusive access to this sequence range from the sequencer
-        let iter = unsafe { self.ring_buffer.batch_iter_mut(start_sequence, end_sequence) };
+        let iter = unsafe {
+            self.ring_buffer
+                .batch_iter_mut(start_sequence, end_sequence)
+        };
         update(iter);
 
         // Publish the entire range to make it available to consumers

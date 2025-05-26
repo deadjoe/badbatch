@@ -173,12 +173,18 @@ mod tests {
         // Test config error
         let config_err = CliError::config("Invalid configuration");
         assert!(matches!(config_err, CliError::Config { .. }));
-        assert_eq!(config_err.to_string(), "Configuration error: Invalid configuration");
+        assert_eq!(
+            config_err.to_string(),
+            "Configuration error: Invalid configuration"
+        );
 
         // Test validation error
         let validation_err = CliError::validation("Invalid input");
         assert!(matches!(validation_err, CliError::Validation { .. }));
-        assert_eq!(validation_err.to_string(), "Validation error: Invalid input");
+        assert_eq!(
+            validation_err.to_string(),
+            "Validation error: Invalid input"
+        );
 
         // Test server error
         let server_err = CliError::server(404, "Not found".to_string());
@@ -198,7 +204,10 @@ mod tests {
         // Test operation error
         let operation_err = CliError::operation("operation failed");
         assert!(matches!(operation_err, CliError::Operation { .. }));
-        assert_eq!(operation_err.to_string(), "Operation failed: operation failed");
+        assert_eq!(
+            operation_err.to_string(),
+            "Operation failed: operation failed"
+        );
 
         // Test network error
         let network_err = CliError::network("connection failed");
@@ -208,7 +217,10 @@ mod tests {
         // Test timeout error
         let timeout_err = CliError::timeout(30);
         assert!(matches!(timeout_err, CliError::Timeout { .. }));
-        assert_eq!(timeout_err.to_string(), "Timeout error: operation timed out after 30s");
+        assert_eq!(
+            timeout_err.to_string(),
+            "Timeout error: operation timed out after 30s"
+        );
     }
 
     #[test]
@@ -284,7 +296,10 @@ mod tests {
 
             let result = format::format_output(&data, "xml");
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("Unsupported format"));
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("Unsupported format"));
         }
 
         #[test]
@@ -299,4 +314,3 @@ mod tests {
         }
     }
 }
-

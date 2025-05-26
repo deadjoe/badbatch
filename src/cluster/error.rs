@@ -189,25 +189,25 @@ impl ClusterError {
 
     /// Check if the error is retryable
     pub fn is_retryable(&self) -> bool {
-        match self {
-            ClusterError::NetworkError { .. } => true,
-            ClusterError::ConnectionError { .. } => true,
-            ClusterError::TimeoutError { .. } => true,
-            ClusterError::ResourceExhausted { .. } => true,
-            ClusterError::NotReady { .. } => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            ClusterError::NetworkError { .. }
+                | ClusterError::ConnectionError { .. }
+                | ClusterError::TimeoutError { .. }
+                | ClusterError::ResourceExhausted { .. }
+                | ClusterError::NotReady { .. }
+        )
     }
 
     /// Check if the error is permanent
     pub fn is_permanent(&self) -> bool {
-        match self {
-            ClusterError::ConfigError(_) => true,
-            ClusterError::NotSupported { .. } => true,
-            ClusterError::AuthenticationError { .. } => true,
-            ClusterError::SerializationError(_) => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            ClusterError::ConfigError(_)
+                | ClusterError::NotSupported { .. }
+                | ClusterError::AuthenticationError { .. }
+                | ClusterError::SerializationError(_)
+        )
     }
 
     /// Get error category
@@ -342,12 +342,11 @@ mod tests {
         let network_error = ClusterError::network("test");
         assert_eq!(network_error.category(), ErrorCategory::Network);
 
-        let config_error = ClusterError::ConfigError(
-            crate::cluster::config::ConfigError::InvalidValue {
+        let config_error =
+            ClusterError::ConfigError(crate::cluster::config::ConfigError::InvalidValue {
                 field: "test".to_string(),
                 message: "test".to_string(),
-            }
-        );
+            });
         assert_eq!(config_error.category(), ErrorCategory::Configuration);
         assert!(config_error.is_permanent());
     }
@@ -469,7 +468,8 @@ mod tests {
         assert!(!bind_error.is_retryable());
 
         let addr2: SocketAddr = "192.168.1.1:9090".parse().unwrap();
-        let io_error2 = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "Connection refused");
+        let io_error2 =
+            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "Connection refused");
         let connection_error = ClusterError::ConnectionError {
             addr: addr2,
             source: io_error2,

@@ -3,21 +3,21 @@
 //! This module provides handlers for Disruptor lifecycle management operations
 //! including creation, deletion, starting, stopping, and status queries.
 
+use crate::api::{
+    global_manager::get_global_manager,
+    handlers::ApiResult,
+    manager::DisruptorManager,
+    models::{
+        CreateDisruptorRequest, CreateDisruptorResponse, DisruptorInfo, DisruptorList,
+        DisruptorStatus, ListDisruptorsQuery,
+    },
+    ApiResponse,
+};
 use axum::{
-    extract::{Path, Query, Json as ExtractJson, State},
+    extract::{Json as ExtractJson, Path, Query, State},
     response::Json,
 };
 use std::sync::{Arc, Mutex};
-use crate::api::{
-    ApiResponse,
-    models::{
-        CreateDisruptorRequest, CreateDisruptorResponse, DisruptorInfo,
-        DisruptorList, DisruptorStatus, ListDisruptorsQuery,
-    },
-    handlers::ApiResult,
-    global_manager::get_global_manager,
-    manager::DisruptorManager,
-};
 
 /// Create a new Disruptor instance
 pub async fn create_disruptor(
@@ -61,21 +61,23 @@ pub async fn list_disruptors(
 
     if let Some(status_filter) = &query.status {
         filtered_disruptors.retain(|d| {
-            match (status_filter.to_lowercase().as_str(), &d.status) {
-                ("created", DisruptorStatus::Created) => true,
-                ("running", DisruptorStatus::Running) => true,
-                ("paused", DisruptorStatus::Paused) => true,
-                ("stopping", DisruptorStatus::Stopping) => true,
-                ("stopped", DisruptorStatus::Stopped) => true,
-                ("error", DisruptorStatus::Error) => true,
-                _ => false,
-            }
+            matches!(
+                (status_filter.to_lowercase().as_str(), &d.status),
+                ("created", DisruptorStatus::Created)
+                    | ("running", DisruptorStatus::Running)
+                    | ("paused", DisruptorStatus::Paused)
+                    | ("stopping", DisruptorStatus::Stopping)
+                    | ("stopped", DisruptorStatus::Stopped)
+                    | ("error", DisruptorStatus::Error)
+            )
         });
     }
 
     if let Some(name_filter) = &query.name {
         filtered_disruptors.retain(|d| {
-            d.name.as_ref().map_or(false, |name| name.contains(name_filter))
+            d.name
+                .as_ref()
+                .is_some_and(|name| name.contains(name_filter))
         });
     }
 
@@ -96,9 +98,7 @@ pub async fn list_disruptors(
 }
 
 /// Get information about a specific Disruptor
-pub async fn get_disruptor(
-    Path(id): Path<String>,
-) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
+pub async fn get_disruptor(Path(id): Path<String>) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
     let manager = get_global_manager();
     let manager = manager.lock().await;
     let disruptor_info = manager.get_disruptor_info(&id)?;
@@ -106,9 +106,7 @@ pub async fn get_disruptor(
 }
 
 /// Delete a Disruptor instance
-pub async fn delete_disruptor(
-    Path(id): Path<String>,
-) -> ApiResult<Json<ApiResponse<()>>> {
+pub async fn delete_disruptor(Path(id): Path<String>) -> ApiResult<Json<ApiResponse<()>>> {
     let manager = get_global_manager();
     let manager = manager.lock().await;
     manager.remove_disruptor(&id)?;
@@ -126,9 +124,7 @@ pub async fn start_disruptor(
 }
 
 /// Stop a Disruptor instance
-pub async fn stop_disruptor(
-    Path(id): Path<String>,
-) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
+pub async fn stop_disruptor(Path(id): Path<String>) -> ApiResult<Json<ApiResponse<DisruptorInfo>>> {
     let manager = get_global_manager();
     let manager = manager.lock().await;
     let disruptor_info = manager.stop_disruptor(&id)?;
@@ -174,7 +170,9 @@ pub async fn get_disruptor_status_with_state(
     State(manager): State<Arc<Mutex<DisruptorManager>>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<ApiResponse<DisruptorStatus>>> {
-    let manager = manager.lock().map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
+    let manager = manager
+        .lock()
+        .map_err(|_| crate::api::error::ApiError::internal("Failed to acquire manager lock"))?;
     let disruptor_info = manager.get_disruptor_info(&id)?;
     Ok(Json(ApiResponse::success(disruptor_info.status)))
 }
@@ -188,9 +186,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_disruptor_not_found() {
-        let result = get_disruptor(
-            axum::extract::Path("non-existent".to_string())
-        ).await;
+        let result = get_disruptor(axum::extract::Path("non-existent".to_string())).await;
         assert!(result.is_err());
     }
 
@@ -205,18 +201,14 @@ mod tests {
             config: DisruptorConfig::default(),
         };
 
-        let create_result = create_disruptor(
-            axum::extract::Json(request)
-        ).await;
+        let create_result = create_disruptor(axum::extract::Json(request)).await;
 
         assert!(create_result.is_ok());
         let response = create_result.unwrap().0;
         let disruptor_id = response.data.unwrap().id;
 
         // Get the disruptor
-        let get_result = get_disruptor(
-            axum::extract::Path(disruptor_id)
-        ).await;
+        let get_result = get_disruptor(axum::extract::Path(disruptor_id)).await;
 
         assert!(get_result.is_ok());
     }
@@ -230,9 +222,7 @@ mod tests {
             name: None,
         };
 
-        let result = list_disruptors(
-            axum::extract::Query(query)
-        ).await;
+        let result = list_disruptors(axum::extract::Query(query)).await;
 
         assert!(result.is_ok());
     }

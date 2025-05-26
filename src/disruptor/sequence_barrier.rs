@@ -4,9 +4,9 @@
 //! event processors in the Disruptor pattern. Sequence barriers ensure that
 //! consumers don't process events until their dependencies have been satisfied.
 
-use crate::disruptor::{Result, DisruptorError, Sequence};
-use std::sync::Arc;
+use crate::disruptor::{DisruptorError, Result, Sequence};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Coordination barrier for managing dependencies between event processors
 ///
@@ -233,11 +233,8 @@ mod tests {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let dependent_sequences = vec![Arc::new(Sequence::new(5))];
 
-        let barrier = ProcessingSequenceBarrier::new(
-            cursor.clone(),
-            wait_strategy,
-            dependent_sequences,
-        );
+        let barrier =
+            ProcessingSequenceBarrier::new(cursor.clone(), wait_strategy, dependent_sequences);
 
         // Should be able to wait for a sequence that's already available
         let result = barrier.wait_for(5);

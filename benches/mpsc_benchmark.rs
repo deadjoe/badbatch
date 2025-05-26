@@ -3,23 +3,26 @@
 //! This benchmark compares BadBatch Disruptor performance against crossbeam channels
 //! in multi producer, single consumer scenarios with various burst sizes and pause intervals.
 
+use criterion::measurement::WallTime;
+use criterion::{
+    black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
+};
+use crossbeam::channel::TrySendError::Full;
+use crossbeam::channel::{
+    bounded,
+    TryRecvError::{Disconnected, Empty},
+};
+use crossbeam_utils::CachePadded;
+use std::sync::atomic::{
+    AtomicBool, AtomicI64,
+    Ordering::{Acquire, Relaxed, Release},
+};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering::{Acquire, Release, Relaxed}};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use criterion::{
-    black_box, criterion_group, criterion_main, Criterion, BenchmarkId,
-    Throughput, BenchmarkGroup
-};
-use criterion::measurement::WallTime;
-use crossbeam::channel::TrySendError::Full;
-use crossbeam::channel::{bounded, TryRecvError::{Empty, Disconnected}};
-use crossbeam_utils::CachePadded;
 
 // BadBatch Disruptor imports
-use badbatch::disruptor::{
-    build_multi_producer, BusySpinWaitStrategy,
-};
+use badbatch::disruptor::{build_multi_producer, BusySpinWaitStrategy};
 
 // Benchmark configuration
 const PRODUCERS: usize = 2;
@@ -84,7 +87,10 @@ impl BurstProducer {
             thread::spawn(move || {
                 while !stop.load(Acquire) {
                     // Busy spin with a check if we're done
-                    while start_barrier.compare_exchange(true, false, Acquire, Relaxed).is_err() {
+                    while start_barrier
+                        .compare_exchange(true, false, Acquire, Relaxed)
+                        .is_err()
+                    {
                         if stop.load(Acquire) {
                             return;
                         }
@@ -107,7 +113,11 @@ impl BurstProducer {
 
     fn stop(&mut self) {
         self.stop.store(true, Release);
-        self.join_handle.take().unwrap().join().expect("Should not panic");
+        self.join_handle
+            .take()
+            .unwrap()
+            .join()
+            .expect("Should not panic");
     }
 }
 
@@ -158,28 +168,37 @@ fn base_overhead(group: &mut BenchmarkGroup<WallTime>, size: i64) {
         })
         .collect::<Vec<BurstProducer>>();
 
-    run_benchmark(group, benchmark_id, burst_size, sink, (size, 0), &burst_producers);
+    run_benchmark(
+        group,
+        benchmark_id,
+        burst_size,
+        sink,
+        (size, 0),
+        &burst_producers,
+    );
     burst_producers.iter_mut().for_each(BurstProducer::stop);
 }
 
 /// Crossbeam channel MPSC benchmark
-fn crossbeam_mpsc(group: &mut BenchmarkGroup<WallTime>, params: (i64, u64), param_description: &str) {
+fn crossbeam_mpsc(
+    group: &mut BenchmarkGroup<WallTime>,
+    params: (i64, u64),
+    param_description: &str,
+) {
     // Use an AtomicI64 to count the number of events from the receiving thread
     let sink = Arc::new(AtomicI64::new(0));
     let (s, r) = bounded::<Event>(DATA_STRUCTURE_SIZE);
 
     let receiver = {
         let sink = Arc::clone(&sink);
-        thread::spawn(move || {
-            loop {
-                match r.try_recv() {
-                    Ok(event) => {
-                        black_box(event.data);
-                        sink.fetch_add(1, Release);
-                    }
-                    Err(Empty) => continue,
-                    Err(Disconnected) => break,
+        thread::spawn(move || loop {
+            match r.try_recv() {
+                Ok(event) => {
+                    black_box(event.data);
+                    sink.fetch_add(1, Release);
                 }
+                Err(Empty) => continue,
+                Err(Disconnected) => break,
             }
         })
     };
@@ -194,12 +213,11 @@ fn crossbeam_mpsc(group: &mut BenchmarkGroup<WallTime>, params: (i64, u64), para
             BurstProducer::new(move || {
                 let burst_size = burst_size.load(Acquire);
                 for data in 0..burst_size {
-                    let mut event = Event { data: black_box(data) };
-                    loop {
-                        match s.try_send(event) {
-                            Err(Full(e)) => event = e,
-                            _ => break,
-                        }
+                    let mut event = Event {
+                        data: black_box(data),
+                    };
+                    while let Err(Full(e)) = s.try_send(event) {
+                        event = e;
                     }
                 }
             })
@@ -208,14 +226,25 @@ fn crossbeam_mpsc(group: &mut BenchmarkGroup<WallTime>, params: (i64, u64), para
 
     drop(s); // Original send channel not used
 
-    run_benchmark(group, benchmark_id, burst_size, sink, params, &burst_producers);
+    run_benchmark(
+        group,
+        benchmark_id,
+        burst_size,
+        sink,
+        params,
+        &burst_producers,
+    );
 
     burst_producers.iter_mut().for_each(BurstProducer::stop);
     receiver.join().expect("Receiver should not panic");
 }
 
 /// BadBatch Disruptor MPSC benchmark using modern disruptor-rs inspired API
-fn badbatch_mpsc_modern(group: &mut BenchmarkGroup<WallTime>, params: (i64, u64), param_description: &str) {
+fn badbatch_mpsc_modern(
+    group: &mut BenchmarkGroup<WallTime>,
+    params: (i64, u64),
+    param_description: &str,
+) {
     let factory = || Event { data: 0 };
     // Use an AtomicI64 to count number of received events
     let sink = Arc::new(AtomicI64::new(0));
@@ -253,7 +282,14 @@ fn badbatch_mpsc_modern(group: &mut BenchmarkGroup<WallTime>, params: (i64, u64)
 
     drop(producer); // Original producer not used
 
-    run_benchmark(group, benchmark_id, burst_size, sink, params, &burst_producers);
+    run_benchmark(
+        group,
+        benchmark_id,
+        burst_size,
+        sink,
+        params,
+        &burst_producers,
+    );
 
     burst_producers.iter_mut().for_each(BurstProducer::stop);
 }

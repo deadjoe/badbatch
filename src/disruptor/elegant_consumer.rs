@@ -4,13 +4,16 @@
 //! batch processing detection, state management, and clean shutdown.
 
 use crate::disruptor::{
-    RingBuffer,
-    thread_management::{ThreadBuilder, ManagedThread},
     simple_wait_strategy::SimpleWaitStrategy,
+    thread_management::{ManagedThread, ThreadBuilder},
+    RingBuffer,
 };
-use std::sync::{Arc, atomic::{AtomicI64, AtomicBool, Ordering}};
-use std::marker::PhantomData;
 use crossbeam_utils::CachePadded;
+use std::marker::PhantomData;
+use std::sync::{
+    atomic::{AtomicBool, AtomicI64, Ordering},
+    Arc,
+};
 
 /// Elegant consumer for processing events with automatic batch detection
 ///
@@ -181,8 +184,8 @@ where
 
     /// Check if the consumer is still running
     pub fn is_running(&self) -> bool {
-        !self.shutdown.load(Ordering::Acquire) &&
-        self.thread.as_ref().map_or(false, |t| t.is_running())
+        !self.shutdown.load(Ordering::Acquire)
+            && self.thread.as_ref().is_some_and(|t| t.is_running())
     }
 
     /// Gracefully shutdown the consumer
@@ -207,8 +210,7 @@ where
         wait_strategy: W,
         sequence: Arc<CachePadded<AtomicI64>>,
         shutdown: Arc<AtomicBool>,
-    )
-    where
+    ) where
         H: FnMut(&T, i64, bool),
         W: SimpleWaitStrategy,
     {
@@ -216,12 +218,8 @@ where
 
         while !shutdown.load(Ordering::Acquire) {
             // Wait for events to become available
-            let available_sequence = Self::wait_for_events(
-                next_sequence,
-                &ring_buffer,
-                &wait_strategy,
-                &shutdown,
-            );
+            let available_sequence =
+                Self::wait_for_events(next_sequence, &ring_buffer, &wait_strategy, &shutdown);
 
             if let Some(available) = available_sequence {
                 // Process all available events (automatic batch processing)
@@ -252,8 +250,7 @@ where
         wait_strategy: W,
         sequence: Arc<CachePadded<AtomicI64>>,
         shutdown: Arc<AtomicBool>,
-    )
-    where
+    ) where
         H: FnMut(&mut S, &T, i64, bool),
         I: FnOnce() -> S,
         W: SimpleWaitStrategy,
@@ -263,12 +260,8 @@ where
 
         while !shutdown.load(Ordering::Acquire) {
             // Wait for events to become available
-            let available_sequence = Self::wait_for_events(
-                next_sequence,
-                &ring_buffer,
-                &wait_strategy,
-                &shutdown,
-            );
+            let available_sequence =
+                Self::wait_for_events(next_sequence, &ring_buffer, &wait_strategy, &shutdown);
 
             if let Some(available) = available_sequence {
                 // Process all available events (automatic batch processing)
@@ -303,7 +296,7 @@ where
     {
         // For now, we'll implement a simple availability check
         // In a full implementation, this would coordinate with producers
-        let buffer_size = ring_buffer.size() as i64;
+        let buffer_size = ring_buffer.size();
 
         // Simple check: if we're within buffer bounds, events are available
         if sequence < buffer_size && !shutdown.load(Ordering::Acquire) {
@@ -337,10 +330,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::disruptor::{
-        event_factory::ClosureEventFactory,
-        simple_wait_strategy::BusySpin,
-    };
+    use crate::disruptor::{event_factory::ClosureEventFactory, simple_wait_strategy::BusySpin};
     use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Clone)]
@@ -359,7 +349,10 @@ mod tests {
         let consumer: Result<ElegantConsumer<TestEvent>, _> = ElegantConsumer::new(
             ring_buffer,
             move |event: &TestEvent, sequence: i64, end_of_batch: bool| {
-                processed_clone.lock().unwrap().push((event.value, sequence, end_of_batch));
+                processed_clone
+                    .lock()
+                    .unwrap()
+                    .push((event.value, sequence, end_of_batch));
             },
             BusySpin,
         );
@@ -370,7 +363,9 @@ mod tests {
         assert!(consumer.is_running());
 
         // Shutdown gracefully
-        consumer.shutdown().expect("Consumer should shutdown cleanly");
+        consumer
+            .shutdown()
+            .expect("Consumer should shutdown cleanly");
     }
 
     #[test]
@@ -392,7 +387,9 @@ mod tests {
         assert!(consumer.is_running());
 
         // Shutdown gracefully
-        consumer.shutdown().expect("Consumer should shutdown cleanly");
+        consumer
+            .shutdown()
+            .expect("Consumer should shutdown cleanly");
     }
 
     #[test]
@@ -418,7 +415,9 @@ mod tests {
             assert!(consumer.is_running());
 
             // Shutdown gracefully
-            consumer.shutdown().expect("Consumer should shutdown cleanly");
+            consumer
+                .shutdown()
+                .expect("Consumer should shutdown cleanly");
         }
     }
 
@@ -433,11 +432,14 @@ mod tests {
                 // Just process the event
             },
             BusySpin,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!(consumer.is_running());
 
         // Shutdown and verify
-        consumer.shutdown().expect("Consumer should shutdown cleanly");
+        consumer
+            .shutdown()
+            .expect("Consumer should shutdown cleanly");
     }
 }

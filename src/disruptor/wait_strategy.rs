@@ -4,11 +4,11 @@
 //! Wait strategies determine how consumers wait for new events to become available.
 //! This follows the exact design from the original LMAX Disruptor WaitStrategy interface.
 
-use crate::disruptor::{Result, DisruptorError, Sequence};
+use crate::disruptor::{DisruptorError, Result, Sequence};
 use std::sync::Arc;
+use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
-use std::sync::{Condvar, Mutex};
 
 /// Strategy for waiting for events to become available
 ///
@@ -119,7 +119,10 @@ impl BlockingWaitStrategy {
 
     /// Check if the strategy is currently alerted
     pub fn is_alerted(&self) -> bool {
-        self.mutex.lock().map(|state| state.alerted).unwrap_or(false)
+        self.mutex
+            .lock()
+            .map(|state| state.alerted)
+            .unwrap_or(false)
     }
 }
 
@@ -144,7 +147,10 @@ impl WaitStrategy for BlockingWaitStrategy {
                 }
 
                 // Wait for signal from producers (equivalent to mutex.wait() in LMAX)
-                guard = self.condvar.wait(guard).map_err(|_| DisruptorError::Alert)?;
+                guard = self
+                    .condvar
+                    .wait(guard)
+                    .map_err(|_| DisruptorError::Alert)?;
             }
         }
 
@@ -203,7 +209,9 @@ impl WaitStrategy for BlockingWaitStrategy {
                 }
 
                 // Wait with timeout
-                let (new_guard, timeout_result) = self.condvar.wait_timeout(guard, remaining)
+                let (new_guard, timeout_result) = self
+                    .condvar
+                    .wait_timeout(guard, remaining)
                     .map_err(|_| DisruptorError::Alert)?;
                 guard = new_guard;
 

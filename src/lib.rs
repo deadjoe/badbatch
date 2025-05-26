@@ -4,7 +4,7 @@
 //! inter-thread messaging with mechanical sympathy.
 //!
 //! This library provides a faithful implementation of the LMAX Disruptor pattern,
-//! following the original design from https://github.com/LMAX-Exchange/disruptor
+//! following the original design from <https://github.com/LMAX-Exchange/disruptor>
 //!
 //! ## Features
 //!
@@ -84,59 +84,58 @@
 //! - Batch processing to amortize coordination costs
 //! - Mechanical sympathy with modern CPU architectures
 
-pub mod disruptor;
 pub mod api;
 #[cfg(feature = "cluster")]
 pub mod cluster;
+pub mod disruptor;
 
 // Re-export the main types for convenience
 pub use disruptor::{
+    // Utility functions
+    is_power_of_two,
+    BatchEventProcessor,
+    BlockingWaitStrategy,
+    BusySpinWaitStrategy,
+    // Convenience types
+    DefaultEventFactory,
+
     // Core types
     Disruptor,
+    // Error types
+    DisruptorError,
+    EventFactory,
+    // Event handling
+    EventHandler,
+    // Event processing
+    EventProcessor,
+    EventTranslator,
+    EventTranslatorOneArg,
+    EventTranslatorThreeArg,
+
+    EventTranslatorTwoArg,
+    // Exception handling
+    ExceptionHandler,
+
+    MultiProducerSequencer,
+    ProducerType,
+
+    Result,
+
     RingBuffer,
     Sequence,
 
-    // Event handling
-    EventHandler,
-    EventFactory,
-    EventTranslator,
-    EventTranslatorOneArg,
-    EventTranslatorTwoArg,
-    EventTranslatorThreeArg,
+    SequenceBarrier,
 
     // Sequencing
     Sequencer,
     SingleProducerSequencer,
-    MultiProducerSequencer,
-    ProducerType,
+    SleepingWaitStrategy,
 
     // Wait strategies
     WaitStrategy,
-    BlockingWaitStrategy,
     YieldingWaitStrategy,
-    BusySpinWaitStrategy,
-    SleepingWaitStrategy,
-
-    // Event processing
-    EventProcessor,
-    BatchEventProcessor,
-    SequenceBarrier,
-
-    // Exception handling
-    ExceptionHandler,
-
-    // Convenience types
-    DefaultEventFactory,
-
-    // Error types
-    DisruptorError,
-    Result,
-
     // Constants
     INITIAL_CURSOR_VALUE,
-
-    // Utility functions
-    is_power_of_two,
 };
 
 /// Version information

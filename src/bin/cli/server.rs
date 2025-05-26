@@ -2,8 +2,8 @@
 //!
 //! Command handlers for starting BadBatch server.
 
-use std::path::PathBuf;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use crate::cli::CliResult;
 
@@ -27,23 +27,33 @@ pub async fn start_server(
         }
 
         // Parse cluster bind address
-        let cluster_socket: SocketAddr = cluster_bind.parse()
-            .map_err(|e| crate::cli::CliError::invalid_input(format!("Invalid cluster bind address: {}", e)))?;
+        let cluster_socket: SocketAddr = cluster_bind.parse().map_err(|e| {
+            crate::cli::CliError::invalid_input(format!("Invalid cluster bind address: {}", e))
+        })?;
 
         // Create cluster configuration
-        let mut cluster_config = badbatch::cluster::ClusterConfig::default();
-        cluster_config.bind_addr = cluster_socket;
-        cluster_config.seed_nodes = seed_nodes.iter()
-            .map(|addr| addr.parse())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| crate::cli::CliError::invalid_input(format!("Invalid seed node address: {}", e)))?;
+        let cluster_config = badbatch::cluster::ClusterConfig {
+            bind_addr: cluster_socket,
+            seed_nodes: seed_nodes
+                .iter()
+                .map(|addr| addr.parse())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    crate::cli::CliError::invalid_input(format!("Invalid seed node address: {}", e))
+                })?,
+            ..Default::default()
+        };
 
         // Create and start cluster
-        let cluster = badbatch::cluster::Cluster::new(cluster_config).await
-            .map_err(|e| crate::cli::CliError::operation(format!("Failed to create cluster: {}", e)))?;
+        let cluster = badbatch::cluster::Cluster::new(cluster_config)
+            .await
+            .map_err(|e| {
+                crate::cli::CliError::operation(format!("Failed to create cluster: {}", e))
+            })?;
 
-        cluster.start().await
-            .map_err(|e| crate::cli::CliError::operation(format!("Failed to start cluster: {}", e)))?;
+        cluster.start().await.map_err(|e| {
+            crate::cli::CliError::operation(format!("Failed to start cluster: {}", e))
+        })?;
 
         Some(cluster)
     } else {
@@ -72,13 +82,16 @@ pub async fn start_server(
     }
 
     // Parse bind address
-    let bind_socket: SocketAddr = bind_addr.parse()
+    let bind_socket: SocketAddr = bind_addr
+        .parse()
         .map_err(|e| crate::cli::CliError::invalid_input(format!("Invalid bind address: {}", e)))?;
 
     // Create server configuration
-    let mut server_config = badbatch::api::ServerConfig::default();
-    server_config.host = bind_socket.ip().to_string();
-    server_config.port = bind_socket.port();
+    let server_config = badbatch::api::ServerConfig {
+        host: bind_socket.ip().to_string(),
+        port: bind_socket.port(),
+        ..Default::default()
+    };
 
     // Create and start server
     let server = badbatch::api::ApiServer::new(server_config);
@@ -95,16 +108,18 @@ pub async fn start_server(
         println!("\nShutdown signal received, stopping server...");
     };
 
-    server.start_with_shutdown(shutdown_signal).await.map_err(|e| {
-        crate::cli::CliError::operation(format!("Server error: {}", e))
-    })?;
+    server
+        .start_with_shutdown(shutdown_signal)
+        .await
+        .map_err(|e| crate::cli::CliError::operation(format!("Server error: {}", e)))?;
 
     // Stop cluster if it was started
     #[cfg(feature = "cluster")]
     if let Some(cluster) = cluster_instance {
         println!("Stopping cluster...");
-        cluster.stop().await
-            .map_err(|e| crate::cli::CliError::operation(format!("Failed to stop cluster: {}", e)))?;
+        cluster.stop().await.map_err(|e| {
+            crate::cli::CliError::operation(format!("Failed to stop cluster: {}", e))
+        })?;
         println!("✓ Cluster stopped");
     }
 
@@ -142,8 +157,8 @@ mod tests {
     fn test_invalid_bind_address_parsing() {
         let invalid_addresses = [
             "invalid",
-            "127.0.0.1",  // Missing port
-            ":8080",      // Missing host
+            "127.0.0.1",       // Missing port
+            ":8080",           // Missing host
             "127.0.0.1:99999", // Invalid port
             "",
         ];
@@ -166,9 +181,11 @@ mod tests {
         let bind_addr = "127.0.0.1:8080";
         let socket_addr: SocketAddr = bind_addr.parse().unwrap();
 
-        let mut server_config = badbatch::api::ServerConfig::default();
-        server_config.host = socket_addr.ip().to_string();
-        server_config.port = socket_addr.port();
+        let server_config = badbatch::api::ServerConfig {
+            host: socket_addr.ip().to_string(),
+            port: socket_addr.port(),
+            ..Default::default()
+        };
 
         assert_eq!(server_config.host, "127.0.0.1");
         assert_eq!(server_config.port, 8080);
@@ -177,11 +194,7 @@ mod tests {
     #[test]
     fn test_cluster_configuration_validation() {
         // Test valid cluster bind addresses
-        let valid_cluster_binds = [
-            "0.0.0.0:7946",
-            "127.0.0.1:7947",
-            "192.168.1.100:8000",
-        ];
+        let valid_cluster_binds = ["0.0.0.0:7946", "127.0.0.1:7947", "192.168.1.100:8000"];
 
         for bind in &valid_cluster_binds {
             let result: Result<SocketAddr, _> = bind.parse();
@@ -227,7 +240,7 @@ mod tests {
                 }
                 None => {
                     // Should handle None case gracefully
-                    assert!(true);
+                    // Should handle None case gracefully
                 }
             }
         }
@@ -266,7 +279,7 @@ mod tests {
         // Test cluster mode enabled
         let cluster_mode = true;
         let cluster_bind = "0.0.0.0:7946".to_string();
-        let seed_nodes = vec!["127.0.0.1:7947".to_string()];
+        let seed_nodes = ["127.0.0.1:7947".to_string()];
 
         assert!(cluster_mode);
         assert!(!cluster_bind.is_empty());

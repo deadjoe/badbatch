@@ -3,16 +3,13 @@
 //! This module provides handlers for retrieving performance metrics and health
 //! information for Disruptor instances and the overall system.
 
-use axum::{
-    extract::Path,
-    response::Json,
-};
+use axum::{extract::Path, response::Json};
 use std::collections::HashMap;
 
 use crate::api::{
+    handlers::{ApiError, ApiResult},
+    models::{DisruptorHealth, DisruptorMetrics, HealthStatus},
     ApiResponse,
-    models::{DisruptorMetrics, DisruptorHealth, HealthStatus},
-    handlers::{ApiResult, ApiError},
 };
 
 /// Get performance metrics for a specific Disruptor
@@ -198,10 +195,18 @@ fn collect_system_metrics() -> ApiResult<SystemMetrics> {
         total_events_published: total_published,
         total_events_processed: total_processed,
         avg_events_per_second: if count > 0.0 { total_eps / count } else { 0.0 },
-        avg_latency_micros: if count > 0.0 { total_latency / count } else { 0.0 },
+        avg_latency_micros: if count > 0.0 {
+            total_latency / count
+        } else {
+            0.0
+        },
         max_latency_micros: max_latency,
         total_errors,
-        avg_buffer_utilization: if count > 0.0 { total_utilization / count } else { 0.0 },
+        avg_buffer_utilization: if count > 0.0 {
+            total_utilization / count
+        } else {
+            0.0
+        },
     };
 
     Ok(SystemMetrics {

@@ -3,21 +3,21 @@
 //! This module provides handlers for event publishing and querying operations.
 //! It handles single events, batch events, and event retrieval.
 
+use crate::api::{
+    global_manager::get_global_manager,
+    handlers::{ApiError, ApiResult},
+    models::{
+        EventData, PublishBatchRequest, PublishBatchResponse, PublishEventRequest,
+        PublishEventResponse,
+    },
+    ApiResponse,
+};
 use axum::{
-    extract::{Path, Query, Json as ExtractJson},
+    extract::{Json as ExtractJson, Path, Query},
     response::Json,
 };
-use uuid::Uuid;
 use std::collections::HashMap;
-use crate::api::{
-    ApiResponse,
-    models::{
-        PublishEventRequest, PublishEventResponse, PublishBatchRequest,
-        PublishBatchResponse, EventData,
-    },
-    handlers::{ApiResult, ApiError},
-    global_manager::get_global_manager,
-};
+use uuid::Uuid;
 
 /// Publish a single event to a Disruptor
 pub async fn publish_event(
@@ -65,13 +65,16 @@ pub async fn publish_batch(
     }
 
     if request.events.len() > 1000 {
-        return Err(ApiError::invalid_request("Batch size cannot exceed 1000 events"));
+        return Err(ApiError::invalid_request(
+            "Batch size cannot exceed 1000 events",
+        ));
     }
 
     let batch_id = Uuid::new_v4().to_string();
 
     // Use efficient batch publishing with Disruptor's batch sequence allocation
-    let published_events = publish_batch_to_disruptor_optimized(&disruptor_id, &request.events).await?;
+    let published_events =
+        publish_batch_to_disruptor_optimized(&disruptor_id, &request.events).await?;
 
     let response = PublishBatchResponse {
         published_count: published_events.len(),
@@ -96,7 +99,11 @@ pub async fn publish_batch_events(
             }
             Err(e) => {
                 // Log error but continue with other Disruptors
-                tracing::error!("Failed to publish batch to Disruptor {}: {}", disruptor_id, e);
+                tracing::error!(
+                    "Failed to publish batch to Disruptor {}: {}",
+                    disruptor_id,
+                    e
+                );
                 // In a real implementation, you might want to include error information
                 // in the response rather than silently failing
             }
@@ -264,21 +271,21 @@ async fn validate_disruptor_for_publishing(disruptor_id: &str) -> ApiResult<()> 
     // Check if Disruptor is running
     match status {
         crate::api::models::DisruptorStatus::Running => Ok(()),
-        crate::api::models::DisruptorStatus::Created => {
-            Err(ApiError::invalid_request("Disruptor is not started. Start it first."))
-        }
-        crate::api::models::DisruptorStatus::Stopped => {
-            Err(ApiError::invalid_request("Disruptor is stopped. Start it first."))
-        }
-        crate::api::models::DisruptorStatus::Paused => {
-            Err(ApiError::invalid_request("Disruptor is paused. Resume it first."))
-        }
-        crate::api::models::DisruptorStatus::Stopping => {
-            Err(ApiError::invalid_request("Disruptor is stopping. Cannot publish events."))
-        }
-        crate::api::models::DisruptorStatus::Error => {
-            Err(ApiError::invalid_request("Disruptor is in error state. Cannot publish events."))
-        }
+        crate::api::models::DisruptorStatus::Created => Err(ApiError::invalid_request(
+            "Disruptor is not started. Start it first.",
+        )),
+        crate::api::models::DisruptorStatus::Stopped => Err(ApiError::invalid_request(
+            "Disruptor is stopped. Start it first.",
+        )),
+        crate::api::models::DisruptorStatus::Paused => Err(ApiError::invalid_request(
+            "Disruptor is paused. Resume it first.",
+        )),
+        crate::api::models::DisruptorStatus::Stopping => Err(ApiError::invalid_request(
+            "Disruptor is stopping. Cannot publish events.",
+        )),
+        crate::api::models::DisruptorStatus::Error => Err(ApiError::invalid_request(
+            "Disruptor is in error state. Cannot publish events.",
+        )),
     }
 }
 
@@ -305,7 +312,9 @@ async fn get_next_sequence(disruptor_id: &str) -> ApiResult<i64> {
 
     // Get the Disruptor instance
     let disruptor = manager.get_disruptor(disruptor_id)?;
-    let disruptor = disruptor.lock().map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
+    let disruptor = disruptor
+        .lock()
+        .map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
 
     // Use the Disruptor's sequencer to get the next sequence
     // This provides a preview of what the next sequence would be
@@ -335,7 +344,9 @@ async fn publish_batch_to_disruptor_optimized(
 
     // Get the Disruptor instance once and hold the lock for the entire batch
     let disruptor = manager.get_disruptor(disruptor_id)?;
-    let disruptor = disruptor.lock().map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
+    let disruptor = disruptor
+        .lock()
+        .map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
 
     // Prepare the response vector
     let mut published_events = Vec::with_capacity(events.len());
@@ -356,11 +367,13 @@ async fn publish_batch_to_disruptor_optimized(
 
         // Create an EventTranslator for the ApiEvent
         use crate::disruptor::event_translator::ClosureEventTranslator;
-        let translator = ClosureEventTranslator::new(move |event: &mut crate::api::manager::ApiEvent, _sequence: i64| {
-            event.data = event_data_clone.clone();
-            event.metadata = Some(metadata_clone.clone());
-            event.correlation_id = correlation_id_clone.clone();
-        });
+        let translator = ClosureEventTranslator::new(
+            move |event: &mut crate::api::manager::ApiEvent, _sequence: i64| {
+                event.data = event_data_clone.clone();
+                event.metadata = Some(metadata_clone.clone());
+                event.correlation_id = correlation_id_clone.clone();
+            },
+        );
 
         // Try to publish the event using the Disruptor's try_publish_event
         let published = disruptor.try_publish_event(translator);
@@ -381,7 +394,9 @@ async fn publish_batch_to_disruptor_optimized(
                 event_id = %event_id,
                 "Failed to publish event in batch - ring buffer full"
             );
-            return Err(ApiError::internal("Ring buffer is full, cannot publish batch"));
+            return Err(ApiError::internal(
+                "Ring buffer is full, cannot publish batch",
+            ));
         }
     }
 
@@ -401,7 +416,9 @@ async fn publish_event_to_disruptor(disruptor_id: &str, event_data: &EventData) 
 
     // Get the Disruptor instance
     let disruptor = manager.get_disruptor(disruptor_id)?;
-    let disruptor = disruptor.lock().map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
+    let disruptor = disruptor
+        .lock()
+        .map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
 
     // Prepare data for the event translator
     let event_data_clone = event_data.data.clone();
@@ -410,11 +427,13 @@ async fn publish_event_to_disruptor(disruptor_id: &str, event_data: &EventData) 
 
     // Create an EventTranslator for the ApiEvent
     use crate::disruptor::event_translator::ClosureEventTranslator;
-    let translator = ClosureEventTranslator::new(move |event: &mut crate::api::manager::ApiEvent, _sequence: i64| {
-        event.data = event_data_clone.clone();
-        event.metadata = Some(metadata_clone.clone());
-        event.correlation_id = correlation_id_clone.clone();
-    });
+    let translator = ClosureEventTranslator::new(
+        move |event: &mut crate::api::manager::ApiEvent, _sequence: i64| {
+            event.data = event_data_clone.clone();
+            event.metadata = Some(metadata_clone.clone());
+            event.correlation_id = correlation_id_clone.clone();
+        },
+    );
 
     // Try to publish the event using the Disruptor's try_publish_event
     let published = disruptor.try_publish_event(translator);
@@ -432,17 +451,24 @@ async fn publish_event_to_disruptor(disruptor_id: &str, event_data: &EventData) 
             event_id = %event_data.id,
             "Failed to publish event to Disruptor - ring buffer full"
         );
-        Err(ApiError::internal("Ring buffer is full, cannot publish event"))
+        Err(ApiError::internal(
+            "Ring buffer is full, cannot publish event",
+        ))
     }
 }
 
-async fn get_events_from_disruptor(disruptor_id: &str, query: &EventQuery) -> ApiResult<Vec<EventData>> {
+async fn get_events_from_disruptor(
+    disruptor_id: &str,
+    query: &EventQuery,
+) -> ApiResult<Vec<EventData>> {
     let manager = get_global_manager();
     let manager = manager.lock().await;
 
     // Get the Disruptor instance
     let disruptor = manager.get_disruptor(disruptor_id)?;
-    let disruptor = disruptor.lock().map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
+    let disruptor = disruptor
+        .lock()
+        .map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
 
     // Get the ring buffer and current cursor position
     let ring_buffer = disruptor.get_ring_buffer();
@@ -497,7 +523,9 @@ async fn get_event_from_disruptor(disruptor_id: &str, sequence: i64) -> ApiResul
 
     // Get the Disruptor instance
     let disruptor = manager.get_disruptor(disruptor_id)?;
-    let disruptor = disruptor.lock().map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
+    let disruptor = disruptor
+        .lock()
+        .map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
 
     // Get the ring buffer and current cursor position
     let ring_buffer = disruptor.get_ring_buffer();
@@ -510,13 +538,17 @@ async fn get_event_from_disruptor(disruptor_id: &str, sequence: i64) -> ApiResul
     }
 
     if sequence > current_cursor {
-        return Err(ApiError::invalid_request("Sequence is beyond current cursor"));
+        return Err(ApiError::invalid_request(
+            "Sequence is beyond current cursor",
+        ));
     }
 
     // Check if this sequence is still available (not overwritten)
     let oldest_available = (current_cursor + 1).saturating_sub(buffer_size);
     if sequence < oldest_available {
-        return Err(ApiError::invalid_request("Event has been overwritten in ring buffer"));
+        return Err(ApiError::invalid_request(
+            "Event has been overwritten in ring buffer",
+        ));
     }
 
     // Get the event from the ring buffer
@@ -579,7 +611,9 @@ mod tests {
         };
 
         // Should return error for non-existent disruptor
-        assert!(get_events_from_disruptor("non-existent", &query).await.is_err());
+        assert!(get_events_from_disruptor("non-existent", &query)
+            .await
+            .is_err());
         assert!(get_event_from_disruptor("non-existent", 0).await.is_err());
     }
 
@@ -609,13 +643,15 @@ mod tests {
         let manager = DisruptorManager::new();
 
         // Create a test disruptor
-        let disruptor_info = manager.create_disruptor(
-            Some("test-retrieval".to_string()),
-            1024,
-            "single",
-            "blocking",
-            DisruptorConfig::default(),
-        ).unwrap();
+        let disruptor_info = manager
+            .create_disruptor(
+                Some("test-retrieval".to_string()),
+                1024,
+                "single",
+                "blocking",
+                DisruptorConfig::default(),
+            )
+            .unwrap();
 
         let disruptor_id = disruptor_info.id.clone();
 
@@ -629,11 +665,14 @@ mod tests {
         // Publish 3 test events
         for i in 0..3 {
             use crate::disruptor::event_translator::ClosureEventTranslator;
-            let translator = ClosureEventTranslator::new(move |event: &mut crate::api::manager::ApiEvent, _sequence: i64| {
-                event.data = serde_json::json!({"test_id": i, "message": format!("Test event {}", i)});
-                event.metadata = Some(std::collections::HashMap::new());
-                event.correlation_id = Some(format!("correlation-{}", i));
-            });
+            let translator = ClosureEventTranslator::new(
+                move |event: &mut crate::api::manager::ApiEvent, _sequence: i64| {
+                    event.data =
+                        serde_json::json!({"test_id": i, "message": format!("Test event {}", i)});
+                    event.metadata = Some(std::collections::HashMap::new());
+                    event.correlation_id = Some(format!("correlation-{}", i));
+                },
+            );
 
             disruptor.try_publish_event(translator);
         }
@@ -664,6 +703,6 @@ mod tests {
         manager.remove_disruptor(&disruptor_id).unwrap();
 
         // For now, just verify the test structure works
-        assert!(true);
+        // Test passes if no panic occurs
     }
 }

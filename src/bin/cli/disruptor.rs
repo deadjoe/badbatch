@@ -4,9 +4,9 @@
 
 use tabled::Tabled;
 
-use crate::{DisruptorCommands};
 use crate::cli::client::{BadBatchClient, CreateDisruptorRequest, DisruptorInfo};
-use crate::cli::{CliResult, format, utils, progress};
+use crate::cli::{format, progress, utils, CliResult};
+use crate::DisruptorCommands;
 
 /// Handle disruptor commands
 pub async fn handle_disruptor_command(
@@ -52,16 +52,20 @@ async fn create_disruptor(
 
     let producer_type = match producer.to_lowercase().as_str() {
         "single" | "multi" => producer.to_lowercase(),
-        _ => return Err(crate::cli::CliError::invalid_input(
-            "Producer type must be 'single' or 'multi'"
-        )),
+        _ => {
+            return Err(crate::cli::CliError::invalid_input(
+                "Producer type must be 'single' or 'multi'",
+            ))
+        }
     };
 
     let wait_strategy = match wait_strategy.to_lowercase().as_str() {
         "blocking" | "busy-spin" | "yielding" | "sleeping" => wait_strategy.to_lowercase(),
-        _ => return Err(crate::cli::CliError::invalid_input(
-            "Wait strategy must be one of: blocking, busy-spin, yielding, sleeping"
-        )),
+        _ => {
+            return Err(crate::cli::CliError::invalid_input(
+                "Wait strategy must be one of: blocking, busy-spin, yielding, sleeping",
+            ))
+        }
     };
 
     let spinner = progress::create_spinner(&format!("Creating disruptor '{}'...", name));
@@ -74,7 +78,10 @@ async fn create_disruptor(
     };
 
     let response = client.create_disruptor(request).await?;
-    progress::finish_progress_with_message(&spinner, &format!("Disruptor '{}' created successfully", name));
+    progress::finish_progress_with_message(
+        &spinner,
+        &format!("Disruptor '{}' created successfully", name),
+    );
 
     let output = format::format_output(&response, output_format)?;
     println!("{}", output);
@@ -131,7 +138,10 @@ async fn delete_disruptor(client: &BadBatchClient, id: &str, force: bool) -> Cli
 
     let spinner = progress::create_spinner(&format!("Deleting disruptor '{}'...", id));
     client.delete_disruptor(id).await?;
-    progress::finish_progress_with_message(&spinner, &format!("Disruptor '{}' deleted successfully", id));
+    progress::finish_progress_with_message(
+        &spinner,
+        &format!("Disruptor '{}' deleted successfully", id),
+    );
 
     Ok(())
 }
@@ -139,7 +149,10 @@ async fn delete_disruptor(client: &BadBatchClient, id: &str, force: bool) -> Cli
 async fn start_disruptor(client: &BadBatchClient, id: &str) -> CliResult<()> {
     let spinner = progress::create_spinner(&format!("Starting disruptor '{}'...", id));
     client.start_disruptor(id).await?;
-    progress::finish_progress_with_message(&spinner, &format!("Disruptor '{}' started successfully", id));
+    progress::finish_progress_with_message(
+        &spinner,
+        &format!("Disruptor '{}' started successfully", id),
+    );
 
     Ok(())
 }
@@ -147,7 +160,10 @@ async fn start_disruptor(client: &BadBatchClient, id: &str) -> CliResult<()> {
 async fn stop_disruptor(client: &BadBatchClient, id: &str) -> CliResult<()> {
     let spinner = progress::create_spinner(&format!("Stopping disruptor '{}'...", id));
     client.stop_disruptor(id).await?;
-    progress::finish_progress_with_message(&spinner, &format!("Disruptor '{}' stopped successfully", id));
+    progress::finish_progress_with_message(
+        &spinner,
+        &format!("Disruptor '{}' stopped successfully", id),
+    );
 
     Ok(())
 }
@@ -155,7 +171,10 @@ async fn stop_disruptor(client: &BadBatchClient, id: &str) -> CliResult<()> {
 async fn pause_disruptor(client: &BadBatchClient, id: &str) -> CliResult<()> {
     let spinner = progress::create_spinner(&format!("Pausing disruptor '{}'...", id));
     client.pause_disruptor(id).await?;
-    progress::finish_progress_with_message(&spinner, &format!("Disruptor '{}' paused successfully", id));
+    progress::finish_progress_with_message(
+        &spinner,
+        &format!("Disruptor '{}' paused successfully", id),
+    );
 
     Ok(())
 }
@@ -163,7 +182,10 @@ async fn pause_disruptor(client: &BadBatchClient, id: &str) -> CliResult<()> {
 async fn resume_disruptor(client: &BadBatchClient, id: &str) -> CliResult<()> {
     let spinner = progress::create_spinner(&format!("Resuming disruptor '{}'...", id));
     client.resume_disruptor(id).await?;
-    progress::finish_progress_with_message(&spinner, &format!("Disruptor '{}' resumed successfully", id));
+    progress::finish_progress_with_message(
+        &spinner,
+        &format!("Disruptor '{}' resumed successfully", id),
+    );
 
     Ok(())
 }
@@ -251,7 +273,9 @@ mod tests {
                 "blocking" | "busy-spin" | "yielding" | "sleeping" => strategy.to_lowercase(),
                 _ => panic!("Should be valid"),
             };
-            assert!(["blocking", "busy-spin", "yielding", "sleeping"].contains(&normalized.as_str()));
+            assert!(
+                ["blocking", "busy-spin", "yielding", "sleeping"].contains(&normalized.as_str())
+            );
         }
     }
 

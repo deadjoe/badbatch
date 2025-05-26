@@ -5,7 +5,6 @@
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use tokio;
 
 mod cli;
 
@@ -259,8 +258,7 @@ async fn main() -> CliResult<()> {
 
     // Initialize logging
     let log_level = if cli.verbose { "debug" } else { "info" };
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level))
-        .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level)).init();
 
     // Load configuration if provided
     let config = if let Some(_config_path) = &cli.config {
@@ -327,12 +325,15 @@ mod tests {
     fn test_cli_parsing_with_options() {
         let args = vec![
             "badbatch",
-            "--endpoint", "http://example.com:9000",
-            "--format", "json",
+            "--endpoint",
+            "http://example.com:9000",
+            "--format",
+            "json",
             "--verbose",
-            "--config", "config.yaml",
+            "--config",
+            "config.yaml",
             "cluster",
-            "status"
+            "status",
         ];
         let cli = Cli::try_parse_from(args);
         assert!(cli.is_ok());
@@ -361,10 +362,18 @@ mod tests {
 
             if let Commands::Cluster { action } = cli.unwrap().command {
                 match action {
-                    ClusterCommands::Status => assert!(true),
-                    ClusterCommands::Nodes => assert!(true),
-                    ClusterCommands::Health => assert!(true),
-                    ClusterCommands::Leave => assert!(true),
+                    ClusterCommands::Status => {
+                        // TODO: Implement cluster status command
+                    }
+                    ClusterCommands::Nodes => {
+                        // TODO: Implement cluster nodes command
+                    }
+                    ClusterCommands::Health => {
+                        // TODO: Implement cluster health command
+                    }
+                    ClusterCommands::Leave => {
+                        // TODO: Implement cluster leave command
+                    }
                     ClusterCommands::Join { seed } => {
                         assert_eq!(seed, "127.0.0.1:7946");
                     }
@@ -387,7 +396,16 @@ mod tests {
             vec!["badbatch", "disruptor", "delete", "test-id"],
             vec!["badbatch", "disruptor", "delete", "test-id", "--force"],
             vec!["badbatch", "disruptor", "create", "test-disruptor"],
-            vec!["badbatch", "disruptor", "create", "test-disruptor", "--size", "2048", "--producer", "multi"],
+            vec![
+                "badbatch",
+                "disruptor",
+                "create",
+                "test-disruptor",
+                "--size",
+                "2048",
+                "--producer",
+                "multi",
+            ],
         ];
 
         for args in test_cases {
@@ -396,7 +414,9 @@ mod tests {
 
             if let Commands::Disruptor { action } = cli.unwrap().command {
                 match action {
-                    DisruptorCommands::List => assert!(true),
+                    DisruptorCommands::List => {
+                        // TODO: Implement disruptor list command
+                    }
                     DisruptorCommands::Show { id } => assert_eq!(id, "test-id"),
                     DisruptorCommands::Start { id } => assert_eq!(id, "test-id"),
                     DisruptorCommands::Stop { id } => assert_eq!(id, "test-id"),
@@ -406,7 +426,12 @@ mod tests {
                         assert_eq!(id, "test-id");
                         // force flag varies by test case
                     }
-                    DisruptorCommands::Create { name, size: _, producer: _, wait_strategy: _ } => {
+                    DisruptorCommands::Create {
+                        name,
+                        size: _,
+                        producer: _,
+                        wait_strategy: _,
+                    } => {
                         assert_eq!(name, "test-disruptor");
                         // Other fields have defaults or specified values
                     }
@@ -420,11 +445,38 @@ mod tests {
     #[test]
     fn test_event_commands() {
         let test_cases = vec![
-            vec!["badbatch", "event", "publish", "test-disruptor", r#"{"message": "hello"}"#],
-            vec!["badbatch", "event", "batch", "test-disruptor", r#"[{"id": 1}]"#],
+            vec![
+                "badbatch",
+                "event",
+                "publish",
+                "test-disruptor",
+                r#"{"message": "hello"}"#,
+            ],
+            vec![
+                "badbatch",
+                "event",
+                "batch",
+                "test-disruptor",
+                r#"[{"id": 1}]"#,
+            ],
             vec!["badbatch", "event", "generate", "test-disruptor"],
-            vec!["badbatch", "event", "generate", "test-disruptor", "--count", "500", "--rate", "50"],
-            vec!["badbatch", "event", "publish-file", "test-disruptor", "events.json"],
+            vec![
+                "badbatch",
+                "event",
+                "generate",
+                "test-disruptor",
+                "--count",
+                "500",
+                "--rate",
+                "50",
+            ],
+            vec![
+                "badbatch",
+                "event",
+                "publish-file",
+                "test-disruptor",
+                "events.json",
+            ],
         ];
 
         for args in test_cases {
@@ -433,7 +485,11 @@ mod tests {
 
             if let Commands::Event { action } = cli.unwrap().command {
                 match action {
-                    EventCommands::Publish { disruptor, data, metadata: _ } => {
+                    EventCommands::Publish {
+                        disruptor,
+                        data,
+                        metadata: _,
+                    } => {
                         assert_eq!(disruptor, "test-disruptor");
                         assert!(data.contains("message") || data.contains("hello"));
                     }
@@ -441,11 +497,20 @@ mod tests {
                         assert_eq!(disruptor, "test-disruptor");
                         assert!(data.starts_with('['));
                     }
-                    EventCommands::Generate { disruptor, count: _, rate: _, size: _ } => {
+                    EventCommands::Generate {
+                        disruptor,
+                        count: _,
+                        rate: _,
+                        size: _,
+                    } => {
                         assert_eq!(disruptor, "test-disruptor");
                         // count, rate, size have defaults or specified values
                     }
-                    EventCommands::PublishFile { disruptor, file, batch_size: _ } => {
+                    EventCommands::PublishFile {
+                        disruptor,
+                        file,
+                        batch_size: _,
+                    } => {
                         assert_eq!(disruptor, "test-disruptor");
                         assert_eq!(file.to_str().unwrap(), "events.json");
                     }
@@ -462,9 +527,24 @@ mod tests {
             vec!["badbatch", "monitor", "system"],
             vec!["badbatch", "monitor", "cluster"],
             vec!["badbatch", "monitor", "disruptor", "test-id"],
-            vec!["badbatch", "monitor", "watch", "--interval", "10", "--monitor-type", "system"],
+            vec![
+                "badbatch",
+                "monitor",
+                "watch",
+                "--interval",
+                "10",
+                "--monitor-type",
+                "system",
+            ],
             vec!["badbatch", "monitor", "export", "metrics.json"],
-            vec!["badbatch", "monitor", "export", "metrics.csv", "--format", "csv"],
+            vec![
+                "badbatch",
+                "monitor",
+                "export",
+                "metrics.csv",
+                "--format",
+                "csv",
+            ],
         ];
 
         for args in test_cases {
@@ -473,10 +553,18 @@ mod tests {
 
             if let Commands::Monitor { action } = cli.unwrap().command {
                 match action {
-                    MonitorCommands::System => assert!(true),
-                    MonitorCommands::Cluster => assert!(true),
+                    MonitorCommands::System => {
+                        // TODO: Implement system monitoring command
+                    }
+                    MonitorCommands::Cluster => {
+                        // TODO: Implement cluster monitoring command
+                    }
                     MonitorCommands::Disruptor { id } => assert_eq!(id, "test-id"),
-                    MonitorCommands::Watch { interval: _, monitor_type: _, target: _ } => {
+                    MonitorCommands::Watch {
+                        interval: _,
+                        monitor_type: _,
+                        target: _,
+                    } => {
                         // interval, monitor_type have defaults or specified values
                     }
                     MonitorCommands::Export { output, format: _ } => {
@@ -495,7 +583,14 @@ mod tests {
             vec!["badbatch", "config", "show"],
             vec!["badbatch", "config", "validate", "config.yaml"],
             vec!["badbatch", "config", "example"],
-            vec!["badbatch", "config", "example", "example.yaml", "--type", "cluster"],
+            vec![
+                "badbatch",
+                "config",
+                "example",
+                "example.yaml",
+                "--type",
+                "cluster",
+            ],
         ];
 
         for args in test_cases {
@@ -504,11 +599,16 @@ mod tests {
 
             if let Commands::Config { action } = cli.unwrap().command {
                 match action {
-                    ConfigCommands::Show => assert!(true),
+                    ConfigCommands::Show => {
+                        // TODO: Implement config show command
+                    }
                     ConfigCommands::Validate { file } => {
                         assert_eq!(file.to_str().unwrap(), "config.yaml");
                     }
-                    ConfigCommands::Example { output: _, config_type: _ } => {
+                    ConfigCommands::Example {
+                        output: _,
+                        config_type: _,
+                    } => {
                         // output is optional, config_type has default
                     }
                 }
@@ -523,15 +623,36 @@ mod tests {
         let test_cases = vec![
             vec!["badbatch", "server"],
             vec!["badbatch", "server", "--bind", "127.0.0.1:9000"],
-            vec!["badbatch", "server", "--cluster", "--cluster-bind", "0.0.0.0:7946"],
-            vec!["badbatch", "server", "--config", "server.yaml", "--cluster", "--seed", "127.0.0.1:7947"],
+            vec![
+                "badbatch",
+                "server",
+                "--cluster",
+                "--cluster-bind",
+                "0.0.0.0:7946",
+            ],
+            vec![
+                "badbatch",
+                "server",
+                "--config",
+                "server.yaml",
+                "--cluster",
+                "--seed",
+                "127.0.0.1:7947",
+            ],
         ];
 
         for args in test_cases {
             let cli = Cli::try_parse_from(args.clone());
             assert!(cli.is_ok(), "Failed to parse: {:?}", args);
 
-            if let Commands::Server { config: _, bind, cluster: _, cluster_bind, seed: _ } = cli.unwrap().command {
+            if let Commands::Server {
+                config: _,
+                bind,
+                cluster: _,
+                cluster_bind,
+                seed: _,
+            } = cli.unwrap().command
+            {
                 // bind has default value
                 assert!(!bind.is_empty());
                 // cluster_bind has default value
@@ -570,9 +691,9 @@ mod tests {
     #[test]
     fn test_invalid_command_parsing() {
         let invalid_args = vec![
-            vec!["badbatch"], // Missing subcommand
-            vec!["badbatch", "invalid"], // Invalid subcommand
-            vec!["badbatch", "cluster"], // Missing cluster action
+            vec!["badbatch"],                      // Missing subcommand
+            vec!["badbatch", "invalid"],           // Invalid subcommand
+            vec!["badbatch", "cluster"],           // Missing cluster action
             vec!["badbatch", "disruptor", "show"], // Missing required argument
         ];
 

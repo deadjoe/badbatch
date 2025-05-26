@@ -229,15 +229,24 @@ mod tests {
     #[test]
     fn test_api_error_status_codes() {
         assert_eq!(
-            ApiError::DisruptorNotFound { id: "test".to_string() }.status_code(),
+            ApiError::DisruptorNotFound {
+                id: "test".to_string()
+            }
+            .status_code(),
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            ApiError::InvalidRequest { message: "test".to_string() }.status_code(),
+            ApiError::InvalidRequest {
+                message: "test".to_string()
+            }
+            .status_code(),
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
-            ApiError::InternalError { message: "test".to_string() }.status_code(),
+            ApiError::InternalError {
+                message: "test".to_string()
+            }
+            .status_code(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
     }
@@ -245,11 +254,17 @@ mod tests {
     #[test]
     fn test_api_error_codes() {
         assert_eq!(
-            ApiError::DisruptorNotFound { id: "test".to_string() }.error_code(),
+            ApiError::DisruptorNotFound {
+                id: "test".to_string()
+            }
+            .error_code(),
             "DISRUPTOR_NOT_FOUND"
         );
         assert_eq!(
-            ApiError::InvalidRequest { message: "test".to_string() }.error_code(),
+            ApiError::InvalidRequest {
+                message: "test".to_string()
+            }
+            .error_code(),
             "INVALID_REQUEST"
         );
     }

@@ -33,25 +33,25 @@
 //!                    Gossip Protocol
 //! ```
 
-pub mod node;
-pub mod gossip;
-pub mod discovery;
-pub mod membership;
-pub mod health;
-pub mod replication;
 pub mod config;
+pub mod discovery;
 pub mod error;
+pub mod gossip;
+pub mod health;
+pub mod membership;
+pub mod node;
+pub mod replication;
 
 // Re-export main types
-pub use node::{Node, NodeId, NodeInfo, NodeState};
-pub use gossip::{GossipProtocol, GossipMessage, GossipConfig};
-pub use discovery::{ServiceDiscovery, ServiceRegistry, ServiceInfo};
-pub use membership::{ClusterMembership, MembershipEvent};
-pub use health::{HealthChecker, HealthStatus as ClusterHealthStatus};
-pub use replication::EventReplicator;
-pub use config::ReplicationConfig;
 pub use config::ClusterConfig;
+pub use config::ReplicationConfig;
+pub use discovery::{ServiceDiscovery, ServiceInfo, ServiceRegistry};
 pub use error::{ClusterError, ClusterResult};
+pub use gossip::{GossipConfig, GossipMessage, GossipProtocol};
+pub use health::{HealthChecker, HealthStatus as ClusterHealthStatus};
+pub use membership::{ClusterMembership, MembershipEvent};
+pub use node::{Node, NodeId, NodeInfo, NodeState};
+pub use replication::EventReplicator;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -125,12 +125,15 @@ impl Cluster {
         )));
 
         let membership = Arc::new(ClusterMembership::new(local_node.clone()).await?);
-        let gossip = Arc::new(GossipProtocol::new(config.gossip_config(), local_node.clone()).await?);
+        let gossip =
+            Arc::new(GossipProtocol::new(config.gossip_config(), local_node.clone()).await?);
         let discovery = Arc::new(ServiceDiscovery::new(membership.clone()).await?);
         let health_checker = Arc::new(HealthChecker::new(config.health_config()).await?);
 
         let replicator = if config.enable_replication() {
-            Some(Arc::new(EventReplicator::new(config.replication_config()).await?))
+            Some(Arc::new(
+                EventReplicator::new(config.replication_config()).await?,
+            ))
         } else {
             None
         };
@@ -313,16 +316,7 @@ pub struct ClusterHealth {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{TcpListener, SocketAddr};
-
-    /// 获取一个可用的端口
-    fn get_available_port() -> u16 {
-        TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
-    }
+    use std::net::SocketAddr;
 
     /// 创建测试用的集群配置，使用动态端口
     fn create_test_config() -> ClusterConfig {

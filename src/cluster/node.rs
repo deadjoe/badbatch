@@ -3,10 +3,10 @@
 //! This module defines the core node abstraction for the cluster,
 //! including node identity, state management, and metadata handling.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Unique identifier for a cluster node
@@ -165,7 +165,8 @@ impl Node {
     /// Create a new node
     pub fn new(id: NodeId, bind_addr: SocketAddr, advertise_addr: SocketAddr) -> Self {
         let mut info = NodeInfo::new(id, advertise_addr);
-        info.metadata.insert("bind_addr".to_string(), bind_addr.to_string());
+        info.metadata
+            .insert("bind_addr".to_string(), bind_addr.to_string());
 
         Self {
             info,
@@ -195,7 +196,8 @@ impl Node {
 
     /// Get bind address
     pub fn bind_addr(&self) -> SocketAddr {
-        self.info.metadata
+        self.info
+            .metadata
             .get("bind_addr")
             .and_then(|s| s.parse().ok())
             .unwrap_or(self.info.addr)
@@ -383,7 +385,10 @@ mod tests {
         node.add_metadata("datacenter", "us-west-1");
         node.add_metadata("rack", "rack-1");
 
-        assert_eq!(node.metadata().get("datacenter"), Some(&"us-west-1".to_string()));
+        assert_eq!(
+            node.metadata().get("datacenter"),
+            Some(&"us-west-1".to_string())
+        );
         assert_eq!(node.metadata().get("rack"), Some(&"rack-1".to_string()));
 
         let removed = node.remove_metadata("rack");

@@ -7,10 +7,10 @@
 //! The implementation follows the original LMAX Disruptor design with optimizations
 //! for preventing false sharing and ensuring memory ordering.
 
+use crate::disruptor::INITIAL_CURSOR_VALUE;
+use crossbeam_utils::CachePadded;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use crossbeam_utils::CachePadded;
-use crate::disruptor::INITIAL_CURSOR_VALUE;
 
 /// A sequence counter that provides atomic operations with memory ordering guarantees.
 ///
