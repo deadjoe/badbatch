@@ -166,12 +166,12 @@ coverage_test() {
     cargo llvm-cov clean
 
     # 运行覆盖率测试
-    if cargo llvm-cov --lib --html; then
+    if cargo llvm-cov --lib --html --no-cfg-coverage; then
         print_success "测试覆盖率分析完成"
         echo "📊 覆盖率报告已生成到 target/llvm-cov/html/index.html"
 
         # 显示覆盖率摘要
-        cargo llvm-cov --lib --summary-only
+        cargo llvm-cov --lib --summary-only --no-cfg-coverage
     else
         print_warning "测试覆盖率分析失败，但继续执行其他测试"
     fi
