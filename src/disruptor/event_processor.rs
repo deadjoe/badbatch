@@ -465,4 +465,281 @@ mod tests {
         processor.halt();
         assert!(!processor.is_running());
     }
+
+    #[test]
+    fn test_try_run_once_not_running() {
+        let data_provider = Arc::new(TestDataProvider::new(8));
+        let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
+            cursor,
+            wait_strategy,
+            vec![],
+        ));
+        let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
+        let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
+
+        let processor = BatchEventProcessor::new(
+            data_provider,
+            sequence_barrier,
+            event_handler,
+            exception_handler,
+        );
+
+        // Should return 0 when not running
+        let result = processor.try_run_once();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_processor_sequence_management() {
+        let data_provider = Arc::new(TestDataProvider::new(8));
+        let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
+            cursor,
+            wait_strategy,
+            vec![],
+        ));
+        let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
+        let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
+
+        let processor = BatchEventProcessor::new(
+            data_provider,
+            sequence_barrier,
+            event_handler,
+            exception_handler,
+        );
+
+        // Initial sequence should be INITIAL_CURSOR_VALUE
+        assert_eq!(processor.get_sequence().get(), INITIAL_CURSOR_VALUE);
+
+        // Sequence should be the same object when called multiple times
+        let seq1 = processor.get_sequence();
+        let seq2 = processor.get_sequence();
+        assert_eq!(seq1.get(), seq2.get());
+    }
+
+    #[test]
+    fn test_data_provider_interface() {
+        let provider = TestDataProvider::new(4);
+
+        // Test get method
+        let event0 = provider.get(0);
+        assert_eq!(event0.value.load(Ordering::Relaxed), 0);
+
+        let event1 = provider.get(1);
+        assert_eq!(event1.value.load(Ordering::Relaxed), 1);
+
+        // Test wrapping behavior
+        let event4 = provider.get(4); // Should wrap to index 0
+        assert_eq!(event4.value.load(Ordering::Relaxed), 0);
+
+        // Test get_mut method
+        unsafe {
+            let event_mut = provider.get_mut(2);
+            event_mut.value.store(999, Ordering::Relaxed);
+        }
+
+        let event2 = provider.get(2);
+        assert_eq!(event2.value.load(Ordering::Relaxed), 999);
+    }
+
+    #[test]
+    fn test_processor_debug_format() {
+        let data_provider = Arc::new(TestDataProvider::new(8));
+        let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
+            cursor,
+            wait_strategy,
+            vec![],
+        ));
+        let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
+        let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
+
+        let processor = BatchEventProcessor::new(
+            data_provider,
+            sequence_barrier,
+            event_handler,
+            exception_handler,
+        );
+
+        let debug_str = format!("{:?}", processor);
+        assert!(debug_str.contains("BatchEventProcessor"));
+        assert!(debug_str.contains("sequence"));
+        assert!(debug_str.contains("running"));
+    }
+
+    // Custom event handler for testing event processing
+    struct CountingEventHandler {
+        count: Arc<AtomicI64>,
+        processed_sequences: Arc<Mutex<Vec<i64>>>,
+    }
+
+    impl CountingEventHandler {
+        fn new() -> (Self, Arc<AtomicI64>, Arc<Mutex<Vec<i64>>>) {
+            let count = Arc::new(AtomicI64::new(0));
+            let sequences = Arc::new(Mutex::new(Vec::new()));
+            let handler = Self {
+                count: count.clone(),
+                processed_sequences: sequences.clone(),
+            };
+            (handler, count, sequences)
+        }
+    }
+
+    impl EventHandler<TestEvent> for CountingEventHandler {
+        fn on_event(
+            &mut self,
+            _event: &mut TestEvent,
+            sequence: i64,
+            _end_of_batch: bool,
+        ) -> Result<()> {
+            self.count.fetch_add(1, Ordering::Relaxed);
+            self.processed_sequences.lock().unwrap().push(sequence);
+            Ok(())
+        }
+
+        fn on_start(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_shutdown(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_timeout(&mut self, _available_sequence: i64) -> Result<()> {
+            Ok(())
+        }
+
+        fn on_batch_start(&mut self, _batch_size: i64, _available_size: i64) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    use std::sync::Mutex;
+
+    #[test]
+    fn test_process_batch_logic() {
+        let data_provider = Arc::new(TestDataProvider::new(8));
+        let cursor = Arc::new(Sequence::new(2)); // Set cursor to 2, so sequences 0, 1, 2 are available
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
+            cursor,
+            wait_strategy,
+            vec![],
+        ));
+
+        let (event_handler, count, sequences) = CountingEventHandler::new();
+        let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
+
+        let mut processor = BatchEventProcessor::new(
+            data_provider,
+            sequence_barrier,
+            Box::new(event_handler),
+            exception_handler,
+        );
+
+        // Manually test process_batch
+        let mut next_sequence = 0i64;
+        let result = processor.process_batch(&mut next_sequence);
+
+        // Should process successfully
+        assert!(result.is_ok());
+
+        // Should have processed 3 events (sequences 0, 1, 2)
+        assert_eq!(count.load(Ordering::Relaxed), 3);
+
+        // Check processed sequences
+        let processed = sequences.lock().unwrap();
+        assert_eq!(*processed, vec![0, 1, 2]);
+
+        // Processor sequence should be updated to 2
+        assert_eq!(processor.get_sequence().get(), 2);
+    }
+
+    #[test]
+    fn test_handle_event_exception() {
+        let data_provider = Arc::new(TestDataProvider::new(8));
+        let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
+            cursor,
+            wait_strategy,
+            vec![],
+        ));
+        let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
+        let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
+
+        let mut processor = BatchEventProcessor::new(
+            data_provider,
+            sequence_barrier,
+            event_handler,
+            exception_handler,
+        );
+
+        // Test exception handling with event
+        let test_event = TestEvent::default();
+        processor.handle_event_exception(DisruptorError::Alert, 42, Some(&test_event));
+
+        // Test exception handling without event (should fetch from data provider)
+        processor.handle_event_exception(DisruptorError::Timeout, 1, None);
+    }
+
+    #[test]
+    fn test_notify_timeout() {
+        let data_provider = Arc::new(TestDataProvider::new(8));
+        let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
+            cursor,
+            wait_strategy,
+            vec![],
+        ));
+        let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
+        let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
+
+        let mut processor = BatchEventProcessor::new(
+            data_provider,
+            sequence_barrier,
+            event_handler,
+            exception_handler,
+        );
+
+        // Test timeout notification
+        processor.notify_timeout(5);
+    }
+
+    #[test]
+    fn test_processor_spawn_method_exists() {
+        // This test just verifies that the spawn method exists and can be called
+        // We don't actually run the spawned thread to avoid test complexity
+        let data_provider = Arc::new(TestDataProvider::new(8));
+        let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
+            cursor,
+            wait_strategy,
+            vec![],
+        ));
+        let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
+        let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
+
+        let processor = BatchEventProcessor::new(
+            data_provider,
+            sequence_barrier,
+            event_handler,
+            exception_handler,
+        );
+
+        // Test that spawn method exists and returns a JoinHandle
+        // We immediately halt the processor to prevent infinite loop
+        processor.halt();
+        let _handle = processor.spawn();
+
+        // Note: We don't join the handle to avoid blocking the test
+        // The spawned thread should exit quickly due to the halt() call
+    }
 }

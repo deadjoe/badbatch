@@ -374,10 +374,289 @@ where
     }
 }
 
-// TODO: Re-enable tests after fixing the closure signature mismatch
-// The tests need to be updated to use FnMut(&mut E, i64, bool) instead of Fn(&E, i64, bool)
 #[cfg(test)]
 mod tests {
-    // Tests temporarily disabled due to closure signature changes
-    // Will be re-enabled after updating test closures to match new API
+    use super::*;
+    use crate::disruptor::wait_strategy::BusySpinWaitStrategy;
+    use std::sync::{mpsc, Arc, Mutex};
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct TestEvent {
+        value: i64,
+        data: String,
+    }
+
+    impl Default for TestEvent {
+        fn default() -> Self {
+            Self {
+                value: -1,
+                data: String::new(),
+            }
+        }
+    }
+
+    fn test_event_factory() -> TestEvent {
+        TestEvent::default()
+    }
+
+    #[test]
+    fn test_build_single_producer_basic() {
+        let builder = build_single_producer(8, test_event_factory, BusySpinWaitStrategy);
+
+        // Should be able to create builder without consumers
+        assert_eq!(builder.size, 8);
+        assert_eq!(builder.event_handlers.len(), 0);
+    }
+
+    #[test]
+    fn test_build_multi_producer_basic() {
+        let builder = build_multi_producer(16, test_event_factory, BusySpinWaitStrategy);
+
+        // Should be able to create builder without consumers
+        assert_eq!(builder.size, 16);
+        assert_eq!(builder.event_handlers.len(), 0);
+    }
+
+    #[test]
+    fn test_single_producer_add_event_handler() {
+        let (tx, _rx) = mpsc::channel();
+        let handler = move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+            event.value = sequence;
+            let _ = tx.send(sequence);
+        };
+
+        let builder = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+            .handle_events_with(handler);
+
+        // Should transition to HasConsumers state and have one handler
+        assert_eq!(builder.event_handlers.len(), 1);
+    }
+
+    #[test]
+    fn test_multi_producer_add_event_handler() {
+        let (tx, _rx) = mpsc::channel();
+        let handler = move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+            event.value = sequence;
+            let _ = tx.send(sequence);
+        };
+
+        let builder = build_multi_producer(16, test_event_factory, BusySpinWaitStrategy)
+            .handle_events_with(handler);
+
+        // Should transition to HasConsumers state and have one handler
+        assert_eq!(builder.event_handlers.len(), 1);
+    }
+
+    #[test]
+    fn test_single_producer_multiple_handlers() {
+        let (tx1, _rx1) = mpsc::channel();
+        let (tx2, _rx2) = mpsc::channel();
+
+        let handler1 = move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+            event.value = sequence;
+            let _ = tx1.send(sequence);
+        };
+
+        let handler2 = move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+            event.data = format!("seq_{}", sequence);
+            let _ = tx2.send(sequence);
+        };
+
+        let builder = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+            .handle_events_with(handler1)
+            .handle_events_with(handler2);
+
+        // Should have two handlers
+        assert_eq!(builder.event_handlers.len(), 2);
+    }
+
+    #[test]
+    fn test_multi_producer_multiple_handlers() {
+        let (tx1, _rx1) = mpsc::channel();
+        let (tx2, _rx2) = mpsc::channel();
+
+        let handler1 = move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+            event.value = sequence;
+            let _ = tx1.send(sequence);
+        };
+
+        let handler2 = move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+            event.data = format!("seq_{}", sequence);
+            let _ = tx2.send(sequence);
+        };
+
+        let builder = build_multi_producer(16, test_event_factory, BusySpinWaitStrategy)
+            .handle_events_with(handler1)
+            .handle_events_with(handler2);
+
+        // Should have two handlers
+        assert_eq!(builder.event_handlers.len(), 2);
+    }
+
+    #[test]
+    fn test_single_producer_build() {
+        let (tx, rx) = mpsc::channel();
+        let handler = move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+            event.value = sequence;
+            let _ = tx.send(sequence);
+        };
+
+        let producer = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+            .handle_events_with(handler)
+            .build();
+
+        // Should successfully build and return a SimpleProducer
+        // The producer should be usable for publishing
+        drop(producer);
+        drop(rx); // Ensure we can drop the receiver
+    }
+
+    #[test]
+    fn test_multi_producer_build() {
+        let (tx, rx) = mpsc::channel();
+        let handler = move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+            event.value = sequence;
+            let _ = tx.send(sequence);
+        };
+
+        let producer = build_multi_producer(16, test_event_factory, BusySpinWaitStrategy)
+            .handle_events_with(handler)
+            .build();
+
+        // Should successfully build and return a CloneableProducer
+        // The producer should be cloneable
+        let _producer2 = producer.clone();
+        drop(producer);
+        drop(rx); // Ensure we can drop the receiver
+    }
+
+    #[test]
+    fn test_cloneable_producer_clone() {
+        let (tx, rx) = mpsc::channel();
+        let handler = move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+            event.value = sequence;
+            let _ = tx.send(sequence);
+        };
+
+        let producer1 = build_multi_producer(16, test_event_factory, BusySpinWaitStrategy)
+            .handle_events_with(handler)
+            .build();
+
+        let producer2 = producer1.clone();
+
+        // Both producers should be independent but share the same ring buffer
+        drop(producer1);
+        drop(producer2);
+        drop(rx);
+    }
+
+    #[test]
+    fn test_cloneable_producer_create_producer() {
+        let (tx, rx) = mpsc::channel();
+        let handler = move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+            event.value = sequence;
+            let _ = tx.send(sequence);
+        };
+
+        let cloneable_producer = build_multi_producer(16, test_event_factory, BusySpinWaitStrategy)
+            .handle_events_with(handler)
+            .build();
+
+        let _simple_producer = cloneable_producer.create_producer();
+
+        // Should be able to create SimpleProducer instances
+        drop(cloneable_producer);
+        drop(rx);
+    }
+
+    #[test]
+    fn test_builder_with_different_wait_strategies() {
+        use crate::disruptor::wait_strategy::{SleepingWaitStrategy, YieldingWaitStrategy};
+
+        let (tx1, rx1) = mpsc::channel();
+        let (tx2, rx2) = mpsc::channel();
+        let (tx3, rx3) = mpsc::channel();
+
+        let handler1 = move |event: &mut TestEvent, sequence: i64, _: bool| {
+            event.value = sequence;
+            let _ = tx1.send(sequence);
+        };
+
+        let handler2 = move |event: &mut TestEvent, sequence: i64, _: bool| {
+            event.value = sequence;
+            let _ = tx2.send(sequence);
+        };
+
+        let handler3 = move |event: &mut TestEvent, sequence: i64, _: bool| {
+            event.value = sequence;
+            let _ = tx3.send(sequence);
+        };
+
+        // Test with BusySpinWaitStrategy
+        let _producer1 = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+            .handle_events_with(handler1)
+            .build();
+
+        // Test with YieldingWaitStrategy
+        let _producer2 = build_single_producer(8, test_event_factory, YieldingWaitStrategy)
+            .handle_events_with(handler2)
+            .build();
+
+        // Test with SleepingWaitStrategy
+        let _producer3 = build_single_producer(8, test_event_factory, SleepingWaitStrategy::new())
+            .handle_events_with(handler3)
+            .build();
+
+        drop(rx1);
+        drop(rx2);
+        drop(rx3);
+    }
+
+    #[test]
+    fn test_builder_with_different_buffer_sizes() {
+        // Test various power-of-2 sizes
+        for &size in &[2, 4, 8, 16, 32, 64, 128, 256, 512, 1024] {
+            let _producer = build_single_producer(size, test_event_factory, BusySpinWaitStrategy)
+                .handle_events_with(move |event: &mut TestEvent, sequence: i64, _: bool| {
+                    event.value = sequence;
+                })
+                .build();
+        }
+    }
+
+    #[test]
+    fn test_closure_event_handler() {
+        let counter = Arc::new(Mutex::new(0));
+        let counter_clone = counter.clone();
+
+        let handler = move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+            event.value = sequence;
+            let mut count = counter_clone.lock().unwrap();
+            *count += 1;
+        };
+
+        let mut closure_handler = ClosureEventHandler::new(handler);
+        let mut event = TestEvent::default();
+
+        // Test the handler directly
+        closure_handler.on_event(&mut event, 42, false).unwrap();
+
+        assert_eq!(event.value, 42);
+        assert_eq!(*counter.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_builder_type_safety() {
+        // This test ensures that the type system prevents invalid state transitions
+
+        // Can't build without consumers
+        let builder_no_consumers =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy);
+        // builder_no_consumers.build(); // This should not compile
+
+        // Must add at least one consumer before building
+        let _producer = builder_no_consumers
+            .handle_events_with(|_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {})
+            .build();
+    }
 }
