@@ -20,6 +20,7 @@ path = "src/bin/badbatch.rs"
 [features]
 default = []
 cluster = []
+shared-ring-buffer = []
 
 [dependencies]
 # Core dependencies
