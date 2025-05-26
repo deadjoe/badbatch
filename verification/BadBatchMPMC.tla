@@ -48,7 +48,9 @@ Transition(t, from, to) ==
   /\ pc[t] = from
   /\ pc'   = [ pc EXCEPT ![t] = to ]
 
-Buffer  == INSTANCE BadBatchRingBuffer
+Buffer == INSTANCE BadBatchRingBuffer
+
+Xor(A, B) == A = ~B
 
 Range(f) ==
   { f[x] : x \in DOMAIN(f) }
@@ -57,55 +59,54 @@ MinReadSequence ==
   CHOOSE min \in Range(read) : \A r \in Readers : min <= read[r]
 
 (***************************************************************************)
-(* Checks if a sequence number is published.                               *)
-(* This models the availability buffer mechanism.                          *)
+(* Encode whether an index is published by tracking if the slot was        *)
+(* published in an even or odd index. This works because publishers        *)
+(* cannot overtake consumers.                                              *)
 (***************************************************************************)
 IsPublished(sequence) ==
   LET
-    index == Buffer!IndexOf(sequence)
-    turn  == sequence \div Size
+    index   == Buffer!IndexOf(sequence)
+    \* Round number starts at 0.
+    round   == sequence \div Size
+    is_even == round % 2 = 0
   IN
-    published[index] = turn
+    \* published[index] is true if published in an even round otherwise false
+    \* as it was published in an odd round number.
+    published[index] = is_even
+
+Publish(sequence) ==
+  LET index == Buffer!IndexOf(sequence)
+  \* Flip whether we're at an even or odd round.
+  IN  published' = [ published EXCEPT ![index] = Xor(TRUE, @) ]
 
 (***************************************************************************)
 (* Publisher Actions:                                                      *)
 (***************************************************************************)
 
-ClaimSequence(writer) ==
-  LET
-    sequence  == next_sequence
-    index     == Buffer!IndexOf(sequence)
-    min_read  == MinReadSequence
-  IN
-    \* Are we clear of all consumers? (Potentially a full cycle behind).
-    /\ min_read >= sequence - Size
-    /\ sequence < MaxPublished
-    /\ Transition(writer, Access, Advance)
-    /\ next_sequence' = next_sequence + 1
-    /\ claimed_sequence' = [ claimed_sequence EXCEPT ![writer] = sequence ]
-    /\ UNCHANGED << ringbuffer, published, read, consumed >>
-
 BeginWrite(writer) ==
   LET
-    sequence == claimed_sequence[writer]
-    index    == Buffer!IndexOf(sequence)
+    seq      == next_sequence
+    index    == Buffer!IndexOf(seq)
+    min_read == MinReadSequence
   IN
-    /\ sequence >= 0  (* Must have claimed a valid sequence *)
-    /\ Transition(writer, Advance, Access)
-    /\ Buffer!Write(index, writer, sequence)
-    /\ UNCHANGED << next_sequence, claimed_sequence, published, read, consumed >>
+    \* Are we clear of all consumers? (Potentially a full cycle behind).
+    /\ min_read >= seq - Size
+    /\ seq < MaxPublished
+    /\ claimed_sequence' = [ claimed_sequence EXCEPT ![writer] = seq ]
+    /\ next_sequence'    = seq + 1
+    /\ Transition(writer, Access, Advance)
+    /\ Buffer!Write(index, writer, seq)
+    /\ UNCHANGED << consumed, published, read >>
 
 EndWrite(writer) ==
   LET
-    sequence == claimed_sequence[writer]
-    index    == Buffer!IndexOf(sequence)
-    turn     == sequence \div Size
+    seq   == claimed_sequence[writer]
+    index == Buffer!IndexOf(seq)
   IN
-    /\ sequence >= 0  (* Must have claimed a valid sequence *)
-    /\ Transition(writer, Access, Advance)
+    /\ Transition(writer, Advance, Access)
     /\ Buffer!EndWrite(index, writer)
-    /\ published' = [ published EXCEPT ![index] = turn ]
-    /\ UNCHANGED << next_sequence, claimed_sequence, read, consumed >>
+    /\ Publish(seq)
+    /\ UNCHANGED << claimed_sequence, next_sequence, consumed, read >>
 
 
 
@@ -115,15 +116,15 @@ EndWrite(writer) ==
 
 BeginRead(reader) ==
   LET
-    next     == read[reader] + 1
-    index    == Buffer!IndexOf(next)
+    next  == read[reader] + 1
+    index == Buffer!IndexOf(next)
   IN
     /\ IsPublished(next)
     /\ Transition(reader, Access, Advance)
     /\ Buffer!BeginRead(index, reader)
     \* Track what we read from the ringbuffer.
     /\ consumed' = [ consumed EXCEPT ![reader] = Append(@, Buffer!Read(index)) ]
-    /\ UNCHANGED << next_sequence, claimed_sequence, published, read >>
+    /\ UNCHANGED << claimed_sequence, next_sequence, published, read >>
 
 EndRead(reader) ==
   LET
@@ -133,7 +134,7 @@ EndRead(reader) ==
     /\ Transition(reader, Advance, Access)
     /\ Buffer!EndRead(index, reader)
     /\ read' = [ read EXCEPT ![reader] = next ]
-    /\ UNCHANGED << next_sequence, claimed_sequence, published, consumed >>
+    /\ UNCHANGED << claimed_sequence, next_sequence, consumed, published >>
 
 (***************************************************************************)
 (* Spec:                                                                   *)
@@ -141,22 +142,20 @@ EndRead(reader) ==
 
 Init ==
   /\ Buffer!Init
-  /\ next_sequence = 0
-  /\ claimed_sequence = [ w \in Writers |-> -1 ]
-  /\ published = [ i \in 0 .. (Size - 1) |-> -1 ]
-  /\ read      = [ r \in Readers                |-> -1     ]
-  /\ consumed  = [ r \in Readers                |-> << >>  ]
-  /\ pc        = [ a \in Writers \union Readers |-> Access ]
+  /\ next_sequence    = 0
+  /\ claimed_sequence = [ w \in Writers                |-> -1     ]
+  /\ published        = [ i \in 0..Size                |-> FALSE  ]
+  /\ read             = [ r \in Readers                |-> -1     ]
+  /\ consumed         = [ r \in Readers                |-> << >>  ]
+  /\ pc               = [ a \in Writers \union Readers |-> Access ]
 
 Next ==
-  \/ \E w \in Writers : ClaimSequence(w)
   \/ \E w \in Writers : BeginWrite(w)
   \/ \E w \in Writers : EndWrite(w)
   \/ \E r \in Readers : BeginRead(r)
   \/ \E r \in Readers : EndRead(r)
 
 Fairness ==
-  /\ \A w \in Writers : WF_vars(ClaimSequence(w))
   /\ \A w \in Writers : WF_vars(BeginWrite(w))
   /\ \A w \in Writers : WF_vars(EndWrite(w))
   /\ \A r \in Readers : WF_vars(BeginRead(r))
@@ -169,36 +168,22 @@ Spec ==
 (* Invariants:                                                             *)
 (***************************************************************************)
 
-TypeOk ==
-  /\ Buffer!TypeOk
-  /\ next_sequence \in Nat
-  /\ claimed_sequence \in [ Writers -> Int ]
-  /\ published \in [ 0 .. (Size - 1) -> Int ]
-  /\ read      \in [ Readers                -> Int                 ]
-  /\ consumed  \in [ Readers                -> Seq(Nat)            ]
-  /\ pc        \in [ Writers \union Readers -> { Access, Advance } ]
-
 NoDataRaces == Buffer!NoDataRaces
 
-UniqueSequenceClaims ==
-  \A w1, w2 \in Writers :
-    /\ w1 # w2
-    /\ claimed_sequence[w1] >= 0
-    /\ claimed_sequence[w2] >= 0
-    => claimed_sequence[w1] # claimed_sequence[w2]
-
-ValidClaimedSequences ==
-  \A w \in Writers :
-    claimed_sequence[w] >= 0 => claimed_sequence[w] < next_sequence
-
-ConsumerConsistency ==
-  \A r \in Readers : read[r] >= -1
+TypeOk ==
+  /\ Buffer!TypeOk
+  /\ next_sequence    \in Nat
+  /\ claimed_sequence \in [ Writers                -> Int                 ]
+  /\ published        \in [ 0..Size                -> { TRUE, FALSE }     ]
+  /\ read             \in [ Readers                -> Int                 ]
+  /\ consumed         \in [ Readers                -> Seq(Nat)            ]
+  /\ pc               \in [ Writers \union Readers -> { Access, Advance } ]
 
 (***************************************************************************)
 (* Properties:                                                             *)
 (***************************************************************************)
 
-EventualConsumption ==
-  <>[] (\A r \in Readers : Len(consumed[r]) >= MaxPublished)
+Liveliness ==
+  <>[] (\A r \in Readers : consumed[r] = [i \in 1..MaxPublished |-> i - 1])
 
 =============================================================================

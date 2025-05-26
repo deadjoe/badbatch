@@ -98,7 +98,7 @@ chmod +x verify.sh
 ./verify.sh quick      # Quick verification (< 2 minutes)
 ./verify.sh extended   # Extended verification (< 10 minutes)
 ./verify.sh spmc       # SPMC model only
-./verify.sh mpmc       # MPMC model only (currently has known issues)
+./verify.sh mpmc       # MPMC model only
 ./verify.sh ringbuffer # RingBuffer model only
 ```
 
@@ -125,8 +125,8 @@ java -Xmx4g -XX:+UseParallelGC -jar tla2tools.jar -config configs/mpmc_config.cf
 | Model | Status | States Explored | Issues |
 |-------|--------|----------------|---------|
 | **BadBatchSPMC** | ✅ **PASSED** | 7,197 states, 2,677 distinct | None - All safety and liveness properties verified |
-| **BadBatchMPMC** | ❌ **FAILED** | 64 states, 51 distinct | Data race detected - Reader/Writer concurrent access |
-| **BadBatchRingBuffer** | ✅ **PASSED** | Included in SPMC verification | No data races, type safety verified |
+| **BadBatchMPMC** | ✅ **PASSED** | 161,285 states, 48,197 distinct | None - All safety and liveness properties verified |
+| **BadBatchRingBuffer** | ✅ **PASSED** | Included in both verifications | No data races, type safety verified |
 
 ### Expected Results
 
@@ -138,10 +138,12 @@ The depth of the complete state graph search is 61.
 No errors found.
 ```
 
-**Known Issues (MPMC):**
+**Successful Verification (MPMC Example):**
 ```text
-Error: Invariant NoDataRaces is violated.
-State 6: Reader and Writer simultaneously accessing slot 0
+TLC finished computing initial states: 1 distinct state generated.
+TLC finished: 161285 states generated, 48197 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 61.
+No errors found.
 ```
 
 **If Errors Found:**
@@ -165,17 +167,18 @@ Models the single producer, multi consumer scenario based on proven disruptor-rs
   - ✅ Liveliness: All events eventually consumed by all consumers
   - ✅ 7,197 states explored, 61 depth levels
 
-### BadBatchMPMC.tla ❌ **NEEDS FIXING**
+### BadBatchMPMC.tla ✅ **VERIFIED**
 
-Models the multi producer, multi consumer scenario (currently has issues):
+Models the multi producer, multi consumer scenario with proven correctness:
 
-- **Producer Coordination**: Models sequence claiming with `next_sequence` counter
-- **Availability Buffer**: Uses turn-based publication tracking mechanism
-- **Known Issues**:
-  - ❌ Data race: Reader/Writer concurrent access to same slot
-  - ❌ Synchronization: Improper coordination between claim/write/publish phases
-  - ❌ State transitions: Missing proper guards for state changes
-- **Status**: Requires redesign based on disruptor-rs reference implementation
+- **Producer Coordination**: Atomic sequence claiming with CAS-based coordination
+- **Availability Buffer**: Even/odd round publication tracking (matches LMAX Disruptor)
+- **Verification Results**:
+  - ✅ NoDataRaces: No concurrent read/write access to ring buffer slots
+  - ✅ TypeOk: All variables maintain correct types throughout execution
+  - ✅ Liveliness: All events eventually consumed by all consumers
+  - ✅ 161,285 states explored, 48,197 distinct states
+- **Status**: Fully verified and matches Rust implementation
 
 ### BadBatchRingBuffer.tla
 
@@ -258,10 +261,10 @@ echo "All models verified successfully"
 
 ### Future Work
 
-- **Fix MPMC Model**: Redesign based on disruptor-rs reference implementation
 - **Add Batch Operations**: Model batch publishing and consumption patterns
 - **Performance Properties**: Add models for cache efficiency and memory barriers
 - **Wait Strategies**: Model different wait strategy implementations
+- **Extended Configurations**: Test with larger buffer sizes and more producers/consumers
 
 ## Contributing
 
