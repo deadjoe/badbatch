@@ -84,7 +84,6 @@
 //! - Batch processing to amortize coordination costs
 //! - Mechanical sympathy with modern CPU architectures
 
-pub mod api;
 pub mod disruptor;
 
 // Re-export the main types for convenience
