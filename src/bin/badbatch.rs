@@ -71,8 +71,6 @@ enum Commands {
     },
 }
 
-
-
 #[derive(Subcommand)]
 enum DisruptorCommands {
     /// Create a new disruptor
@@ -309,8 +307,6 @@ mod tests {
         assert_eq!(cli.config.unwrap().to_str().unwrap(), "config.yaml");
     }
 
-
-
     #[test]
     fn test_disruptor_commands() {
         let test_cases = vec![
@@ -546,23 +542,14 @@ mod tests {
         let test_cases = vec![
             vec!["badbatch", "server"],
             vec!["badbatch", "server", "--bind", "127.0.0.1:9000"],
-            vec![
-                "badbatch",
-                "server",
-                "--config",
-                "server.yaml",
-            ],
+            vec!["badbatch", "server", "--config", "server.yaml"],
         ];
 
         for args in test_cases {
             let cli = Cli::try_parse_from(args.clone());
             assert!(cli.is_ok(), "Failed to parse: {:?}", args);
 
-            if let Commands::Server {
-                config: _,
-                bind,
-            } = cli.unwrap().command
-            {
+            if let Commands::Server { config: _, bind } = cli.unwrap().command {
                 // bind has default value
                 assert!(!bind.is_empty());
                 // config varies by test case
