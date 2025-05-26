@@ -4,7 +4,7 @@
 //! The ring buffer is a pre-allocated circular array that stores events
 //! and provides lock-free access through careful use of memory barriers.
 
-use crate::disruptor::{Result, DisruptorError, EventFactory, is_power_of_two};
+use crate::disruptor::{is_power_of_two, DisruptorError, EventFactory, Result};
 use std::cell::UnsafeCell;
 
 #[cfg(feature = "shared-ring-buffer")]
@@ -22,7 +22,7 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct RingBuffer<T> {
     /// The buffer storing all events using UnsafeCell for interior mutability
-    /// Using Box<[UnsafeCell<T>]> for better memory layout than Vec<T>
+    /// Using `Box<[UnsafeCell<T>]>` for better memory layout than `Vec<T>`
     slots: Box<[UnsafeCell<T>]>,
     /// Mask for fast modulo operations (buffer_size - 1)
     /// Using i64 to match sequence type and avoid casting
@@ -337,7 +337,9 @@ where
     /// # Returns
     /// True if there is sufficient capacity, false otherwise
     pub fn has_available_capacity(&self, required_capacity: i64, available_capacity: i64) -> bool {
-        self.inner.read().has_available_capacity(required_capacity, available_capacity)
+        self.inner
+            .read()
+            .has_available_capacity(required_capacity, available_capacity)
     }
 
     /// Get the remaining capacity
@@ -349,7 +351,9 @@ where
     /// # Returns
     /// The remaining capacity in the buffer
     pub fn remaining_capacity(&self, current_sequence: i64, next_sequence: i64) -> i64 {
-        self.inner.read().remaining_capacity(current_sequence, next_sequence)
+        self.inner
+            .read()
+            .remaining_capacity(current_sequence, next_sequence)
     }
 }
 
@@ -387,7 +391,10 @@ mod tests {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let result = RingBuffer::new(7, factory); // Not a power of 2
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), DisruptorError::InvalidBufferSize(7)));
+        assert!(matches!(
+            result.unwrap_err(),
+            DisruptorError::InvalidBufferSize(7)
+        ));
     }
 
     #[test]

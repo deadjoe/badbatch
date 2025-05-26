@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_adapter_functionality() {
-        use crate::disruptor::{WaitStrategy, Sequence};
+        use crate::disruptor::{Sequence, WaitStrategy};
         use std::sync::Arc;
 
         let adapter = busy_spin();

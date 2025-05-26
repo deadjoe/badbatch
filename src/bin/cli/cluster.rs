@@ -2,9 +2,9 @@
 //!
 //! Command handlers for cluster management operations.
 
-use crate::{ClusterCommands};
 use crate::cli::client::BadBatchClient;
 use crate::cli::CliResult;
+use crate::ClusterCommands;
 
 /// Handle cluster commands
 pub async fn handle_cluster_command(
@@ -28,7 +28,7 @@ async fn show_cluster_status(_client: &BadBatchClient, _output_format: &str) -> 
     eprintln!("   Currently, BadBatch operates in single-node mode only.");
 
     Err(crate::cli::CliError::operation(
-        "Cluster functionality not implemented".to_string()
+        "Cluster functionality not implemented".to_string(),
     ))
 }
 
@@ -39,7 +39,7 @@ async fn list_cluster_nodes(_client: &BadBatchClient, _output_format: &str) -> C
     eprintln!("   Currently, BadBatch operates in single-node mode only.");
 
     Err(crate::cli::CliError::operation(
-        "Cluster functionality not implemented".to_string()
+        "Cluster functionality not implemented".to_string(),
     ))
 }
 
@@ -50,7 +50,7 @@ async fn join_cluster(_client: &BadBatchClient, seed: &str) -> CliResult<()> {
     eprintln!("   Currently, BadBatch operates in single-node mode only.");
 
     Err(crate::cli::CliError::operation(
-        "Cluster functionality not implemented".to_string()
+        "Cluster functionality not implemented".to_string(),
     ))
 }
 
@@ -60,7 +60,7 @@ async fn leave_cluster(_client: &BadBatchClient) -> CliResult<()> {
     eprintln!("   Currently, BadBatch operates in single-node mode only.");
 
     Err(crate::cli::CliError::operation(
-        "Cluster functionality not implemented".to_string()
+        "Cluster functionality not implemented".to_string(),
     ))
 }
 
@@ -71,7 +71,7 @@ async fn show_cluster_health(_client: &BadBatchClient, _output_format: &str) -> 
     eprintln!("   Use 'badbatch health' for system health information.");
 
     Err(crate::cli::CliError::operation(
-        "Cluster functionality not implemented".to_string()
+        "Cluster functionality not implemented".to_string(),
     ))
 }
 
@@ -178,14 +178,15 @@ mod tests {
 
     #[test]
     fn test_cluster_size_calculation() {
-        let nodes = vec![
+        let nodes = [
             serde_json::json!({"id": "node-1", "status": "alive"}),
             serde_json::json!({"id": "node-2", "status": "alive"}),
             serde_json::json!({"id": "node-3", "status": "dead"}),
         ];
 
         let total_nodes = nodes.len();
-        let alive_nodes = nodes.iter()
+        let alive_nodes = nodes
+            .iter()
             .filter(|node| node["status"] == "alive")
             .count();
 

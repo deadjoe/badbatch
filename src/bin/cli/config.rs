@@ -4,9 +4,9 @@
 
 use std::path::PathBuf;
 
-use crate::{ConfigCommands};
-use crate::cli::{CliResult, format};
-use serde::{Serialize, Deserialize};
+use crate::cli::{format, CliResult};
+use crate::ConfigCommands;
+use serde::{Deserialize, Serialize};
 
 // Simple config structure for CLI
 #[derive(Debug, Serialize, Deserialize)]
@@ -38,9 +38,10 @@ pub async fn handle_config_command(
     match command {
         ConfigCommands::Show => show_config(config, output_format).await,
         ConfigCommands::Validate { file } => validate_config_file(&file).await,
-        ConfigCommands::Example { output, config_type } => {
-            generate_example_config(output.as_ref(), &config_type).await
-        }
+        ConfigCommands::Example {
+            output,
+            config_type,
+        } => generate_example_config(output.as_ref(), &config_type).await,
     }
 }
 
@@ -77,11 +78,15 @@ async fn load_config(file: &PathBuf) -> CliResult<Config> {
 fn validate_config(config: &Config) -> CliResult<()> {
     // Basic validation
     if config.server.host.is_empty() {
-        return Err(crate::cli::CliError::invalid_input("Server host cannot be empty".to_string()));
+        return Err(crate::cli::CliError::invalid_input(
+            "Server host cannot be empty".to_string(),
+        ));
     }
 
     if config.server.port == 0 {
-        return Err(crate::cli::CliError::invalid_input("Server port cannot be zero".to_string()));
+        return Err(crate::cli::CliError::invalid_input(
+            "Server port cannot be zero".to_string(),
+        ));
     }
 
     Ok(())
@@ -109,16 +114,14 @@ fn generate_example_config_internal(config_type: &str) -> CliResult<Config> {
                 seed_nodes: vec!["127.0.0.1:7947".to_string()],
             }),
         }),
-        _ => Err(crate::cli::CliError::invalid_input(
-            format!("Unknown config type: {}. Valid types are: server, cluster", config_type)
-        )),
+        _ => Err(crate::cli::CliError::invalid_input(format!(
+            "Unknown config type: {}. Valid types are: server, cluster",
+            config_type
+        ))),
     }
 }
 
-async fn generate_example_config(
-    output: Option<&PathBuf>,
-    config_type: &str,
-) -> CliResult<()> {
+async fn generate_example_config(output: Option<&PathBuf>, config_type: &str) -> CliResult<()> {
     let config = generate_example_config_internal(config_type)?;
 
     let content = serde_yaml::to_string(&config)?;
@@ -226,7 +229,10 @@ mod tests {
         // Test invalid config type
         let result = generate_example_config_internal("invalid");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown config type"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown config type"));
     }
 
     #[tokio::test]

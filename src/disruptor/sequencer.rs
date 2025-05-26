@@ -4,10 +4,10 @@
 //! Sequencers manage the allocation of sequence numbers and ensure that producers don't
 //! overwrite events that haven't been consumed yet.
 
-use crate::disruptor::{Result, DisruptorError, Sequence, WaitStrategy, is_power_of_two};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
+use crate::disruptor::{is_power_of_two, DisruptorError, Result, Sequence, WaitStrategy};
 use crossbeam_utils::CachePadded;
+use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Trait for sequencers that coordinate access to the ring buffer
 ///
@@ -390,12 +390,14 @@ impl MultiProducerSequencer {
     /// # Panics
     /// Panics if buffer_size is not a power of 2
     pub fn new(buffer_size: usize, wait_strategy: Arc<dyn WaitStrategy>) -> Self {
-        assert!(is_power_of_two(buffer_size), "Buffer size must be a power of 2");
+        assert!(
+            is_power_of_two(buffer_size),
+            "Buffer size must be a power of 2"
+        );
 
         // Initialize legacy available buffer with -1 (unavailable) for all slots
-        let available_buffer: Vec<AtomicI32> = (0..buffer_size)
-            .map(|_| AtomicI32::new(-1))
-            .collect();
+        let available_buffer: Vec<AtomicI32> =
+            (0..buffer_size).map(|_| AtomicI32::new(-1)).collect();
 
         // Initialize bitmap for availability tracking if buffer is large enough
         // For smaller buffers, we'll use an empty bitmap and fall back to legacy method
@@ -423,8 +425,6 @@ impl MultiProducerSequencer {
         }
     }
 
-
-
     /// Calculate the index in the available buffer for a given sequence
     /// This matches the LMAX Disruptor calculateIndex method
     fn calculate_index(&self, sequence: i64) -> usize {
@@ -444,8 +444,6 @@ impl MultiProducerSequencer {
         let bit_index = slot_index - availability_index * 64;
         (availability_index, bit_index)
     }
-
-
 
     /// Get availability bitmap at index (inspired by disruptor-rs)
     fn availability_at(&self, index: usize) -> &AtomicU64 {
@@ -488,13 +486,19 @@ impl MultiProducerSequencer {
 
     /// Check if there's available capacity for the required number of sequences
     /// This matches the LMAX Disruptor hasAvailableCapacity method
-    fn has_available_capacity_internal(&self, gating_sequences: &[Arc<Sequence>], required_capacity: usize, cursor_value: i64) -> bool {
+    fn has_available_capacity_internal(
+        &self,
+        gating_sequences: &[Arc<Sequence>],
+        required_capacity: usize,
+        cursor_value: i64,
+    ) -> bool {
         let wrap_point = (cursor_value + required_capacity as i64) - self.buffer_size as i64;
         let cached_gating_sequence = self.cached_gating_sequence.load(Ordering::Acquire);
 
         if wrap_point > cached_gating_sequence || cached_gating_sequence > cursor_value {
             let min_sequence = Sequence::get_minimum_sequence(gating_sequences);
-            self.cached_gating_sequence.store(min_sequence, Ordering::Release);
+            self.cached_gating_sequence
+                .store(min_sequence, Ordering::Release);
 
             if wrap_point > min_sequence {
                 return false;
@@ -543,7 +547,8 @@ impl Sequencer for MultiProducerSequencer {
             }
 
             // Update the cached gating sequence
-            self.cached_gating_sequence.store(gating_sequence, Ordering::Release);
+            self.cached_gating_sequence
+                .store(gating_sequence, Ordering::Release);
         }
 
         Ok(next_sequence)
@@ -564,7 +569,11 @@ impl Sequencer for MultiProducerSequencer {
             let next = current + n;
 
             // Check if we have available capacity
-            if !self.has_available_capacity_internal(&self.gating_sequences.read(), n as usize, current) {
+            if !self.has_available_capacity_internal(
+                &self.gating_sequences.read(),
+                n as usize,
+                current,
+            ) {
                 return None; // Insufficient capacity
             }
 
@@ -700,7 +709,8 @@ impl ProcessingSequenceBarrier {
 
 impl SequenceBarrier for ProcessingSequenceBarrier {
     fn wait_for(&self, sequence: i64) -> Result<i64> {
-        self.wait_strategy.wait_for(sequence, self.cursor.clone(), &self.dependent_sequences)
+        self.wait_strategy
+            .wait_for(sequence, self.cursor.clone(), &self.dependent_sequences)
     }
 
     fn get_cursor(&self) -> Arc<Sequence> {

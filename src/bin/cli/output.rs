@@ -150,7 +150,10 @@ mod tests {
 
         let result = format_output(&data, "xml");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unsupported format"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported format"));
     }
 
     #[test]
@@ -215,7 +218,10 @@ mod tests {
         assert_eq!(success_message(""), "✓ ");
 
         // Test string with special characters
-        assert_eq!(error_message("Error: 404 Not Found"), "✗ Error: 404 Not Found");
+        assert_eq!(
+            error_message("Error: 404 Not Found"),
+            "✗ Error: 404 Not Found"
+        );
 
         // Test multiline string
         let multiline = "Line 1\nLine 2";

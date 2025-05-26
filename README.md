@@ -5,7 +5,9 @@
 
   [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
   [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
-  [![Tests](https://img.shields.io/badge/tests-319%20passing-brightgreen.svg)](https://github.com/deadjoe/badbatch)
+  [![CI](https://github.com/deadjoe/badbatch/workflows/CI/badge.svg)](https://github.com/deadjoe/badbatch/actions)
+  [![Tests](https://img.shields.io/badge/tests-271%20passing-brightgreen.svg)](https://github.com/deadjoe/badbatch)
+  [![codecov](https://codecov.io/gh/deadjoe/badbatch/branch/main/graph/badge.svg)](https://codecov.io/gh/deadjoe/badbatch)
 
 </div>
 
@@ -171,8 +173,11 @@ badbatch monitor watch --type disruptor --target my-disruptor
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| `GET` | `/` | API root with documentation |
 | `GET` | `/health` | System health check |
 | `GET` | `/metrics` | System metrics |
+| `GET` | `/api/v1/health` | API health check |
+| `GET` | `/api/v1/metrics` | API system metrics |
 | `GET` | `/api/v1/version` | API version |
 | `POST` | `/api/v1/disruptor` | Create disruptor |
 | `GET` | `/api/v1/disruptor` | List disruptors |
@@ -182,11 +187,14 @@ badbatch monitor watch --type disruptor --target my-disruptor
 | `POST` | `/api/v1/disruptor/{id}/stop` | Stop disruptor |
 | `POST` | `/api/v1/disruptor/{id}/pause` | Pause disruptor |
 | `POST` | `/api/v1/disruptor/{id}/resume` | Resume disruptor |
-| `POST` | `/api/v1/disruptor/{id}/events` | Publish event |
-| `POST` | `/api/v1/disruptor/{id}/events/batch` | Publish batch |
+| `POST` | `/api/v1/disruptor/{id}/events` | Publish single event |
+| `POST` | `/api/v1/disruptor/{id}/events/batch` | Publish batch events |
+| `GET` | `/api/v1/disruptor/{id}/events` | Query events |
+| `GET` | `/api/v1/disruptor/{id}/events/{sequence}` | Get specific event |
 | `GET` | `/api/v1/disruptor/{id}/metrics` | Disruptor metrics |
 | `GET` | `/api/v1/disruptor/{id}/health` | Disruptor health |
 | `GET` | `/api/v1/disruptor/{id}/status` | Disruptor status |
+| `POST` | `/api/v1/batch/events` | Publish batch to multiple disruptors |
 
 ### Configuration
 
@@ -283,9 +291,10 @@ disruptor.shutdown()?;
 
 ```rust
 use badbatch::disruptor::{
-    build_single_producer, Producer, ElegantConsumer,
-    simple_wait_strategy::BusySpin, DefaultEventFactory,
+    build_single_producer, Producer, ElegantConsumer, RingBuffer,
+    simple_wait_strategy::BusySpin, event_factory::ClosureEventFactory,
 };
+use std::sync::Arc;
 
 #[derive(Debug, Default)]
 struct MyEvent {
@@ -293,8 +302,7 @@ struct MyEvent {
 }
 
 // Simple producer with closure-based publishing
-let factory = DefaultEventFactory::<MyEvent>::new();
-let mut producer = build_single_producer(1024, factory, BusySpin)
+let mut producer = build_single_producer(1024, || MyEvent::default(), BusySpin)
     .handle_events_with(|event, sequence, end_of_batch| {
         println!("Processing event {} with value {} (batch_end: {})",
                  sequence, event.value, end_of_batch);
@@ -314,6 +322,9 @@ producer.batch_publish(5, |batch| {
 });
 
 // Elegant consumer with CPU affinity
+let factory = ClosureEventFactory::new(|| MyEvent::default());
+let ring_buffer = Arc::new(RingBuffer::new(1024, factory)?);
+
 let consumer = ElegantConsumer::with_affinity(
     ring_buffer,
     |event, sequence, end_of_batch| {
@@ -341,27 +352,42 @@ cargo build
 ```
 
 ### Testing
+
 ```bash
-# Run all tests
+# Run all tests (271 tests total)
 cargo test
 
-# Run with coverage
-cargo test --all-features
+# Run comprehensive test suite with quality checks
+bash scripts/test-all.sh
+
+# Run specific test categories
+cargo test --lib                    # Unit tests (149 tests)
+cargo test --bin                    # CLI tests (110 tests)
+cargo test --test '*'               # Integration tests (12 tests)
+cargo test --doc                    # Documentation tests (10 tests)
 
 # Run benchmarks
 cargo bench
 ```
 
 ### Code Quality
+
 ```bash
-# Format code
-cargo fmt
+# Comprehensive quality checks (recommended)
+bash scripts/test-all.sh
 
-# Lint code
-cargo clippy
+# Individual quality checks
+cargo fmt                           # Format code
+cargo clippy --all-targets --all-features -- -D warnings  # Lint code
+cargo audit                         # Security audit
+cargo deny check                    # Dependency management
 
-# Check documentation
-cargo doc --no-deps --open
+# Documentation
+cargo doc --no-deps --open          # Generate and open docs
+cargo test --doc                    # Test documentation examples
+
+# Coverage analysis (requires cargo-llvm-cov)
+cargo llvm-cov --lib --html         # Generate HTML coverage report
 ```
 
 ## 📈 Performance
@@ -386,7 +412,12 @@ BadBatch is designed for high-performance event processing with the following ch
 
 ### Current Status
 
-- **319 tests passing**: Comprehensive test coverage ensures correctness
+- **271 tests passing**: Comprehensive test coverage ensures correctness
+  - 149 unit tests covering all core components
+  - 110 CLI tests for command-line interface functionality
+  - 12 integration tests for end-to-end scenarios
+  - 10 documentation tests for API examples
+  - Property-based testing with proptest for invariant checking
 - **LMAX Algorithm Compliance**: Faithful implementation of proven algorithms
 - **disruptor-rs Optimizations**: Modern Rust patterns for improved usability
 - **Production Ready**: Core engine is stable and feature-complete
@@ -394,8 +425,9 @@ BadBatch is designed for high-performance event processing with the following ch
 - **Async/Await Support**: Full async integration with tokio for modern Rust applications
 - **Security Features**: API key authentication and authorization middleware
 - **Cluster Support**: Distributed capabilities with gossip protocol and health monitoring
+- **Quality Assurance**: Comprehensive testing pipeline with security audits and dependency checks
 
-> **Recent Improvements**: Fixed critical thread safety issues, implemented batch publishing optimizations, added comprehensive authentication mechanisms, and enhanced cluster functionality with proper JoinHandle management.
+> **Recent Improvements**: Established comprehensive testing infrastructure with cargo-llvm-cov coverage analysis, cargo-audit security scanning, cargo-deny dependency management, and automated quality checks. Fixed critical thread safety issues, implemented batch publishing optimizations, and enhanced cluster functionality with proper JoinHandle management.
 
 ## 🤝 Contributing
 

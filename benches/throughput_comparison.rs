@@ -15,7 +15,7 @@ use std::thread::{self, JoinHandle};
 
 // BadBatch Disruptor imports
 use badbatch::disruptor::{
-    build_multi_producer, build_single_producer, Producer, BusySpinWaitStrategy,
+    build_multi_producer, build_single_producer, BusySpinWaitStrategy, Producer,
 };
 
 // Benchmark configuration
@@ -91,7 +91,10 @@ fn crossbeam_mpsc() {
     consumer_handle.join().unwrap();
 
     // Verify all events were processed
-    assert_eq!(sink.load(Ordering::Acquire), (MAX_PRODUCER_EVENTS * 2) as i32);
+    assert_eq!(
+        sink.load(Ordering::Acquire),
+        (MAX_PRODUCER_EVENTS * 2) as i32
+    );
 }
 
 /// BadBatch Disruptor SPSC throughput test using modern API
@@ -173,14 +176,17 @@ fn badbatch_mpsc_modern() {
     });
 
     // Verify all events were processed
-    assert_eq!(sink.load(Ordering::Acquire), (MAX_PRODUCER_EVENTS * 2) as i32);
+    assert_eq!(
+        sink.load(Ordering::Acquire),
+        (MAX_PRODUCER_EVENTS * 2) as i32
+    );
 }
 
 /// BadBatch Disruptor SPSC throughput test using traditional LMAX API
 fn badbatch_spsc_traditional() {
     use badbatch::disruptor::{
-        Disruptor, ProducerType, BlockingWaitStrategy, DefaultEventFactory,
-        EventHandler, EventTranslator, Result,
+        BlockingWaitStrategy, DefaultEventFactory, Disruptor, EventHandler, EventTranslator,
+        ProducerType, Result,
     };
 
     // Event handler implementation
@@ -189,7 +195,12 @@ fn badbatch_spsc_traditional() {
     }
 
     impl EventHandler<Event> for ThroughputEventHandler {
-        fn on_event(&mut self, event: &mut Event, _sequence: i64, _end_of_batch: bool) -> Result<()> {
+        fn on_event(
+            &mut self,
+            event: &mut Event,
+            _sequence: i64,
+            _end_of_batch: bool,
+        ) -> Result<()> {
             self.sink.fetch_add(event.val, Ordering::Release);
             Ok(())
         }
@@ -208,14 +219,17 @@ fn badbatch_spsc_traditional() {
 
     let sink = Arc::new(AtomicI32::new(0));
     let factory = DefaultEventFactory::<Event>::new();
-    let handler = ThroughputEventHandler { sink: Arc::clone(&sink) };
+    let handler = ThroughputEventHandler {
+        sink: Arc::clone(&sink),
+    };
 
     let mut disruptor = Disruptor::new(
         factory,
         BUF_SIZE,
         ProducerType::Single,
         Box::new(BlockingWaitStrategy::new()),
-    ).unwrap()
+    )
+    .unwrap()
     .handle_events_with(handler)
     .build();
 
