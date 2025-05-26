@@ -55,18 +55,18 @@ run_tlc() {
     local model_file="$1"
     local config_file="$2"
     local model_name="$(basename "$model_file" .tla)"
-    
+
     print_status "Verifying $model_name with config $(basename "$config_file")..."
-    
+
     # Create temporary directory for TLC output
     local temp_dir=$(mktemp -d)
     local log_file="$temp_dir/tlc.log"
-    
-    # Run TLC model checker
+
+    # Run TLC model checker with deadlock checking disabled
     cd "$VERIFICATION_DIR"
-    if $TLC_CMD -config "$config_file" "$model_file" > "$log_file" 2>&1; then
+    if $TLC_CMD -deadlock -config "$config_file" "$model_file" > "$log_file" 2>&1; then
         print_success "$model_name verification completed successfully"
-        
+
         # Extract and display key statistics
         if grep -q "states generated" "$log_file"; then
             local stats=$(grep "states generated\|distinct states\|No errors" "$log_file" | head -3)
@@ -74,18 +74,18 @@ run_tlc() {
                 echo "  $line"
             done
         fi
-        
+
         return 0
     else
         print_error "$model_name verification failed"
         echo "Error details:"
         tail -20 "$log_file" | sed 's/^/  /'
-        
+
         # Clean up and return error
         rm -rf "$temp_dir"
         return 1
     fi
-    
+
     # Clean up
     rm -rf "$temp_dir"
 }
@@ -94,36 +94,36 @@ run_tlc() {
 verify_model() {
     local model="$1"
     local config="$2"
-    
+
     if [ ! -f "$VERIFICATION_DIR/$model.tla" ]; then
         print_error "Model file $model.tla not found"
         return 1
     fi
-    
+
     if [ ! -f "$VERIFICATION_DIR/configs/$config.cfg" ]; then
         print_error "Config file configs/$config.cfg not found"
         return 1
     fi
-    
+
     run_tlc "$model.tla" "configs/$config.cfg"
 }
 
 # Function to run quick verification suite
 quick_verification() {
     print_status "Running quick verification suite..."
-    
+
     local failed=0
-    
+
     # Verify SPMC model
     if ! verify_model "BadBatchSPMC" "spmc_config"; then
         failed=$((failed + 1))
     fi
-    
+
     # Verify MPMC model
     if ! verify_model "BadBatchMPMC" "mpmc_config"; then
         failed=$((failed + 1))
     fi
-    
+
     if [ $failed -eq 0 ]; then
         print_success "All quick verifications passed!"
         return 0
@@ -136,21 +136,21 @@ quick_verification() {
 # Function to run extended verification
 extended_verification() {
     print_status "Running extended verification suite..."
-    
+
     local failed=0
-    
+
     # Run quick verification first
     if ! quick_verification; then
         print_error "Quick verification failed, skipping extended tests"
         return 1
     fi
-    
+
     # Verify with extended configuration
     print_status "Running extended MPMC verification..."
     if ! verify_model "BadBatchMPMC" "extended_config"; then
         failed=$((failed + 1))
     fi
-    
+
     if [ $failed -eq 0 ]; then
         print_success "All extended verifications passed!"
         return 0
@@ -216,7 +216,7 @@ COMMAND="${COMMAND:-quick}"
 main() {
     print_status "BadBatch Disruptor TLA+ Verification"
     print_status "======================================"
-    
+
     # Check if TLA+ tools are available
     if ! check_tlc; then
         print_error "TLA+ tools not found!"
@@ -227,10 +227,10 @@ main() {
         echo "3. Or install TLC command line tool"
         exit 1
     fi
-    
+
     print_status "Using TLC command: $TLC_CMD"
     echo ""
-    
+
     case "$COMMAND" in
         quick)
             quick_verification

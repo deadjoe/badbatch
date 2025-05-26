@@ -73,9 +73,9 @@ EndRead(index, reader) ==
 
 TypeOk ==
   ringbuffer \in [
-    slots:   [0 .. LastIndex -> Int \union { NULL }],
-    readers: [0 .. LastIndex -> SUBSET(Readers)],
-    writers: [0 .. LastIndex -> SUBSET(Writers)]
+    slots:   UNION { [0 .. LastIndex -> Int \union { NULL }] },
+    readers: UNION { [0 .. LastIndex -> SUBSET(Readers)    ] },
+    writers: UNION { [0 .. LastIndex -> SUBSET(Writers)    ] }
   ]
 
 NoDataRaces ==
