@@ -70,7 +70,7 @@ feature-depth = 1
 # A list of advisory IDs to ignore. Note that ignored advisories will still
 # output a note when they are encountered.
 ignore = [
-    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is unmaintained but used by tabled dependency" },
+    # No ignored advisories currently needed
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
@@ -89,15 +89,10 @@ allow = [
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "ISC",
-    "Unicode-DFS-2016",
-    "Unicode-3.0",
-    "CC0-1.0",
-    "0BSD",
-    "Unlicense",
-    "AGPL-3.0",  # Our project license
+    "Unicode-3.0",            # Used by unicode-ident
+    "Unlicense",              # Used by memchr, aho-corasick, termcolor, walkdir, same-file
+    "BSL-1.0",                # Used by ryu (Boost Software License)
+    "AGPL-3.0",               # Our project license
 ]
 # The confidence threshold for detecting a license from license text.
 # The higher the value, the more closely the license text must be to the
