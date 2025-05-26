@@ -32,38 +32,6 @@
 - **Elegant Consumer**: Automatic lifecycle management with `ElegantConsumer::new()`
 - **Simple Wait Strategies**: Streamlined strategies for easier usage
 
-### 🌐 REST API Interface (Framework Ready)
-
-- **HTTP API framework** with Axum integration
-- **Disruptor lifecycle management** endpoints (create, start, stop, status)
-- **Event publishing** endpoints (single, batch)
-- **Real-time monitoring** and metrics collection
-- **Health checks** and system status reporting
-- **Standardized error handling** with proper HTTP responses
-- **Middleware support** (CORS, logging, timeout, rate limiting)
-- **Extensible architecture** for custom endpoints
-
-### 🔗 Distributed Cluster (Foundation)
-
-- **Gossip protocol** framework (SWIM-style membership)
-- **Node discovery** and membership management structure
-- **Service registration** and discovery interfaces
-- **Health monitoring** and failure detection mechanisms
-- **Event replication** framework foundation
-- **Cluster state management** and coordination primitives
-- **Configurable architecture** for distributed scenarios
-
-### 🛠️ Command Line Interface
-
-- **Comprehensive CLI** with server, disruptor, event, and monitor commands
-- **HTTP client** integration for API communication
-- **Configuration management** (YAML/JSON support)
-- **Multiple output formats** (JSON, YAML, table)
-- **Progress indicators** and user-friendly output
-- **Performance testing** and load generation capabilities
-- **Real-time monitoring** and metrics display
-- **Extensible command structure** for custom operations
-
 ## 📊 Performance & Safety
 
 - **Zero-cost abstractions** with Rust's type system
@@ -74,31 +42,35 @@
 
 ## 🏗️ Architecture
 
-BadBatch follows a modular, layered architecture:
+BadBatch is a focused, high-performance disruptor library with a clean, modular architecture:
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
-│                    BadBatch Disruptor Engine                │
+│                    BadBatch Disruptor Library               │
 ├─────────────────────────────────────────────────────────────┤
-│  🌐 REST API Layer                                          │
-│  ├─ Disruptor Management (CRUD)                            │
-│  ├─ Event Publishing (Single/Batch)                        │
-│  ├─ Monitoring & Metrics                                   │
-│  └─ Health Checks                                          │
+│  ⚡ Core Disruptor Engine                                   │
+│  ├─ Ring Buffer (Lock-free, Power-of-2 Sizing)             │
+│  ├─ Event Processors (Batch Processing)                    │
+│  ├─ Wait Strategies (Blocking, BusySpin, Yielding, Sleep)  │
+│  ├─ Producer Types (Single/Multi with Bitmap Optimization) │
+│  ├─ Sequence Management (Atomic Coordination)              │
+│  ├─ Event Factories, Handlers & Translators               │
+│  └─ Exception Handling (Custom Error Types)                │
 ├─────────────────────────────────────────────────────────────┤
-│  🔗 Cluster Layer                                           │
-│  ├─ Gossip Protocol (Node Discovery)                       │
-│  ├─ Membership Management                                   │
-│  ├─ Service Discovery                                       │
-│  ├─ Health Monitoring                                       │
-│  └─ Event Replication                                       │
+│  🚀 Modern Rust Optimizations                              │
+│  ├─ Builder Pattern (Fluent API)                           │
+│  ├─ Closure-based Publishing                               │
+│  ├─ Batch Operations (Zero-copy)                           │
+│  ├─ Thread Management (CPU Affinity)                       │
+│  ├─ Elegant Consumer (Lifecycle Management)                │
+│  └─ Simple Wait Strategies                                  │
 ├─────────────────────────────────────────────────────────────┤
-│  ⚡ Disruptor Core                                          │
-│  ├─ Ring Buffer (Lock-free)                                │
-│  ├─ Event Processors (Multi-threaded)                      │
-│  ├─ Wait Strategies (4 types)                              │
-│  ├─ Producer Types (Single/Multi)                          │
-│  └─ Exception Handling                                      │
+│  🔧 Performance Features                                    │
+│  ├─ Cache Line Padding (False Sharing Prevention)          │
+│  ├─ Memory Layout Optimization                             │
+│  ├─ Bit Manipulation (Fast Modulo)                         │
+│  ├─ NUMA-aware Design                                       │
+│  └─ Zero-allocation Runtime                                 │
 └─────────────────────────────────────────────────────────────┘
 ```
 
