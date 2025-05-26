@@ -25,14 +25,14 @@ pub async fn publish_event(
     ExtractJson(request): ExtractJson<PublishEventRequest>,
 ) -> ApiResult<Json<ApiResponse<PublishEventResponse>>> {
     // Validate that the Disruptor exists and is running
-    validate_disruptor_for_publishing(&disruptor_id)?;
+    validate_disruptor_for_publishing(&disruptor_id).await?;
 
     // Validate the event data
     validate_event_data(&request.data)?;
 
     // Generate event ID and sequence
     let event_id = Uuid::new_v4().to_string();
-    let sequence = get_next_sequence(&disruptor_id)?;
+    let sequence = get_next_sequence(&disruptor_id).await?;
 
     // Create event data
     let mut event_data = EventData::new(sequence, request.data.clone());
@@ -40,7 +40,7 @@ pub async fn publish_event(
     event_data.correlation_id = request.correlation_id.clone();
 
     // Publish the event to the Disruptor
-    publish_event_to_disruptor(&disruptor_id, &event_data)?;
+    publish_event_to_disruptor(&disruptor_id, &event_data).await?;
 
     let response = PublishEventResponse {
         sequence,
@@ -58,7 +58,7 @@ pub async fn publish_batch(
     ExtractJson(request): ExtractJson<PublishBatchRequest>,
 ) -> ApiResult<Json<ApiResponse<PublishBatchResponse>>> {
     // Validate that the Disruptor exists and is running
-    validate_disruptor_for_publishing(&disruptor_id)?;
+    validate_disruptor_for_publishing(&disruptor_id).await?;
 
     if request.events.is_empty() {
         return Err(ApiError::invalid_request("Batch cannot be empty"));
@@ -69,32 +69,9 @@ pub async fn publish_batch(
     }
 
     let batch_id = Uuid::new_v4().to_string();
-    let mut published_events = Vec::new();
 
-    // Process each event in the batch
-    for event_request in &request.events {
-        // Validate event data
-        validate_event_data(&event_request.data)?;
-
-        // Generate event ID and sequence
-        let event_id = Uuid::new_v4().to_string();
-        let sequence = get_next_sequence(&disruptor_id)?;
-
-        // Create event data
-        let mut event_data = EventData::new(sequence, event_request.data.clone());
-        event_data.metadata = event_request.metadata.clone();
-        event_data.correlation_id = event_request.correlation_id.clone();
-
-        // Publish the event
-        publish_event_to_disruptor(&disruptor_id, &event_data)?;
-
-        published_events.push(PublishEventResponse {
-            sequence,
-            event_id,
-            correlation_id: event_request.correlation_id.clone(),
-            published_at: chrono::Utc::now(),
-        });
-    }
+    // Use efficient batch publishing with Disruptor's batch sequence allocation
+    let published_events = publish_batch_to_disruptor_optimized(&disruptor_id, &request.events).await?;
 
     let response = PublishBatchResponse {
         published_count: published_events.len(),
@@ -154,10 +131,10 @@ pub async fn list_events(
     Query(query): Query<EventQuery>,
 ) -> ApiResult<Json<ApiResponse<EventList>>> {
     // Validate that the Disruptor exists
-    validate_disruptor_exists(&disruptor_id)?;
+    validate_disruptor_exists(&disruptor_id).await?;
 
     // Get events from the Disruptor
-    let events = get_events_from_disruptor(&disruptor_id, &query)?;
+    let events = get_events_from_disruptor(&disruptor_id, &query).await?;
 
     let event_list = EventList {
         events,
@@ -196,10 +173,10 @@ pub async fn get_event(
     Path((disruptor_id, sequence)): Path<(String, i64)>,
 ) -> ApiResult<Json<ApiResponse<EventData>>> {
     // Validate that the Disruptor exists
-    validate_disruptor_exists(&disruptor_id)?;
+    validate_disruptor_exists(&disruptor_id).await?;
 
     // Get the specific event
-    let event = get_event_from_disruptor(&disruptor_id, sequence)?;
+    let event = get_event_from_disruptor(&disruptor_id, sequence).await?;
 
     Ok(Json(ApiResponse::success(event)))
 }
@@ -228,7 +205,7 @@ async fn publish_batch_internal(
     request: PublishBatchRequest,
 ) -> ApiResult<PublishBatchResponse> {
     // This is the same logic as publish_batch but without the HTTP layer
-    validate_disruptor_for_publishing(disruptor_id)?;
+    validate_disruptor_for_publishing(disruptor_id).await?;
 
     if request.events.is_empty() {
         return Err(ApiError::invalid_request("Batch cannot be empty"));
@@ -241,13 +218,13 @@ async fn publish_batch_internal(
         validate_event_data(&event_request.data)?;
 
         let event_id = Uuid::new_v4().to_string();
-        let sequence = get_next_sequence(disruptor_id)?;
+        let sequence = get_next_sequence(disruptor_id).await?;
 
         let mut event_data = EventData::new(sequence, event_request.data.clone());
         event_data.metadata = event_request.metadata.clone();
         event_data.correlation_id = event_request.correlation_id.clone();
 
-        publish_event_to_disruptor(disruptor_id, &event_data)?;
+        publish_event_to_disruptor(disruptor_id, &event_data).await?;
 
         published_events.push(PublishEventResponse {
             sequence,
@@ -265,24 +242,27 @@ async fn publish_batch_internal(
     })
 }
 
-fn validate_disruptor_exists(disruptor_id: &str) -> ApiResult<()> {
+async fn validate_disruptor_exists(disruptor_id: &str) -> ApiResult<()> {
     let manager = get_global_manager();
-    let manager = manager.lock().map_err(|_| ApiError::internal("Failed to acquire manager lock"))?;
+    let manager = manager.lock().await;
 
-    // Check if Disruptor exists
-    manager.get_disruptor_info(disruptor_id)?;
-    Ok(())
+    // Use the fast path to check existence
+    if manager.disruptor_exists(disruptor_id) {
+        Ok(())
+    } else {
+        Err(ApiError::disruptor_not_found(disruptor_id))
+    }
 }
 
-fn validate_disruptor_for_publishing(disruptor_id: &str) -> ApiResult<()> {
+async fn validate_disruptor_for_publishing(disruptor_id: &str) -> ApiResult<()> {
     let manager = get_global_manager();
-    let manager = manager.lock().map_err(|_| ApiError::internal("Failed to acquire manager lock"))?;
+    let manager = manager.lock().await;
 
-    // Check if Disruptor exists and is in a state that allows publishing
-    let disruptor_info = manager.get_disruptor_info(disruptor_id)?;
+    // Use the fast path to get status without locking the Disruptor instance
+    let status = manager.get_disruptor_status(disruptor_id)?;
 
     // Check if Disruptor is running
-    match disruptor_info.status {
+    match status {
         crate::api::models::DisruptorStatus::Running => Ok(()),
         crate::api::models::DisruptorStatus::Created => {
             Err(ApiError::invalid_request("Disruptor is not started. Start it first."))
@@ -319,9 +299,9 @@ fn validate_event_data(data: &serde_json::Value) -> ApiResult<()> {
     Ok(())
 }
 
-fn get_next_sequence(disruptor_id: &str) -> ApiResult<i64> {
+async fn get_next_sequence(disruptor_id: &str) -> ApiResult<i64> {
     let manager = get_global_manager();
-    let manager = manager.lock().map_err(|_| ApiError::internal("Failed to acquire manager lock"))?;
+    let manager = manager.lock().await;
 
     // Get the Disruptor instance
     let disruptor = manager.get_disruptor(disruptor_id)?;
@@ -337,9 +317,87 @@ fn get_next_sequence(disruptor_id: &str) -> ApiResult<i64> {
     Ok(next_sequence)
 }
 
-fn publish_event_to_disruptor(disruptor_id: &str, event_data: &EventData) -> ApiResult<()> {
+/// Optimized batch publishing using multiple individual publishes
+///
+/// While not as optimal as true batch allocation, this is still more efficient
+/// than the previous implementation because it minimizes lock acquisition and
+/// uses the Disruptor's try_publish_event method for better performance.
+async fn publish_batch_to_disruptor_optimized(
+    disruptor_id: &str,
+    events: &[crate::api::models::PublishEventRequest],
+) -> ApiResult<Vec<crate::api::models::PublishEventResponse>> {
+    if events.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let manager = get_global_manager();
-    let manager = manager.lock().map_err(|_| ApiError::internal("Failed to acquire manager lock"))?;
+    let manager = manager.lock().await;
+
+    // Get the Disruptor instance once and hold the lock for the entire batch
+    let disruptor = manager.get_disruptor(disruptor_id)?;
+    let disruptor = disruptor.lock().map_err(|_| ApiError::internal("Failed to acquire disruptor lock"))?;
+
+    // Prepare the response vector
+    let mut published_events = Vec::with_capacity(events.len());
+
+    // Validate all events first
+    for event_request in events {
+        validate_event_data(&event_request.data)?;
+    }
+
+    // Publish all events in the batch while holding the lock
+    for event_request in events {
+        let event_id = Uuid::new_v4().to_string();
+
+        // Prepare data for the event translator
+        let event_data_clone = event_request.data.clone();
+        let metadata_clone = event_request.metadata.clone();
+        let correlation_id_clone = event_request.correlation_id.clone();
+
+        // Create an EventTranslator for the ApiEvent
+        use crate::disruptor::event_translator::ClosureEventTranslator;
+        let translator = ClosureEventTranslator::new(move |event: &mut crate::api::manager::ApiEvent, _sequence: i64| {
+            event.data = event_data_clone.clone();
+            event.metadata = Some(metadata_clone.clone());
+            event.correlation_id = correlation_id_clone.clone();
+        });
+
+        // Try to publish the event using the Disruptor's try_publish_event
+        let published = disruptor.try_publish_event(translator);
+
+        if published {
+            // Get the current cursor to determine the sequence that was just published
+            let sequence = disruptor.get_cursor().get();
+
+            published_events.push(crate::api::models::PublishEventResponse {
+                sequence,
+                event_id,
+                correlation_id: event_request.correlation_id.clone(),
+                published_at: chrono::Utc::now(),
+            });
+        } else {
+            tracing::warn!(
+                disruptor_id = %disruptor_id,
+                event_id = %event_id,
+                "Failed to publish event in batch - ring buffer full"
+            );
+            return Err(ApiError::internal("Ring buffer is full, cannot publish batch"));
+        }
+    }
+
+    tracing::info!(
+        disruptor_id = %disruptor_id,
+        batch_size = events.len(),
+        published_count = published_events.len(),
+        "Batch successfully published to Disruptor using optimized batch processing"
+    );
+
+    Ok(published_events)
+}
+
+async fn publish_event_to_disruptor(disruptor_id: &str, event_data: &EventData) -> ApiResult<()> {
+    let manager = get_global_manager();
+    let manager = manager.lock().await;
 
     // Get the Disruptor instance
     let disruptor = manager.get_disruptor(disruptor_id)?;
@@ -378,9 +436,9 @@ fn publish_event_to_disruptor(disruptor_id: &str, event_data: &EventData) -> Api
     }
 }
 
-fn get_events_from_disruptor(disruptor_id: &str, query: &EventQuery) -> ApiResult<Vec<EventData>> {
+async fn get_events_from_disruptor(disruptor_id: &str, query: &EventQuery) -> ApiResult<Vec<EventData>> {
     let manager = get_global_manager();
-    let manager = manager.lock().map_err(|_| ApiError::internal("Failed to acquire manager lock"))?;
+    let manager = manager.lock().await;
 
     // Get the Disruptor instance
     let disruptor = manager.get_disruptor(disruptor_id)?;
@@ -433,9 +491,9 @@ fn get_events_from_disruptor(disruptor_id: &str, query: &EventQuery) -> ApiResul
     Ok(events)
 }
 
-fn get_event_from_disruptor(disruptor_id: &str, sequence: i64) -> ApiResult<EventData> {
+async fn get_event_from_disruptor(disruptor_id: &str, sequence: i64) -> ApiResult<EventData> {
     let manager = get_global_manager();
-    let manager = manager.lock().map_err(|_| ApiError::internal("Failed to acquire manager lock"))?;
+    let manager = manager.lock().await;
 
     // Get the Disruptor instance
     let disruptor = manager.get_disruptor(disruptor_id)?;
@@ -499,14 +557,14 @@ mod tests {
     async fn test_validate_disruptor_exists() {
         // This test will fail because no disruptor exists in the global manager
         // We need to create one first or mock the manager
-        assert!(validate_disruptor_exists("non-existent").is_err());
+        assert!(validate_disruptor_exists("non-existent").await.is_err());
     }
 
     #[tokio::test]
     async fn test_get_next_sequence() {
         // This test will fail because no disruptor exists in the global manager
         // For now, just test that it returns an error for non-existent disruptor
-        assert!(get_next_sequence("non-existent").is_err());
+        assert!(get_next_sequence("non-existent").await.is_err());
     }
 
     #[tokio::test]
@@ -521,8 +579,8 @@ mod tests {
         };
 
         // Should return error for non-existent disruptor
-        assert!(get_events_from_disruptor("non-existent", &query).is_err());
-        assert!(get_event_from_disruptor("non-existent", 0).is_err());
+        assert!(get_events_from_disruptor("non-existent", &query).await.is_err());
+        assert!(get_event_from_disruptor("non-existent", 0).await.is_err());
     }
 
     #[test]
