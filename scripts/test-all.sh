@@ -101,10 +101,38 @@ unit_tests() {
 coverage_test() {
     print_step "4. 测试覆盖率分析 (llvm-cov)"
 
-    # 检查是否安装了llvm-tools-preview
-    if ! rustup component list --installed | grep -q llvm-tools-preview; then
-        print_warning "llvm-tools-preview 未安装，跳过覆盖率测试"
+    # 检查是否安装了cargo-llvm-cov
+    if ! cargo llvm-cov --version >/dev/null 2>&1; then
+        print_warning "cargo-llvm-cov 未安装，跳过覆盖率测试"
+        print_warning "安装命令: cargo install cargo-llvm-cov"
         return 0
+    fi
+
+    # 对于rustup安装的Rust，检查llvm-tools-preview组件
+    if command -v rustup >/dev/null 2>&1; then
+        if ! rustup component list --installed | grep -q llvm-tools-preview; then
+            print_warning "llvm-tools-preview 组件未安装，尝试安装..."
+            if rustup component add llvm-tools-preview; then
+                print_success "llvm-tools-preview 组件安装成功"
+            else
+                print_warning "llvm-tools-preview 组件安装失败，跳过覆盖率测试"
+                return 0
+            fi
+        fi
+    else
+        # 对于Homebrew安装的Rust，设置LLVM工具路径
+        if [ -f "/opt/homebrew/bin/llvm-cov" ]; then
+            export LLVM_COV="/opt/homebrew/bin/llvm-cov"
+            export LLVM_PROFDATA="/opt/homebrew/bin/llvm-profdata"
+            print_success "使用Homebrew LLVM工具: $LLVM_COV"
+        elif [ -f "/opt/homebrew/Cellar/llvm/20.1.5/bin/llvm-cov" ]; then
+            export LLVM_COV="/opt/homebrew/Cellar/llvm/20.1.5/bin/llvm-cov"
+            export LLVM_PROFDATA="/opt/homebrew/Cellar/llvm/20.1.5/bin/llvm-profdata"
+            print_success "使用Homebrew LLVM工具: $LLVM_COV"
+        else
+            print_warning "未找到LLVM工具，跳过覆盖率测试"
+            return 0
+        fi
     fi
 
     # 清理之前的覆盖率数据
