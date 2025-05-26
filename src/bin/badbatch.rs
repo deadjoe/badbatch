@@ -40,11 +40,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Cluster management commands
-    Cluster {
-        #[command(subcommand)]
-        action: ClusterCommands,
-    },
     /// Disruptor management commands
     Disruptor {
         #[command(subcommand)]
@@ -73,34 +68,10 @@ enum Commands {
         /// Bind address
         #[arg(short, long, default_value = "0.0.0.0:8080")]
         bind: String,
-        /// Cluster mode
-        #[arg(long)]
-        cluster: bool,
-        /// Cluster bind address
-        #[arg(long, default_value = "0.0.0.0:7946")]
-        cluster_bind: String,
-        /// Seed nodes for cluster
-        #[arg(long)]
-        seed: Vec<String>,
     },
 }
 
-#[derive(Subcommand)]
-enum ClusterCommands {
-    /// Show cluster status
-    Status,
-    /// List cluster nodes
-    Nodes,
-    /// Join a cluster
-    Join {
-        /// Seed node address
-        seed: String,
-    },
-    /// Leave the cluster
-    Leave,
-    /// Show cluster health
-    Health,
-}
+
 
 #[derive(Subcommand)]
 enum DisruptorCommands {
@@ -209,8 +180,6 @@ enum MonitorCommands {
         /// Disruptor ID or name
         id: String,
     },
-    /// Show cluster metrics
-    Cluster,
     /// Continuous monitoring (watch mode)
     Watch {
         /// Refresh interval in seconds
@@ -273,9 +242,6 @@ async fn main() -> CliResult<()> {
 
     // Execute command
     match cli.command {
-        Commands::Cluster { action } => {
-            cli::cluster::handle_cluster_command(action, &client, &cli.format).await?;
-        }
         Commands::Disruptor { action } => {
             cli::disruptor::handle_disruptor_command(action, &client, &cli.format).await?;
         }
@@ -291,11 +257,8 @@ async fn main() -> CliResult<()> {
         Commands::Server {
             config: server_config,
             bind,
-            cluster,
-            cluster_bind,
-            seed,
         } => {
-            cli::server::start_server(server_config, bind, cluster, cluster_bind, seed).await?;
+            cli::server::start_server(server_config, bind).await?;
         }
     }
 
@@ -310,7 +273,7 @@ mod tests {
     #[test]
     fn test_cli_parsing_basic() {
         // Test basic command parsing
-        let args = vec!["badbatch", "cluster", "status"];
+        let args = vec!["badbatch", "disruptor", "list"];
         let cli = Cli::try_parse_from(args);
         assert!(cli.is_ok());
 
@@ -332,8 +295,8 @@ mod tests {
             "--verbose",
             "--config",
             "config.yaml",
-            "cluster",
-            "status",
+            "disruptor",
+            "list",
         ];
         let cli = Cli::try_parse_from(args);
         assert!(cli.is_ok());
@@ -346,43 +309,7 @@ mod tests {
         assert_eq!(cli.config.unwrap().to_str().unwrap(), "config.yaml");
     }
 
-    #[test]
-    fn test_cluster_commands() {
-        let test_cases = vec![
-            vec!["badbatch", "cluster", "status"],
-            vec!["badbatch", "cluster", "nodes"],
-            vec!["badbatch", "cluster", "health"],
-            vec!["badbatch", "cluster", "leave"],
-            vec!["badbatch", "cluster", "join", "127.0.0.1:7946"],
-        ];
 
-        for args in test_cases {
-            let cli = Cli::try_parse_from(args.clone());
-            assert!(cli.is_ok(), "Failed to parse: {:?}", args);
-
-            if let Commands::Cluster { action } = cli.unwrap().command {
-                match action {
-                    ClusterCommands::Status => {
-                        // TODO: Implement cluster status command
-                    }
-                    ClusterCommands::Nodes => {
-                        // TODO: Implement cluster nodes command
-                    }
-                    ClusterCommands::Health => {
-                        // TODO: Implement cluster health command
-                    }
-                    ClusterCommands::Leave => {
-                        // TODO: Implement cluster leave command
-                    }
-                    ClusterCommands::Join { seed } => {
-                        assert_eq!(seed, "127.0.0.1:7946");
-                    }
-                }
-            } else {
-                panic!("Expected cluster command");
-            }
-        }
-    }
 
     #[test]
     fn test_disruptor_commands() {
@@ -525,7 +452,6 @@ mod tests {
     fn test_monitor_commands() {
         let test_cases = vec![
             vec!["badbatch", "monitor", "system"],
-            vec!["badbatch", "monitor", "cluster"],
             vec!["badbatch", "monitor", "disruptor", "test-id"],
             vec![
                 "badbatch",
@@ -555,9 +481,6 @@ mod tests {
                 match action {
                     MonitorCommands::System => {
                         // TODO: Implement system monitoring command
-                    }
-                    MonitorCommands::Cluster => {
-                        // TODO: Implement cluster monitoring command
                     }
                     MonitorCommands::Disruptor { id } => assert_eq!(id, "test-id"),
                     MonitorCommands::Watch {
@@ -589,7 +512,7 @@ mod tests {
                 "example",
                 "example.yaml",
                 "--type",
-                "cluster",
+                "server",
             ],
         ];
 
@@ -626,18 +549,8 @@ mod tests {
             vec![
                 "badbatch",
                 "server",
-                "--cluster",
-                "--cluster-bind",
-                "0.0.0.0:7946",
-            ],
-            vec![
-                "badbatch",
-                "server",
                 "--config",
                 "server.yaml",
-                "--cluster",
-                "--seed",
-                "127.0.0.1:7947",
             ],
         ];
 
@@ -648,16 +561,11 @@ mod tests {
             if let Commands::Server {
                 config: _,
                 bind,
-                cluster: _,
-                cluster_bind,
-                seed: _,
             } = cli.unwrap().command
             {
                 // bind has default value
                 assert!(!bind.is_empty());
-                // cluster_bind has default value
-                assert!(!cluster_bind.is_empty());
-                // config, cluster, seed vary by test case
+                // config varies by test case
             } else {
                 panic!("Expected server command");
             }
@@ -666,7 +574,7 @@ mod tests {
 
     #[test]
     fn test_default_values() {
-        let args = vec!["badbatch", "cluster", "status"];
+        let args = vec!["badbatch", "disruptor", "list"];
         let cli = Cli::try_parse_from(args).unwrap();
 
         assert_eq!(cli.endpoint, "http://localhost:8080");
@@ -693,7 +601,6 @@ mod tests {
         let invalid_args = vec![
             vec!["badbatch"],                      // Missing subcommand
             vec!["badbatch", "invalid"],           // Invalid subcommand
-            vec!["badbatch", "cluster"],           // Missing cluster action
             vec!["badbatch", "disruptor", "show"], // Missing required argument
         ];
 

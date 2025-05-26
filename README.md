@@ -117,11 +117,8 @@ cargo build --release
 
 #### 1. Start the Server
 ```bash
-# Start standalone server
+# Start server
 badbatch server --bind 0.0.0.0:8080
-
-# Start with cluster mode
-badbatch server --bind 0.0.0.0:8080 --cluster --cluster-bind 0.0.0.0:7946
 ```
 
 #### 2. Create a Disruptor
@@ -201,17 +198,6 @@ BadBatch supports YAML and JSON configuration files:
 # config.yaml
 server:
   bind_addr: "0.0.0.0:8080"
-  cluster_mode: true
-  cluster_bind_addr: "0.0.0.0:7946"
-  seed_nodes:
-    - "10.0.0.1:7946"
-    - "10.0.0.2:7946"
-
-cluster:
-  gossip_interval_ms: 200
-  probe_interval_secs: 1
-  enable_compression: true
-  enable_encryption: false
 
 defaults:
   buffer_size: 1024

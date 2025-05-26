@@ -3,7 +3,6 @@
 //! Command-line interface implementation for BadBatch.
 
 pub mod client;
-pub mod cluster;
 pub mod config;
 pub mod disruptor;
 pub mod event;
