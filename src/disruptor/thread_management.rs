@@ -279,15 +279,26 @@ mod tests {
         let counter = Arc::new(Mutex::new(0));
         let counter_clone = counter.clone();
 
+        // Use a barrier to ensure the thread doesn't complete too quickly
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let barrier_clone = barrier.clone();
+
         let managed_thread = ThreadBuilder::new()
             .thread_name("test-worker")
             .spawn(move || {
+                // Wait for the main thread to check is_running()
+                barrier_clone.wait();
                 *counter_clone.lock().unwrap() = 42;
             })
             .expect("Failed to spawn thread");
 
         assert_eq!(managed_thread.thread_name(), "test-worker");
+
+        // Check that the thread is running before it completes
         assert!(managed_thread.is_running());
+
+        // Release the barrier to let the thread complete
+        barrier.wait();
 
         // Wait for thread to complete
         managed_thread
