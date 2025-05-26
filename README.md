@@ -115,100 +115,11 @@ cargo build --release
 
 ### Basic Usage
 
-#### 1. Start the Server
-```bash
-# Start server
-badbatch server --bind 0.0.0.0:8080
-```
+BadBatch is a library for building high-performance event processing systems. Here's how to use it in your Rust projects:
 
-#### 2. Create a Disruptor
-```bash
-# Create a disruptor with default settings
-badbatch disruptor create my-disruptor
+## 📖 Programming API
 
-# Create with custom settings
-badbatch disruptor create my-disruptor \
-  --size 2048 \
-  --producer multi \
-  --wait-strategy busy-spin
-```
-
-#### 3. Publish Events
-```bash
-# Publish a single event
-badbatch event publish my-disruptor '{"message": "Hello, World!"}'
-
-# Publish batch events
-badbatch event batch my-disruptor '[
-  {"data": "event1"},
-  {"data": "event2"},
-  {"data": "event3"}
-]'
-
-# Generate performance test events
-badbatch event generate my-disruptor --count 10000 --rate 1000
-```
-
-#### 4. Monitor Performance
-```bash
-# Show system metrics
-badbatch monitor system
-
-# Show disruptor metrics
-badbatch monitor disruptor my-disruptor
-
-# Real-time monitoring
-badbatch monitor watch --type disruptor --target my-disruptor
-```
-
-## 📖 Documentation
-
-### API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/` | API root with documentation |
-| `GET` | `/health` | System health check |
-| `GET` | `/metrics` | System metrics |
-| `GET` | `/api/v1/health` | API health check |
-| `GET` | `/api/v1/metrics` | API system metrics |
-| `GET` | `/api/v1/version` | API version |
-| `POST` | `/api/v1/disruptor` | Create disruptor |
-| `GET` | `/api/v1/disruptor` | List disruptors |
-| `GET` | `/api/v1/disruptor/{id}` | Get disruptor |
-| `DELETE` | `/api/v1/disruptor/{id}` | Delete disruptor |
-| `POST` | `/api/v1/disruptor/{id}/start` | Start disruptor |
-| `POST` | `/api/v1/disruptor/{id}/stop` | Stop disruptor |
-| `POST` | `/api/v1/disruptor/{id}/pause` | Pause disruptor |
-| `POST` | `/api/v1/disruptor/{id}/resume` | Resume disruptor |
-| `POST` | `/api/v1/disruptor/{id}/events` | Publish single event |
-| `POST` | `/api/v1/disruptor/{id}/events/batch` | Publish batch events |
-| `GET` | `/api/v1/disruptor/{id}/events` | Query events |
-| `GET` | `/api/v1/disruptor/{id}/events/{sequence}` | Get specific event |
-| `GET` | `/api/v1/disruptor/{id}/metrics` | Disruptor metrics |
-| `GET` | `/api/v1/disruptor/{id}/health` | Disruptor health |
-| `GET` | `/api/v1/disruptor/{id}/status` | Disruptor status |
-| `POST` | `/api/v1/batch/events` | Publish batch to multiple disruptors |
-
-### Configuration
-
-BadBatch supports YAML and JSON configuration files:
-
-```yaml
-# config.yaml
-server:
-  bind_addr: "0.0.0.0:8080"
-
-defaults:
-  buffer_size: 1024
-  producer_type: "single"
-  wait_strategy: "blocking"
-  batch_size: 100
-```
-
-### Programming API
-
-#### Traditional LMAX Disruptor API
+### Traditional LMAX Disruptor API
 
 ```rust
 use badbatch::disruptor::{
@@ -270,7 +181,7 @@ disruptor.publish_event(translator)?;
 disruptor.shutdown()?;
 ```
 
-#### Modern disruptor-rs Inspired API
+### Modern disruptor-rs Inspired API
 
 ```rust
 use badbatch::disruptor::{
@@ -337,17 +248,16 @@ cargo build
 ### Testing
 
 ```bash
-# Run all tests (271 tests total)
+# Run all tests
 cargo test
 
 # Run comprehensive test suite with quality checks
 bash scripts/test-all.sh
 
 # Run specific test categories
-cargo test --lib                    # Unit tests (149 tests)
-cargo test --bin                    # CLI tests (110 tests)
-cargo test --test '*'               # Integration tests (12 tests)
-cargo test --doc                    # Documentation tests (10 tests)
+cargo test --lib                    # Unit tests
+cargo test --test '*'               # Integration tests
+cargo test --doc                    # Documentation tests
 
 # Run benchmarks
 cargo bench
@@ -419,8 +329,6 @@ See the [LICENSE](LICENSE) file for details.
 - [LMAX Disruptor](https://github.com/LMAX-Exchange/disruptor) - Original Java implementation and design patterns
 - [disruptor-rs](https://github.com/sklose/disruptor) - Rust implementation inspiration for modern API design
 - [Rust Community](https://www.rust-lang.org/community) - For the amazing ecosystem and safety guarantees
-- [Tokio](https://tokio.rs/) - Async runtime for network components
-- [Axum](https://github.com/tokio-rs/axum) - Web framework for REST API
 - [crossbeam-utils](https://github.com/crossbeam-rs/crossbeam) - Cache-friendly atomic operations
 
 ## 📞 Support

@@ -14,10 +14,6 @@ categories = ["concurrency", "data-structures", "network-programming"]
 name = "badbatch"
 path = "src/lib.rs"
 
-[[bin]]
-name = "badbatch"
-path = "src/bin/badbatch.rs"
-
 [features]
 default = []
 shared-ring-buffer = []
@@ -32,17 +28,10 @@ tracing-subscriber = "0.3"
 anyhow = "1.0"
 thiserror = "1.0"
 
-# CLI and configuration
-clap = { version = "4.0", features = ["derive"] }
+# Configuration
 env_logger = "0.10"
-tabled = "0.15"
-indicatif = "0.17"
-url = "2.0"
-serde_yaml = "0.9"
 
-# Async and networking (for future REST API)
-axum = "0.7"
-reqwest = { version = "0.11", features = ["json"] }
+# Async runtime
 uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # Synchronization primitives
@@ -50,8 +39,6 @@ parking_lot = "0.12"
 crossbeam-utils = "0.8"
 core_affinity = "0.8"
 chrono = { version = "0.4.41", features = ["serde"] }
-tower = "0.5.2"
-tower-http = { version = "0.6.4", features = ["cors", "trace", "timeout", "limit"] }
 
 [dev-dependencies]
 # Testing and benchmarking

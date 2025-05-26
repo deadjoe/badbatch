@@ -97,9 +97,9 @@ unit_tests() {
     fi
 }
 
-# 4. 测试覆盖率
+# 9. 测试覆盖率
 coverage_test() {
-    print_step "4. 测试覆盖率分析 (llvm-cov)"
+    print_step "9. 测试覆盖率分析 (llvm-cov)"
 
     # 检查是否安装了cargo-llvm-cov
     if ! cargo llvm-cov --version >/dev/null 2>&1; then
@@ -108,14 +108,14 @@ coverage_test() {
         return 0
     fi
 
-    # 对于rustup安装的Rust，检查llvm-tools-preview组件
+    # 对于rustup安装的Rust，检查llvm-tools组件
     if command -v rustup >/dev/null 2>&1; then
-        if ! rustup component list --installed | grep -q llvm-tools-preview; then
-            print_warning "llvm-tools-preview 组件未安装，尝试安装..."
+        if ! rustup component list --installed | grep -q llvm-tools; then
+            print_warning "llvm-tools 组件未安装，尝试安装..."
             if rustup component add llvm-tools-preview; then
-                print_success "llvm-tools-preview 组件安装成功"
+                print_success "llvm-tools 组件安装成功"
             else
-                print_warning "llvm-tools-preview 组件安装失败，跳过覆盖率测试"
+                print_warning "llvm-tools 组件安装失败，跳过覆盖率测试"
                 return 0
             fi
         fi
@@ -165,21 +165,23 @@ coverage_test() {
     # 清理之前的覆盖率数据
     cargo llvm-cov clean
 
-    # 运行覆盖率测试
+    # 运行覆盖率测试并生成HTML报告
     if cargo llvm-cov --lib --html --no-cfg-coverage --ignore-filename-regex="/private/tmp/.*rustc.*"; then
         print_success "测试覆盖率分析完成"
         echo "📊 覆盖率报告已生成到 target/llvm-cov/html/index.html"
 
-        # 显示覆盖率摘要
-        cargo llvm-cov --lib --summary-only --no-cfg-coverage --ignore-filename-regex="/private/tmp/.*rustc.*"
+        # 显示覆盖率摘要（不重新运行测试，只显示已有数据的摘要）
+        echo ""
+        echo "📊 覆盖率摘要:"
+        cargo llvm-cov report --summary-only --ignore-filename-regex="/private/tmp/.*rustc.*"
     else
         print_warning "测试覆盖率分析失败，但继续执行其他测试"
     fi
 }
 
-# 5. 安全审计
+# 4. 安全审计
 security_audit() {
-    print_step "5. 安全审计 (cargo-audit)"
+    print_step "4. 安全审计 (cargo-audit)"
 
     if cargo audit; then
         print_success "安全审计通过"
@@ -189,9 +191,9 @@ security_audit() {
     fi
 }
 
-# 6. 依赖管理检查
+# 5. 依赖管理检查
 dependency_check() {
-    print_step "6. 依赖管理检查 (cargo-deny)"
+    print_step "5. 依赖管理检查 (cargo-deny)"
 
     if cargo deny check; then
         print_success "依赖管理检查通过"
@@ -201,9 +203,9 @@ dependency_check() {
     fi
 }
 
-# 7. 集成测试
+# 6. 集成测试
 integration_tests() {
-    print_step "7. 集成测试"
+    print_step "6. 集成测试"
 
     if cargo test --test '*'; then
         print_success "集成测试通过"
@@ -213,9 +215,9 @@ integration_tests() {
     fi
 }
 
-# 8. 文档测试
+# 7. 文档测试
 doc_tests() {
-    print_step "8. 文档测试"
+    print_step "7. 文档测试"
 
     if cargo test --doc; then
         print_success "文档测试通过"
@@ -231,11 +233,11 @@ main() {
     format_check
     clippy_check
     unit_tests
-    coverage_test
     security_audit
     dependency_check
     integration_tests
     doc_tests
+    coverage_test
 
     echo ""
     echo "================================"
