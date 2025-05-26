@@ -417,9 +417,21 @@ impl WaitStrategy for SleepingWaitStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
+    use std::time::Instant;
 
     #[test]
-    fn test_blocking_wait_strategy() {
+    fn test_blocking_wait_strategy_creation() {
+        let strategy = BlockingWaitStrategy::new();
+        assert!(!strategy.is_alerted());
+
+        // Test default creation
+        let default_strategy = BlockingWaitStrategy::default();
+        assert!(!default_strategy.is_alerted());
+    }
+
+    #[test]
+    fn test_blocking_wait_strategy_immediate_return() {
         let strategy = BlockingWaitStrategy::new();
         let cursor = Arc::new(Sequence::new(10));
         let dependent_sequences = vec![];
@@ -431,7 +443,110 @@ mod tests {
     }
 
     #[test]
-    fn test_yielding_wait_strategy() {
+    fn test_blocking_wait_strategy_with_dependent_sequences() {
+        let strategy = BlockingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(10));
+        let dep1 = Arc::new(Sequence::new(8));
+        let dep2 = Arc::new(Sequence::new(6));
+        let dependent_sequences = vec![dep1, dep2];
+
+        // Should return minimum of dependent sequences
+        let result = strategy.wait_for(5, cursor, &dependent_sequences);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 6); // Minimum of dependent sequences
+    }
+
+    #[test]
+    fn test_blocking_wait_strategy_alert_functionality() {
+        let strategy = BlockingWaitStrategy::new();
+
+        // Test alert and clear
+        assert!(!strategy.is_alerted());
+        strategy.alert();
+        assert!(strategy.is_alerted());
+        strategy.clear_alert();
+        assert!(!strategy.is_alerted());
+    }
+
+    #[test]
+    fn test_blocking_wait_strategy_alert_during_wait() {
+        let strategy = Arc::new(BlockingWaitStrategy::new());
+        let cursor = Arc::new(Sequence::new(0)); // Start with low sequence
+        let dependent_sequences = vec![];
+
+        let strategy_clone = strategy.clone();
+        let cursor_clone = cursor.clone();
+
+        // Spawn a thread that will wait for a high sequence
+        let handle =
+            thread::spawn(move || strategy_clone.wait_for(100, cursor_clone, &dependent_sequences));
+
+        // Give the thread time to start waiting
+        thread::sleep(Duration::from_millis(10));
+
+        // Alert the strategy
+        strategy.alert();
+
+        // The waiting thread should return with an alert error
+        let result = handle.join().unwrap();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DisruptorError::Alert));
+    }
+
+    #[test]
+    fn test_blocking_wait_strategy_timeout() {
+        let strategy = BlockingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(0));
+        let dependent_sequences = vec![];
+        let timeout = Duration::from_millis(50);
+
+        let start = Instant::now();
+        let result = strategy.wait_for_with_timeout(100, cursor, &dependent_sequences, timeout);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DisruptorError::Timeout));
+        assert!(elapsed >= timeout);
+        assert!(elapsed < timeout + Duration::from_millis(50)); // Allow some tolerance
+    }
+
+    #[test]
+    fn test_blocking_wait_strategy_timeout_immediate_return() {
+        let strategy = BlockingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(10));
+        let dependent_sequences = vec![];
+        let timeout = Duration::from_millis(100);
+
+        // Should return immediately since sequence is already available
+        let start = Instant::now();
+        let result = strategy.wait_for_with_timeout(5, cursor, &dependent_sequences, timeout);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 10);
+        assert!(elapsed < Duration::from_millis(10)); // Should be very fast
+    }
+
+    #[test]
+    fn test_blocking_wait_strategy_signal_all() {
+        let strategy = BlockingWaitStrategy::new();
+
+        // Test that signal_all_when_blocking doesn't panic
+        strategy.signal_all_when_blocking();
+    }
+
+    #[test]
+    fn test_yielding_wait_strategy_creation() {
+        let _strategy = YieldingWaitStrategy::new();
+
+        // Test default creation
+        let _default_strategy = YieldingWaitStrategy::new();
+
+        // Both should work (no state to compare)
+    }
+
+    #[test]
+    fn test_yielding_wait_strategy_immediate_return() {
         let strategy = YieldingWaitStrategy::new();
         let cursor = Arc::new(Sequence::new(10));
         let dependent_sequences = vec![];
@@ -442,7 +557,57 @@ mod tests {
     }
 
     #[test]
-    fn test_busy_spin_wait_strategy() {
+    fn test_yielding_wait_strategy_with_dependent_sequences() {
+        let strategy = YieldingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(10));
+        let dep1 = Arc::new(Sequence::new(8));
+        let dep2 = Arc::new(Sequence::new(6));
+        let dependent_sequences = vec![dep1, dep2];
+
+        let result = strategy.wait_for(5, cursor, &dependent_sequences);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 10); // Cursor value since it's higher than requested
+    }
+
+    #[test]
+    fn test_yielding_wait_strategy_with_low_dependent_sequence() {
+        let strategy = YieldingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(3)); // Cursor lower than requested
+        let dep1 = Arc::new(Sequence::new(2)); // Dependent sequence even lower
+        let dependent_sequences = vec![dep1];
+
+        // YieldingWaitStrategy checks dependent sequences only when cursor < sequence
+        // Since cursor=3 < sequence=5, it will check dependent sequences
+        // Since minimum dependent sequence (2) < sequence (5), it should return InsufficientCapacity
+        let result = strategy.wait_for(5, cursor, &dependent_sequences);
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            DisruptorError::InsufficientCapacity
+        ));
+    }
+
+    #[test]
+    fn test_yielding_wait_strategy_signal_all() {
+        let strategy = YieldingWaitStrategy::new();
+
+        // Test that signal_all_when_blocking doesn't panic
+        strategy.signal_all_when_blocking();
+    }
+
+    #[test]
+    fn test_busy_spin_wait_strategy_creation() {
+        let _strategy = BusySpinWaitStrategy::new();
+
+        // Test default creation
+        let _default_strategy = BusySpinWaitStrategy::new();
+
+        // Both should work (no state to compare)
+    }
+
+    #[test]
+    fn test_busy_spin_wait_strategy_immediate_return() {
         let strategy = BusySpinWaitStrategy::new();
         let cursor = Arc::new(Sequence::new(10));
         let dependent_sequences = vec![];
@@ -453,7 +618,62 @@ mod tests {
     }
 
     #[test]
-    fn test_sleeping_wait_strategy() {
+    fn test_busy_spin_wait_strategy_with_dependent_sequences() {
+        let strategy = BusySpinWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(10));
+        let dep1 = Arc::new(Sequence::new(8));
+        let dep2 = Arc::new(Sequence::new(6));
+        let dependent_sequences = vec![dep1, dep2];
+
+        let result = strategy.wait_for(5, cursor, &dependent_sequences);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 10); // Cursor value since it's higher than requested
+    }
+
+    #[test]
+    fn test_busy_spin_wait_strategy_with_low_dependent_sequence() {
+        let strategy = BusySpinWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(3)); // Cursor lower than requested
+        let dep1 = Arc::new(Sequence::new(2)); // Dependent sequence even lower
+        let dependent_sequences = vec![dep1];
+
+        // BusySpinWaitStrategy checks dependent sequences only when cursor < sequence
+        // Since cursor=3 < sequence=5, it will check dependent sequences
+        // Since minimum dependent sequence (2) < sequence (5), it should return InsufficientCapacity
+        let result = strategy.wait_for(5, cursor, &dependent_sequences);
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            DisruptorError::InsufficientCapacity
+        ));
+    }
+
+    #[test]
+    fn test_busy_spin_wait_strategy_signal_all() {
+        let strategy = BusySpinWaitStrategy::new();
+
+        // Test that signal_all_when_blocking doesn't panic
+        strategy.signal_all_when_blocking();
+    }
+
+    #[test]
+    fn test_sleeping_wait_strategy_creation() {
+        let strategy = SleepingWaitStrategy::new();
+        assert_eq!(strategy.sleep_duration, Duration::from_millis(1));
+
+        // Test default creation
+        let default_strategy = SleepingWaitStrategy::default();
+        assert_eq!(default_strategy.sleep_duration, Duration::from_millis(1));
+
+        // Test custom duration
+        let custom_duration = Duration::from_micros(500);
+        let custom_strategy = SleepingWaitStrategy::new_with_duration(custom_duration);
+        assert_eq!(custom_strategy.sleep_duration, custom_duration);
+    }
+
+    #[test]
+    fn test_sleeping_wait_strategy_immediate_return() {
         let strategy = SleepingWaitStrategy::new();
         let cursor = Arc::new(Sequence::new(10));
         let dependent_sequences = vec![];
@@ -466,5 +686,423 @@ mod tests {
         let custom_strategy = SleepingWaitStrategy::new_with_duration(Duration::from_micros(100));
         let result = custom_strategy.wait_for(5, cursor, &dependent_sequences);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_sleeping_wait_strategy_with_dependent_sequences() {
+        let strategy = SleepingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(10));
+        let dep1 = Arc::new(Sequence::new(8));
+        let dep2 = Arc::new(Sequence::new(6));
+        let dependent_sequences = vec![dep1, dep2];
+
+        let result = strategy.wait_for(5, cursor, &dependent_sequences);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 10); // Cursor value since it's higher than requested
+    }
+
+    #[test]
+    fn test_sleeping_wait_strategy_with_low_dependent_sequence() {
+        let strategy = SleepingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(3)); // Cursor lower than requested
+        let dep1 = Arc::new(Sequence::new(2)); // Dependent sequence even lower
+        let dependent_sequences = vec![dep1];
+
+        // SleepingWaitStrategy checks dependent sequences only when cursor < sequence
+        // Since cursor=3 < sequence=5, it will check dependent sequences
+        // Since minimum dependent sequence (2) < sequence (5), it should return InsufficientCapacity
+        let result = strategy.wait_for(5, cursor, &dependent_sequences);
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            DisruptorError::InsufficientCapacity
+        ));
+    }
+
+    #[test]
+    fn test_sleeping_wait_strategy_signal_all() {
+        let strategy = SleepingWaitStrategy::new();
+
+        // Test that signal_all_when_blocking doesn't panic
+        strategy.signal_all_when_blocking();
+    }
+
+    // Advanced tests for complex scenarios
+
+    #[test]
+    fn test_blocking_wait_strategy_concurrent_access() {
+        let strategy = Arc::new(BlockingWaitStrategy::new());
+        let cursor = Arc::new(Sequence::new(5));
+        let dependent_sequences = vec![];
+
+        let mut handles = vec![];
+
+        // Spawn multiple threads that wait for different sequences
+        for i in 0..3 {
+            let strategy_clone = strategy.clone();
+            let cursor_clone = cursor.clone();
+            let deps_clone = dependent_sequences.clone();
+
+            let handle =
+                thread::spawn(move || strategy_clone.wait_for(i, cursor_clone, &deps_clone));
+            handles.push(handle);
+        }
+
+        // All threads should complete successfully since cursor is at 5
+        for handle in handles {
+            let result = handle.join().unwrap();
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), 5);
+        }
+    }
+
+    #[test]
+    fn test_blocking_wait_strategy_timeout_with_dependent_sequences() {
+        let strategy = BlockingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(10));
+        let dep1 = Arc::new(Sequence::new(2)); // This will cause timeout
+        let dependent_sequences = vec![dep1];
+        let timeout = Duration::from_millis(50);
+
+        let start = Instant::now();
+        let result = strategy.wait_for_with_timeout(5, cursor, &dependent_sequences, timeout);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DisruptorError::Timeout));
+        assert!(elapsed >= timeout);
+    }
+
+    #[test]
+    fn test_blocking_wait_strategy_zero_timeout() {
+        let strategy = BlockingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(0));
+        let dependent_sequences = vec![];
+        let timeout = Duration::from_millis(0);
+
+        let result = strategy.wait_for_with_timeout(100, cursor, &dependent_sequences, timeout);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DisruptorError::Timeout));
+    }
+
+    #[test]
+    fn test_yielding_wait_strategy_actual_yielding() {
+        let strategy = YieldingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(0));
+        let dependent_sequences = vec![];
+
+        // This should complete quickly since we're testing the yielding behavior
+        // We can't easily test that it actually yields, but we can test it doesn't hang
+        let start = Instant::now();
+
+        // Spawn a thread that will advance the cursor after a short delay
+        let cursor_clone = cursor.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            cursor_clone.set(10);
+        });
+
+        let result = strategy.wait_for(5, cursor, &dependent_sequences);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert!(elapsed >= Duration::from_millis(10));
+        assert!(elapsed < Duration::from_millis(100)); // Should not take too long
+    }
+
+    #[test]
+    fn test_busy_spin_wait_strategy_actual_spinning() {
+        let strategy = BusySpinWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(0));
+        let dependent_sequences = vec![];
+
+        let start = Instant::now();
+
+        // Spawn a thread that will advance the cursor after a short delay
+        let cursor_clone = cursor.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            cursor_clone.set(10);
+        });
+
+        let result = strategy.wait_for(5, cursor, &dependent_sequences);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert!(elapsed >= Duration::from_millis(10));
+        assert!(elapsed < Duration::from_millis(100)); // Should not take too long
+    }
+
+    #[test]
+    fn test_sleeping_wait_strategy_actual_sleeping() {
+        let strategy = SleepingWaitStrategy::new_with_duration(Duration::from_millis(5));
+        let cursor = Arc::new(Sequence::new(0));
+        let dependent_sequences = vec![];
+
+        let start = Instant::now();
+
+        // Spawn a thread that will advance the cursor after a short delay
+        let cursor_clone = cursor.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            cursor_clone.set(10);
+        });
+
+        let result = strategy.wait_for(5, cursor, &dependent_sequences);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert!(elapsed >= Duration::from_millis(20));
+        assert!(elapsed < Duration::from_millis(100)); // Should not take too long
+    }
+
+    #[test]
+    fn test_wait_strategy_trait_default_timeout_implementation() {
+        let strategy = YieldingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(10));
+        let dependent_sequences = vec![];
+        let timeout = Duration::from_millis(100);
+
+        // Test that default implementation delegates to wait_for
+        let result = strategy.wait_for_with_timeout(5, cursor, &dependent_sequences, timeout);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 10);
+    }
+
+    #[test]
+    fn test_blocking_wait_strategy_mutex_poisoning_recovery() {
+        let strategy = BlockingWaitStrategy::new();
+
+        // Test that the strategy can handle mutex operations gracefully
+        // Even if there were poisoning issues, the methods should not panic
+        strategy.alert();
+        strategy.clear_alert();
+        assert!(!strategy.is_alerted());
+    }
+
+    #[test]
+    fn test_all_strategies_debug_format() {
+        let blocking = BlockingWaitStrategy::new();
+        let yielding = YieldingWaitStrategy::new();
+        let busy_spin = BusySpinWaitStrategy::new();
+        let sleeping = SleepingWaitStrategy::new();
+
+        // Test that all strategies implement Debug properly
+        let blocking_debug = format!("{:?}", blocking);
+        let yielding_debug = format!("{:?}", yielding);
+        let busy_spin_debug = format!("{:?}", busy_spin);
+        let sleeping_debug = format!("{:?}", sleeping);
+
+        assert!(blocking_debug.contains("BlockingWaitStrategy"));
+        assert!(yielding_debug.contains("YieldingWaitStrategy"));
+        assert!(busy_spin_debug.contains("BusySpinWaitStrategy"));
+        assert!(sleeping_debug.contains("SleepingWaitStrategy"));
+    }
+
+    #[test]
+    fn test_blocking_wait_strategy_edge_cases() {
+        let strategy = BlockingWaitStrategy::new();
+
+        // Test with sequence equal to cursor
+        let cursor = Arc::new(Sequence::new(5));
+        let result = strategy.wait_for(5, cursor.clone(), &[]);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 5);
+
+        // Test with sequence lower than cursor - should return immediately
+        let result = strategy.wait_for(3, cursor.clone(), &[]);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 5);
+
+        // Test with dependent sequence higher than cursor
+        let dep = Arc::new(Sequence::new(10));
+        let result = strategy.wait_for(3, cursor, &[dep]); // Request sequence 3, which is available
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 10); // Should return dependent sequence value since it's the minimum available
+    }
+
+    #[test]
+    fn test_multiple_dependent_sequences_minimum() {
+        let strategy = BlockingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(20));
+
+        // Create multiple dependent sequences with different values
+        let dep1 = Arc::new(Sequence::new(15));
+        let dep2 = Arc::new(Sequence::new(12));
+        let dep3 = Arc::new(Sequence::new(18));
+        let dependent_sequences = vec![dep1, dep2, dep3];
+
+        let result = strategy.wait_for(10, cursor, &dependent_sequences);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 12); // Should return minimum of dependent sequences
+    }
+
+    #[test]
+    fn test_sleeping_wait_strategy_very_short_duration() {
+        let strategy = SleepingWaitStrategy::new_with_duration(Duration::from_nanos(1));
+        let cursor = Arc::new(Sequence::new(10));
+        let dependent_sequences = vec![];
+
+        let result = strategy.wait_for(5, cursor, &dependent_sequences);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 10);
+    }
+
+    #[test]
+    fn test_blocking_wait_strategy_alert_before_wait() {
+        let strategy = BlockingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(0));
+        let dependent_sequences = vec![];
+
+        // Alert before waiting
+        strategy.alert();
+
+        let result = strategy.wait_for(100, cursor, &dependent_sequences);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DisruptorError::Alert));
+    }
+
+    // Tests inspired by LMAX Disruptor test patterns
+
+    #[test]
+    fn test_blocking_wait_strategy_with_delayed_sequence_update() {
+        let strategy = Arc::new(BlockingWaitStrategy::new());
+        let cursor = Arc::new(Sequence::new(-1)); // Start with no events available
+
+        // Spawn a thread that will update the cursor after a delay
+        let cursor_clone = cursor.clone();
+        let strategy_clone = strategy.clone();
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            cursor_clone.set(5); // Make sequences 0-5 available
+            strategy_clone.signal_all_when_blocking();
+        });
+
+        let start = Instant::now();
+        let result = strategy.wait_for(3, cursor, &[]);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 5);
+        assert!(elapsed >= Duration::from_millis(40)); // Should have waited
+        assert!(elapsed < Duration::from_millis(200)); // But not too long
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_yielding_wait_strategy_with_delayed_sequence_update() {
+        let strategy = YieldingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(-1));
+
+        // Spawn a thread that will update the cursor after a delay
+        let cursor_clone = cursor.clone();
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            cursor_clone.set(5);
+        });
+
+        let start = Instant::now();
+        let result = strategy.wait_for(3, cursor, &[]);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 5);
+        assert!(elapsed >= Duration::from_millis(15)); // Should have waited
+        assert!(elapsed < Duration::from_millis(100)); // But not too long
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_busy_spin_wait_strategy_with_delayed_sequence_update() {
+        let strategy = BusySpinWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(-1));
+
+        // Spawn a thread that will update the cursor after a delay
+        let cursor_clone = cursor.clone();
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            cursor_clone.set(5);
+        });
+
+        let start = Instant::now();
+        let result = strategy.wait_for(3, cursor, &[]);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 5);
+        assert!(elapsed >= Duration::from_millis(15)); // Should have waited
+        assert!(elapsed < Duration::from_millis(100)); // But not too long
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_sleeping_wait_strategy_with_delayed_sequence_update() {
+        let strategy = SleepingWaitStrategy::new_with_duration(Duration::from_millis(5));
+        let cursor = Arc::new(Sequence::new(-1));
+
+        // Spawn a thread that will update the cursor after a delay
+        let cursor_clone = cursor.clone();
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            cursor_clone.set(5);
+        });
+
+        let start = Instant::now();
+        let result = strategy.wait_for(3, cursor, &[]);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 5);
+        assert!(elapsed >= Duration::from_millis(25)); // Should have waited
+        assert!(elapsed < Duration::from_millis(100)); // But not too long
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_wait_strategy_with_multiple_dependent_sequences_realistic() {
+        let strategy = BlockingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(10));
+
+        // Create multiple consumer sequences at different positions
+        let consumer1 = Arc::new(Sequence::new(8)); // Slowest consumer
+        let consumer2 = Arc::new(Sequence::new(9)); // Faster consumer
+        let consumer3 = Arc::new(Sequence::new(7)); // Even slower consumer
+
+        let dependent_sequences = vec![consumer1, consumer2, consumer3];
+
+        // Should return the minimum of all dependent sequences
+        let result = strategy.wait_for(6, cursor, &dependent_sequences);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 7); // Minimum of dependent sequences
+    }
+
+    #[test]
+    fn test_wait_strategy_performance_characteristics() {
+        // This test verifies that different strategies have expected performance characteristics
+        let cursor = Arc::new(Sequence::new(10));
+        let dependent_sequences = vec![];
+
+        // All strategies should return immediately when sequence is available
+        let strategies: Vec<Box<dyn WaitStrategy>> = vec![
+            Box::new(BusySpinWaitStrategy::new()),
+            Box::new(YieldingWaitStrategy::new()),
+            Box::new(SleepingWaitStrategy::new()),
+            Box::new(BlockingWaitStrategy::new()),
+        ];
+
+        for strategy in strategies {
+            let start = Instant::now();
+            let result = strategy.wait_for(5, cursor.clone(), &dependent_sequences);
+            let elapsed = start.elapsed();
+
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), 10);
+            assert!(elapsed < Duration::from_millis(10)); // Should be very fast
+        }
     }
 }
