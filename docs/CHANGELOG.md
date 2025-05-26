@@ -31,7 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - disruptor-rs inspired optimizations
 - REST API interface
 - CLI interface with comprehensive commands
-- Cluster support with Gossip protocol
 - Multiple wait strategies (Blocking, Yielding, BusySpin, Sleeping)
 - Thread management with CPU affinity support
 - Comprehensive test suite (271 tests)
@@ -64,8 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Event Publishing**: Single and batch event publishing
 - **Event Generation**: High-performance event generation for testing
 - **Monitoring**: Real-time system and disruptor metrics
-- **Server Management**: Start standalone or clustered servers
-- **Cluster Operations**: Node management and health monitoring
+- **Server Management**: Start standalone servers
 
 ### Performance
 - **High Throughput**: 20-100M events/second (single producer)

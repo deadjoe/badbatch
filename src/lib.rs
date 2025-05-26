@@ -85,8 +85,6 @@
 //! - Mechanical sympathy with modern CPU architectures
 
 pub mod api;
-#[cfg(feature = "cluster")]
-pub mod cluster;
 pub mod disruptor;
 
 // Re-export the main types for convenience
