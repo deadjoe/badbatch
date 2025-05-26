@@ -25,8 +25,6 @@ pub async fn handle_monitor_command(
             show_disruptor_metrics(client, &id, output_format).await
         }
 
-        MonitorCommands::Cluster => show_cluster_metrics(client, output_format).await,
-
         MonitorCommands::Watch {
             interval,
             monitor_type,
@@ -86,23 +84,7 @@ async fn show_disruptor_metrics(
     Ok(())
 }
 
-async fn show_cluster_metrics(client: &BadBatchClient, output_format: &str) -> CliResult<()> {
-    // For now, show system metrics as cluster metrics
-    // In a real implementation, this would fetch cluster-specific metrics
-    let metrics = client.get_system_metrics().await?;
 
-    let cluster_metrics = serde_json::json!({
-        "cluster_status": "active",
-        "node_count": 1,
-        "healthy_nodes": 1,
-        "system_metrics": metrics
-    });
-
-    let output = format::format_output(&cluster_metrics, output_format)?;
-    println!("{}", output);
-
-    Ok(())
-}
 
 async fn watch_metrics(
     client: &BadBatchClient,
@@ -147,15 +129,10 @@ async fn watch_metrics(
                     eprintln!("Disruptor ID required for disruptor monitoring");
                 }
             }
-            "cluster" => {
-                if let Err(e) = show_cluster_metrics(client, output_format).await {
-                    eprintln!("Error fetching cluster metrics: {}", e);
-                }
-            }
             _ => {
                 eprintln!("Unknown monitor type: {}", monitor_type);
                 return Err(crate::cli::CliError::invalid_input(format!(
-                    "Unknown monitor type: {}. Supported types: system, disruptor, cluster",
+                    "Unknown monitor type: {}. Supported types: system, disruptor",
                     monitor_type
                 )));
             }
@@ -412,21 +389,7 @@ mod tests {
         assert!(prometheus.contains("badbatch_memory_usage_bytes 1048576"));
     }
 
-    #[test]
-    fn test_cluster_metrics_structure() {
-        let system_metrics = create_test_system_metrics();
-        let cluster_metrics = serde_json::json!({
-            "cluster_status": "active",
-            "node_count": 3,
-            "healthy_nodes": 2,
-            "system_metrics": system_metrics
-        });
 
-        assert_eq!(cluster_metrics["cluster_status"], "active");
-        assert_eq!(cluster_metrics["node_count"], 3);
-        assert_eq!(cluster_metrics["healthy_nodes"], 2);
-        assert!(cluster_metrics["system_metrics"].is_object());
-    }
 
     #[test]
     fn test_export_data_structure() {
@@ -445,22 +408,22 @@ mod tests {
 
     #[test]
     fn test_monitor_type_validation() {
-        let valid_types = ["system", "disruptor", "cluster"];
+        let valid_types = ["system", "disruptor"];
 
         for monitor_type in &valid_types {
             // This simulates the validation logic in watch_metrics
             let is_valid = matches!(
                 monitor_type.to_lowercase().as_str(),
-                "system" | "disruptor" | "cluster"
+                "system" | "disruptor"
             );
             assert!(is_valid, "Monitor type '{}' should be valid", monitor_type);
         }
 
-        let invalid_types = ["invalid", "unknown", ""];
+        let invalid_types = ["invalid", "unknown", "cluster", ""];
         for monitor_type in &invalid_types {
             let is_valid = matches!(
                 monitor_type.to_lowercase().as_str(),
-                "system" | "disruptor" | "cluster"
+                "system" | "disruptor"
             );
             assert!(
                 !is_valid,

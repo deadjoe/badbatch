@@ -11,71 +11,10 @@ use crate::cli::CliResult;
 pub async fn start_server(
     config_file: Option<PathBuf>,
     bind_addr: String,
-    cluster_mode: bool,
-    cluster_bind: String,
-    seed_nodes: Vec<String>,
 ) -> CliResult<()> {
     println!("Starting BadBatch server...");
     println!("  Bind address: {}", bind_addr);
-
-    #[cfg(feature = "cluster")]
-    let cluster_instance = if cluster_mode {
-        println!("  Cluster mode: enabled");
-        println!("  Cluster bind: {}", cluster_bind);
-        if !seed_nodes.is_empty() {
-            println!("  Seed nodes: {:?}", seed_nodes);
-        }
-
-        // Parse cluster bind address
-        let cluster_socket: SocketAddr = cluster_bind.parse().map_err(|e| {
-            crate::cli::CliError::invalid_input(format!("Invalid cluster bind address: {}", e))
-        })?;
-
-        // Create cluster configuration
-        let cluster_config = badbatch::cluster::ClusterConfig {
-            bind_addr: cluster_socket,
-            seed_nodes: seed_nodes
-                .iter()
-                .map(|addr| addr.parse())
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| {
-                    crate::cli::CliError::invalid_input(format!("Invalid seed node address: {}", e))
-                })?,
-            ..Default::default()
-        };
-
-        // Create and start cluster
-        let cluster = badbatch::cluster::Cluster::new(cluster_config)
-            .await
-            .map_err(|e| {
-                crate::cli::CliError::operation(format!("Failed to create cluster: {}", e))
-            })?;
-
-        cluster.start().await.map_err(|e| {
-            crate::cli::CliError::operation(format!("Failed to start cluster: {}", e))
-        })?;
-
-        Some(cluster)
-    } else {
-        println!("  Cluster mode: disabled (single-node mode)");
-        None
-    };
-
-    #[cfg(not(feature = "cluster"))]
-    {
-        if cluster_mode {
-            eprintln!("⚠️  Warning: Cluster mode requested but not compiled in");
-            eprintln!("   Cluster functionality requires the 'cluster' feature");
-            eprintln!("   Compile with: cargo build --features cluster");
-            eprintln!("   Starting in single-node mode instead");
-            eprintln!("   Requested cluster bind: {}", cluster_bind);
-            if !seed_nodes.is_empty() {
-                eprintln!("   Requested seed nodes: {:?}", seed_nodes);
-            }
-        } else {
-            println!("  Cluster mode: disabled (single-node mode)");
-        }
-    }
+    println!("  Mode: single-node");
 
     if let Some(config_path) = config_file {
         println!("  Config file: {:?}", config_path);
@@ -112,16 +51,6 @@ pub async fn start_server(
         .start_with_shutdown(shutdown_signal)
         .await
         .map_err(|e| crate::cli::CliError::operation(format!("Server error: {}", e)))?;
-
-    // Stop cluster if it was started
-    #[cfg(feature = "cluster")]
-    if let Some(cluster) = cluster_instance {
-        println!("Stopping cluster...");
-        cluster.stop().await.map_err(|e| {
-            crate::cli::CliError::operation(format!("Failed to stop cluster: {}", e))
-        })?;
-        println!("✓ Cluster stopped");
-    }
 
     println!("✓ Server stopped");
 
@@ -191,37 +120,7 @@ mod tests {
         assert_eq!(server_config.port, 8080);
     }
 
-    #[test]
-    fn test_cluster_configuration_validation() {
-        // Test valid cluster bind addresses
-        let valid_cluster_binds = ["0.0.0.0:7946", "127.0.0.1:7947", "192.168.1.100:8000"];
 
-        for bind in &valid_cluster_binds {
-            let result: Result<SocketAddr, _> = bind.parse();
-            if result.is_ok() {
-                let socket_addr = result.unwrap();
-                assert!(socket_addr.port() > 0);
-            }
-        }
-    }
-
-    #[test]
-    fn test_seed_nodes_validation() {
-        let valid_seed_nodes = vec![
-            "127.0.0.1:7946".to_string(),
-            "192.168.1.100:7947".to_string(),
-            "cluster-node.example.com:7946".to_string(),
-        ];
-
-        for seed_node in &valid_seed_nodes {
-            // Basic validation - should contain host and port
-            assert!(seed_node.contains(':'));
-            let parts: Vec<&str> = seed_node.split(':').collect();
-            assert_eq!(parts.len(), 2);
-            assert!(!parts[0].is_empty()); // host part
-            assert!(!parts[1].is_empty()); // port part
-        }
-    }
 
     #[test]
     fn test_config_file_path_handling() {
@@ -274,24 +173,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_cluster_mode_flags() {
-        // Test cluster mode enabled
-        let cluster_mode = true;
-        let cluster_bind = "0.0.0.0:7946".to_string();
-        let seed_nodes = ["127.0.0.1:7947".to_string()];
 
-        assert!(cluster_mode);
-        assert!(!cluster_bind.is_empty());
-        assert!(!seed_nodes.is_empty());
-
-        // Test cluster mode disabled
-        let cluster_mode = false;
-        let empty_seed_nodes: Vec<String> = vec![];
-
-        assert!(!cluster_mode);
-        assert!(empty_seed_nodes.is_empty());
-    }
 
     #[test]
     fn test_default_server_config() {
