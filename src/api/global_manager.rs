@@ -3,7 +3,8 @@
 //! This module provides a global singleton instance of the DisruptorManager
 //! that can be shared across all API handlers.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Mutex;
 use crate::api::manager::DisruptorManager;
 
 /// Global manager instance - shared across all API handlers

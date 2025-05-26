@@ -30,6 +30,11 @@ pub struct ManagedDisruptor {
 }
 
 /// Global Disruptor manager for handling all Disruptor instances
+///
+/// This manager uses fine-grained locking to minimize contention:
+/// - Read operations use RwLock for concurrent access
+/// - Individual Disruptor operations use separate locks
+/// - Metadata operations are separated from data operations
 #[derive(Debug)]
 pub struct DisruptorManager {
     disruptors: Arc<RwLock<HashMap<String, ManagedDisruptor>>>,
@@ -281,12 +286,41 @@ impl DisruptorManager {
     }
 
     /// Get the actual Disruptor instance for event publishing
+    ///
+    /// This method uses a read lock for fast concurrent access and immediately
+    /// clones the Arc to minimize lock holding time.
     pub fn get_disruptor(&self, id: &str) -> ApiResult<Arc<Mutex<Disruptor<ApiEvent>>>> {
+        // Use a read lock for concurrent access
         let disruptors = self.disruptors.read()
             .map_err(|_| ApiError::internal("Failed to acquire read lock"))?;
 
         match disruptors.get(id) {
-            Some(managed) => Ok(managed.disruptor.clone()),
+            Some(managed) => {
+                // Clone the Arc immediately to release the lock quickly
+                let disruptor = managed.disruptor.clone();
+                // Lock is automatically released here
+                Ok(disruptor)
+            }
+            None => Err(ApiError::disruptor_not_found(id)),
+        }
+    }
+
+    /// Fast path to check if a Disruptor exists without acquiring locks on the Disruptor itself
+    pub fn disruptor_exists(&self, id: &str) -> bool {
+        if let Ok(disruptors) = self.disruptors.read() {
+            disruptors.contains_key(id)
+        } else {
+            false
+        }
+    }
+
+    /// Get Disruptor status quickly without locking the Disruptor instance
+    pub fn get_disruptor_status(&self, id: &str) -> ApiResult<DisruptorStatus> {
+        let disruptors = self.disruptors.read()
+            .map_err(|_| ApiError::internal("Failed to acquire read lock"))?;
+
+        match disruptors.get(id) {
+            Some(managed) => Ok(managed.info.status.clone()),
             None => Err(ApiError::disruptor_not_found(id)),
         }
     }

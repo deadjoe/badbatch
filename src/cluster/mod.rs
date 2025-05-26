@@ -366,4 +366,58 @@ mod tests {
         assert_eq!(node.id(), &config.node_id);
         assert_eq!(node.bind_addr(), config.bind_addr);
     }
+
+    #[tokio::test]
+    async fn test_cluster_basic_functionality() {
+        let config = create_test_config();
+        let cluster = Cluster::new(config).await.unwrap();
+
+        // Test that we can get cluster state without starting
+        let state = cluster.get_state().await;
+        assert_eq!(state.total_nodes, 1);
+        assert_eq!(state.healthy_nodes, 1);
+
+        // Test that we can get local node info
+        let local_node = cluster.get_local_node().await;
+        assert_eq!(local_node.id(), &cluster.config.node_id);
+
+        // Test that we can get members (should be just local node)
+        let members = cluster.get_members().await;
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].id(), &cluster.config.node_id);
+    }
+
+    #[tokio::test]
+    async fn test_cluster_configuration() {
+        // Test cluster configuration with seed nodes
+        let config1 = create_test_config();
+        let config2 = {
+            let mut config = create_test_config();
+            config.seed_nodes = vec![config1.bind_addr];
+            config
+        };
+
+        // Create clusters without starting them
+        let cluster1 = Cluster::new(config1.clone()).await.unwrap();
+        let cluster2 = Cluster::new(config2.clone()).await.unwrap();
+
+        // Verify configurations
+        assert_eq!(cluster1.config.node_id, config1.node_id);
+        assert_eq!(cluster1.config.bind_addr, config1.bind_addr);
+        assert!(cluster1.config.seed_nodes.is_empty());
+
+        assert_eq!(cluster2.config.node_id, config2.node_id);
+        assert_eq!(cluster2.config.bind_addr, config2.bind_addr);
+        assert_eq!(cluster2.config.seed_nodes.len(), 1);
+        assert_eq!(cluster2.config.seed_nodes[0], config1.bind_addr);
+
+        // Both clusters should have valid initial state
+        let state1 = cluster1.get_state().await;
+        let state2 = cluster2.get_state().await;
+
+        assert_eq!(state1.total_nodes, 1);
+        assert_eq!(state1.healthy_nodes, 1);
+        assert_eq!(state2.total_nodes, 1);
+        assert_eq!(state2.healthy_nodes, 1);
+    }
 }
