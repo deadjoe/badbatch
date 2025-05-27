@@ -59,6 +59,47 @@ pub trait SequenceBarrier: Send + Sync {
     /// # Errors
     /// Returns `DisruptorError::Alert` if the barrier has been alerted
     fn check_alert(&self) -> Result<()>;
+
+    /// Wait for a sequence with external shutdown signal
+    ///
+    /// This method waits for the specified sequence to become available,
+    /// but also checks an external shutdown flag for early termination.
+    ///
+    /// # Arguments
+    /// * `sequence` - The sequence to wait for
+    /// * `shutdown_flag` - External shutdown signal to check
+    ///
+    /// # Returns
+    /// The available sequence number when ready
+    ///
+    /// # Errors
+    /// Returns `DisruptorError::Alert` if shutdown is signaled or barrier is alerted
+    fn wait_for_with_shutdown(&self, sequence: i64, shutdown_flag: &AtomicBool) -> Result<i64> {
+        // Default implementation that periodically checks shutdown flag
+        loop {
+            // Check shutdown flag first
+            if shutdown_flag.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+
+            // Check if we're alerted
+            self.check_alert()?;
+
+            // Try to wait for the sequence (this might block)
+            match self.wait_for(sequence) {
+                Ok(available_sequence) => return Ok(available_sequence),
+                Err(DisruptorError::Alert) => {
+                    // Check if it's due to shutdown or barrier alert
+                    if shutdown_flag.load(Ordering::Acquire) {
+                        return Err(DisruptorError::Alert);
+                    }
+                    // If it's a barrier alert, re-throw
+                    return Err(DisruptorError::Alert);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
 }
 
 /// Standard implementation of a sequence barrier
@@ -144,6 +185,29 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
             Ok(())
         }
     }
+
+    fn wait_for_with_shutdown(&self, sequence: i64, shutdown_flag: &AtomicBool) -> Result<i64> {
+        // Check shutdown flag first
+        if shutdown_flag.load(Ordering::Acquire) {
+            return Err(DisruptorError::Alert);
+        }
+
+        // Check if we've been alerted before starting to wait
+        self.check_alert()?;
+
+        // Use the wait strategy with shutdown support
+        let available_sequence = self.wait_strategy.wait_for_with_shutdown(
+            sequence,
+            self.cursor.clone(),
+            &self.dependent_sequences,
+            shutdown_flag,
+        )?;
+
+        // Check again after waiting in case we were alerted while waiting
+        self.check_alert()?;
+
+        Ok(available_sequence)
+    }
 }
 
 /// A simple sequence barrier that only tracks a cursor
@@ -219,6 +283,26 @@ impl SequenceBarrier for SimpleSequenceBarrier {
         } else {
             Ok(())
         }
+    }
+
+    fn wait_for_with_shutdown(&self, sequence: i64, shutdown_flag: &AtomicBool) -> Result<i64> {
+        // Check shutdown flag first
+        if shutdown_flag.load(Ordering::Acquire) {
+            return Err(DisruptorError::Alert);
+        }
+
+        self.check_alert()?;
+
+        // For a simple barrier, we only wait for the cursor with shutdown support
+        let available_sequence = self.wait_strategy.wait_for_with_shutdown(
+            sequence,
+            self.cursor.clone(),
+            &[], // No dependent sequences
+            shutdown_flag,
+        )?;
+
+        self.check_alert()?;
+        Ok(available_sequence)
     }
 }
 

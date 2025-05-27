@@ -7,6 +7,7 @@
 use crate::disruptor::{DisruptorError, Result, Sequence};
 use std::sync::Arc;
 use std::sync::{Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -66,6 +67,50 @@ pub trait WaitStrategy: Send + Sync + std::fmt::Debug {
         self.wait_for(sequence, cursor, dependent_sequences)
     }
 
+    /// Wait for the given sequence with external shutdown signal
+    ///
+    /// This method blocks until the specified sequence is available or
+    /// until an external shutdown signal is received.
+    ///
+    /// # Arguments
+    /// * `sequence` - The sequence to wait for
+    /// * `cursor` - The current cursor position
+    /// * `dependent_sequences` - Sequences that this consumer depends on
+    /// * `shutdown_flag` - External shutdown signal to check
+    ///
+    /// # Returns
+    /// The actual available sequence (may be higher than requested)
+    ///
+    /// # Errors
+    /// Returns `DisruptorError::Alert` if shutdown is signaled
+    fn wait_for_with_shutdown(
+        &self,
+        sequence: i64,
+        cursor: Arc<Sequence>,
+        dependent_sequences: &[Arc<Sequence>],
+        shutdown_flag: &AtomicBool,
+    ) -> Result<i64> {
+        // Default implementation with periodic shutdown checks
+        let check_interval = Duration::from_millis(1);
+
+        loop {
+            // Check shutdown flag first
+            if shutdown_flag.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+
+            // Try to get the sequence with a short timeout
+            match self.wait_for_with_timeout(sequence, cursor.clone(), dependent_sequences, check_interval) {
+                Ok(available_sequence) => return Ok(available_sequence),
+                Err(DisruptorError::Timeout) => {
+                    // Continue loop to check shutdown flag again
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     /// Signal all waiting threads to wake up
     ///
     /// This is used when shutting down the Disruptor to wake up
@@ -83,6 +128,13 @@ pub struct BlockingWaitStrategy {
     // Use a condvar for proper blocking/signaling
     condvar: Condvar,
     mutex: Mutex<BlockingState>,
+}
+
+impl Clone for BlockingWaitStrategy {
+    fn clone(&self) -> Self {
+        // Create a new instance with default state
+        Self::new()
+    }
 }
 
 /// Internal state for blocking wait strategy
@@ -258,7 +310,7 @@ impl WaitStrategy for BlockingWaitStrategy {
 /// This strategy yields the CPU to other threads while waiting.
 /// It provides better CPU efficiency than busy-spin but may have
 /// higher latency than blocking strategies.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct YieldingWaitStrategy;
 
 impl YieldingWaitStrategy {
@@ -275,24 +327,99 @@ impl WaitStrategy for YieldingWaitStrategy {
         cursor: Arc<Sequence>,
         dependent_sequences: &[Arc<Sequence>],
     ) -> Result<i64> {
-        let mut available_sequence = cursor.get();
+        // First, wait for the cursor (producer) to reach the required sequence
+        while cursor.get() < sequence {
+            thread::yield_now();
+        }
 
-        if available_sequence < sequence {
-            // Check dependent sequences
-            let minimum_sequence = Sequence::get_minimum_sequence(dependent_sequences);
-            if minimum_sequence < sequence {
-                return Err(DisruptorError::InsufficientCapacity);
-            }
-
-            while {
-                available_sequence = cursor.get();
-                available_sequence < sequence
-            } {
+        // Then, wait for all dependent sequences to reach the required sequence
+        if !dependent_sequences.is_empty() {
+            loop {
+                let minimum_dependent_sequence = Sequence::get_minimum_sequence(dependent_sequences);
+                if minimum_dependent_sequence >= sequence {
+                    break;
+                }
                 thread::yield_now();
             }
         }
 
-        Ok(available_sequence)
+        // Return the cursor sequence as the available sequence
+        Ok(cursor.get())
+    }
+
+    fn wait_for_with_timeout(
+        &self,
+        sequence: i64,
+        cursor: Arc<Sequence>,
+        dependent_sequences: &[Arc<Sequence>],
+        timeout: Duration,
+    ) -> Result<i64> {
+        let start_time = std::time::Instant::now();
+
+        // Wait for both cursor and dependent sequences to reach the required sequence
+        loop {
+            let cursor_sequence = cursor.get();
+            let minimum_dependent_sequence = if dependent_sequences.is_empty() {
+                cursor_sequence
+            } else {
+                Sequence::get_minimum_sequence(dependent_sequences)
+            };
+
+            // The available sequence is the minimum of cursor and dependent sequences
+            let available_sequence = std::cmp::min(cursor_sequence, minimum_dependent_sequence);
+
+            if available_sequence >= sequence {
+                return Ok(available_sequence);
+            }
+
+            // Check for timeout
+            if start_time.elapsed() >= timeout {
+                return Err(DisruptorError::Timeout);
+            }
+
+            thread::yield_now();
+        }
+    }
+
+    fn wait_for_with_shutdown(
+        &self,
+        sequence: i64,
+        cursor: Arc<Sequence>,
+        dependent_sequences: &[Arc<Sequence>],
+        shutdown_flag: &AtomicBool,
+    ) -> Result<i64> {
+        // First, wait for the cursor (producer) to reach the required sequence
+        while cursor.get() < sequence {
+            // Check shutdown flag
+            if shutdown_flag.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+            thread::yield_now();
+        }
+
+        // Then, wait for all dependent sequences to reach the required sequence
+        if !dependent_sequences.is_empty() {
+            loop {
+                // Ensure we see the most up-to-date dependent sequence values
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+
+                let minimum_dependent_sequence = Sequence::get_minimum_sequence(dependent_sequences);
+                if minimum_dependent_sequence >= sequence {
+                    // Add an additional memory barrier to ensure we see all
+                    // memory writes that happened before the sequence update
+                    std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+                    break;
+                }
+                // Check shutdown flag
+                if shutdown_flag.load(Ordering::Acquire) {
+                    return Err(DisruptorError::Alert);
+                }
+                thread::yield_now();
+            }
+        }
+
+        // Return the cursor sequence as the available sequence
+        Ok(cursor.get())
     }
 
     fn signal_all_when_blocking(&self) {
@@ -305,7 +432,7 @@ impl WaitStrategy for YieldingWaitStrategy {
 /// This strategy continuously polls for events without yielding the CPU.
 /// It provides the lowest latency but uses 100% CPU while waiting.
 /// Use this only when you can dedicate CPU cores to the Disruptor.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct BusySpinWaitStrategy;
 
 impl BusySpinWaitStrategy {
@@ -322,26 +449,110 @@ impl WaitStrategy for BusySpinWaitStrategy {
         cursor: Arc<Sequence>,
         dependent_sequences: &[Arc<Sequence>],
     ) -> Result<i64> {
-        let mut available_sequence = cursor.get();
+        // First, wait for the cursor (producer) to reach the required sequence
+        while cursor.get() < sequence {
+            std::hint::spin_loop();
+        }
 
-        if available_sequence < sequence {
-            // Check dependent sequences
-            let minimum_sequence = Sequence::get_minimum_sequence(dependent_sequences);
-            if minimum_sequence < sequence {
-                return Err(DisruptorError::InsufficientCapacity);
-            }
+        // Then, wait for all dependent sequences to reach the required sequence
+        if !dependent_sequences.is_empty() {
+            loop {
+                // Ensure we see the most up-to-date dependent sequence values
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
 
-            // Busy spin until sequence is available
-            while {
-                available_sequence = cursor.get();
-                available_sequence < sequence
-            } {
-                // Busy spin - no yielding or parking
+                let minimum_dependent_sequence = Sequence::get_minimum_sequence(dependent_sequences);
+
+                // For dependency chains, we need to wait for dependent consumers to complete
+                // the current sequence before we can start processing it
+                if minimum_dependent_sequence >= sequence {
+                    // Add an additional memory barrier to ensure we see all
+                    // memory writes that happened before the sequence update
+                    std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+                    break;
+                }
                 std::hint::spin_loop();
             }
         }
 
-        Ok(available_sequence)
+        // Return the cursor sequence as the available sequence
+        Ok(cursor.get())
+    }
+
+    fn wait_for_with_timeout(
+        &self,
+        sequence: i64,
+        cursor: Arc<Sequence>,
+        dependent_sequences: &[Arc<Sequence>],
+        timeout: Duration,
+    ) -> Result<i64> {
+        let start_time = std::time::Instant::now();
+
+        // Wait for both cursor and dependent sequences to reach the required sequence
+        loop {
+            let cursor_sequence = cursor.get();
+            let minimum_dependent_sequence = if dependent_sequences.is_empty() {
+                cursor_sequence
+            } else {
+                Sequence::get_minimum_sequence(dependent_sequences)
+            };
+
+            // The available sequence is the minimum of cursor and dependent sequences
+            let available_sequence = std::cmp::min(cursor_sequence, minimum_dependent_sequence);
+
+            if available_sequence >= sequence {
+                return Ok(available_sequence);
+            }
+
+            // Check for timeout
+            if start_time.elapsed() >= timeout {
+                return Err(DisruptorError::Timeout);
+            }
+
+            // Busy spin - no yielding or parking
+            std::hint::spin_loop();
+        }
+    }
+
+    fn wait_for_with_shutdown(
+        &self,
+        sequence: i64,
+        cursor: Arc<Sequence>,
+        dependent_sequences: &[Arc<Sequence>],
+        shutdown_flag: &AtomicBool,
+    ) -> Result<i64> {
+        // First, wait for the cursor (producer) to reach the required sequence
+        while cursor.get() < sequence {
+            // Check shutdown flag
+            if shutdown_flag.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+            std::hint::spin_loop();
+        }
+
+        // Then, wait for all dependent sequences to reach the required sequence
+        if !dependent_sequences.is_empty() {
+            loop {
+                // Ensure we see the most up-to-date dependent sequence values
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+
+                let minimum_dependent_sequence = Sequence::get_minimum_sequence(dependent_sequences);
+
+                if minimum_dependent_sequence >= sequence {
+                    // Add an additional memory barrier to ensure we see all
+                    // memory writes that happened before the sequence update
+                    std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+                    break;
+                }
+                // Check shutdown flag
+                if shutdown_flag.load(Ordering::Acquire) {
+                    return Err(DisruptorError::Alert);
+                }
+                std::hint::spin_loop();
+            }
+        }
+
+        // Return the cursor sequence as the available sequence
+        Ok(cursor.get())
     }
 
     fn signal_all_when_blocking(&self) {
@@ -354,7 +565,7 @@ impl WaitStrategy for BusySpinWaitStrategy {
 /// This strategy sleeps for a short duration while waiting.
 /// It provides good CPU efficiency but may have variable latency
 /// depending on the sleep duration.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SleepingWaitStrategy {
     sleep_duration: Duration,
 }
