@@ -4,8 +4,8 @@
 //! The ring buffer is a pre-allocated circular array that stores events
 //! and provides lock-free access through careful use of memory barriers.
 
-use crate::disruptor::{is_power_of_two, DisruptorError, EventFactory, Result};
 use crate::disruptor::core_interfaces::DataProvider;
+use crate::disruptor::{is_power_of_two, DisruptorError, EventFactory, Result};
 use std::cell::UnsafeCell;
 
 #[cfg(feature = "shared-ring-buffer")]

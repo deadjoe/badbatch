@@ -5,9 +5,9 @@
 //! This follows the exact design from the original LMAX Disruptor WaitStrategy interface.
 
 use crate::disruptor::{DisruptorError, Result, Sequence};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::{Condvar, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -100,7 +100,12 @@ pub trait WaitStrategy: Send + Sync + std::fmt::Debug {
             }
 
             // Try to get the sequence with a short timeout
-            match self.wait_for_with_timeout(sequence, cursor.clone(), dependent_sequences, check_interval) {
+            match self.wait_for_with_timeout(
+                sequence,
+                cursor.clone(),
+                dependent_sequences,
+                check_interval,
+            ) {
                 Ok(available_sequence) => return Ok(available_sequence),
                 Err(DisruptorError::Timeout) => {
                     // Continue loop to check shutdown flag again
@@ -327,15 +332,30 @@ impl WaitStrategy for YieldingWaitStrategy {
         cursor: Arc<Sequence>,
         dependent_sequences: &[Arc<Sequence>],
     ) -> Result<i64> {
-        // First, wait for the cursor (producer) to reach the required sequence
-        while cursor.get() < sequence {
+        let cursor_sequence = cursor.get();
+
+        // Check dependent sequences first - if they can't satisfy the requirement, fail fast
+        if !dependent_sequences.is_empty() {
+            let minimum_dependent_sequence = Sequence::get_minimum_sequence(dependent_sequences);
+            // If cursor is below the requested sequence AND dependent sequences are also below,
+            // then we can't satisfy the request
+            if cursor_sequence < sequence && minimum_dependent_sequence < sequence {
+                return Err(DisruptorError::InsufficientCapacity);
+            }
+        }
+
+        // If cursor hasn't reached the required sequence, wait for it
+        let mut available_sequence = cursor_sequence;
+        while available_sequence < sequence {
             thread::yield_now();
+            available_sequence = cursor.get();
         }
 
         // Then, wait for all dependent sequences to reach the required sequence
         if !dependent_sequences.is_empty() {
             loop {
-                let minimum_dependent_sequence = Sequence::get_minimum_sequence(dependent_sequences);
+                let minimum_dependent_sequence =
+                    Sequence::get_minimum_sequence(dependent_sequences);
                 if minimum_dependent_sequence >= sequence {
                     break;
                 }
@@ -403,11 +423,19 @@ impl WaitStrategy for YieldingWaitStrategy {
                 // Ensure we see the most up-to-date dependent sequence values
                 std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
 
-                let minimum_dependent_sequence = Sequence::get_minimum_sequence(dependent_sequences);
+                let minimum_dependent_sequence =
+                    Sequence::get_minimum_sequence(dependent_sequences);
                 if minimum_dependent_sequence >= sequence {
                     // Add an additional memory barrier to ensure we see all
                     // memory writes that happened before the sequence update
                     std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+
+                    // Add a very small delay to ensure event modifications are visible
+                    // This is critical for dependency chains to work correctly
+                    std::thread::sleep(std::time::Duration::from_nanos(100));
+
+                    // Final memory barrier to ensure complete visibility
+                    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
                     break;
                 }
                 // Check shutdown flag
@@ -449,9 +477,23 @@ impl WaitStrategy for BusySpinWaitStrategy {
         cursor: Arc<Sequence>,
         dependent_sequences: &[Arc<Sequence>],
     ) -> Result<i64> {
-        // First, wait for the cursor (producer) to reach the required sequence
-        while cursor.get() < sequence {
+        let cursor_sequence = cursor.get();
+
+        // Check dependent sequences first - if they can't satisfy the requirement, fail fast
+        if !dependent_sequences.is_empty() {
+            let minimum_dependent_sequence = Sequence::get_minimum_sequence(dependent_sequences);
+            // If cursor is below the requested sequence AND dependent sequences are also below,
+            // then we can't satisfy the request
+            if cursor_sequence < sequence && minimum_dependent_sequence < sequence {
+                return Err(DisruptorError::InsufficientCapacity);
+            }
+        }
+
+        // If cursor hasn't reached the required sequence, wait for it
+        let mut available_sequence = cursor_sequence;
+        while available_sequence < sequence {
             std::hint::spin_loop();
+            available_sequence = cursor.get();
         }
 
         // Then, wait for all dependent sequences to reach the required sequence
@@ -460,7 +502,8 @@ impl WaitStrategy for BusySpinWaitStrategy {
                 // Ensure we see the most up-to-date dependent sequence values
                 std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
 
-                let minimum_dependent_sequence = Sequence::get_minimum_sequence(dependent_sequences);
+                let minimum_dependent_sequence =
+                    Sequence::get_minimum_sequence(dependent_sequences);
 
                 // For dependency chains, we need to wait for dependent consumers to complete
                 // the current sequence before we can start processing it
@@ -535,12 +578,20 @@ impl WaitStrategy for BusySpinWaitStrategy {
                 // Ensure we see the most up-to-date dependent sequence values
                 std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
 
-                let minimum_dependent_sequence = Sequence::get_minimum_sequence(dependent_sequences);
+                let minimum_dependent_sequence =
+                    Sequence::get_minimum_sequence(dependent_sequences);
 
                 if minimum_dependent_sequence >= sequence {
                     // Add an additional memory barrier to ensure we see all
                     // memory writes that happened before the sequence update
                     std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+
+                    // Add a very small delay to ensure event modifications are visible
+                    // This is critical for dependency chains to work correctly
+                    std::thread::sleep(std::time::Duration::from_nanos(100));
+
+                    // Final memory barrier to ensure complete visibility
+                    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
                     break;
                 }
                 // Check shutdown flag
@@ -613,6 +664,37 @@ impl WaitStrategy for SleepingWaitStrategy {
                 available_sequence = cursor.get();
                 available_sequence < sequence
             } {
+                thread::sleep(self.sleep_duration);
+            }
+        }
+
+        Ok(available_sequence)
+    }
+
+    fn wait_for_with_shutdown(
+        &self,
+        sequence: i64,
+        cursor: Arc<Sequence>,
+        dependent_sequences: &[Arc<Sequence>],
+        shutdown_flag: &AtomicBool,
+    ) -> Result<i64> {
+        let mut available_sequence = cursor.get();
+
+        if available_sequence < sequence {
+            // Check dependent sequences
+            let minimum_sequence = Sequence::get_minimum_sequence(dependent_sequences);
+            if minimum_sequence < sequence {
+                return Err(DisruptorError::InsufficientCapacity);
+            }
+
+            while {
+                available_sequence = cursor.get();
+                available_sequence < sequence
+            } {
+                // Check shutdown flag before sleeping
+                if shutdown_flag.load(Ordering::Acquire) {
+                    return Err(DisruptorError::Alert);
+                }
                 thread::sleep(self.sleep_duration);
             }
         }

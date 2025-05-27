@@ -14,9 +14,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 // BadBatch Disruptor imports
-use badbatch::disruptor::{
-    build_multi_producer, build_single_producer, BusySpinWaitStrategy, Producer,
-};
+use badbatch::disruptor::{build_multi_producer, build_single_producer, BusySpinWaitStrategy};
 
 // Benchmark configuration
 const BUF_SIZE: usize = 32_768;
