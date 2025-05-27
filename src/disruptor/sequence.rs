@@ -47,12 +47,13 @@ impl Sequence {
 
     /// Get the current sequence value
     ///
-    /// Uses Acquire ordering to ensure proper synchronization with other threads.
+    /// Uses SeqCst ordering to ensure the strongest synchronization with other threads.
+    /// This is critical for dependency chains to work correctly.
     ///
     /// # Returns
     /// The current sequence value
     pub fn get(&self) -> i64 {
-        self.value.load(Ordering::Acquire)
+        self.value.load(Ordering::SeqCst)
     }
 
     /// Set the sequence value

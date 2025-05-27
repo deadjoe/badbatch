@@ -5,6 +5,7 @@
 //! and provides lock-free access through careful use of memory barriers.
 
 use crate::disruptor::{is_power_of_two, DisruptorError, EventFactory, Result};
+use crate::disruptor::core_interfaces::DataProvider;
 use std::cell::UnsafeCell;
 
 #[cfg(feature = "shared-ring-buffer")]
@@ -255,6 +256,19 @@ where
 // Ensure RingBuffer is Send and Sync for multi-threading
 unsafe impl<T: Send + Sync> Send for RingBuffer<T> {}
 unsafe impl<T: Send + Sync> Sync for RingBuffer<T> {}
+
+/// Implementation of DataProvider trait for RingBuffer
+///
+/// This allows RingBuffer to be used as a data provider in the core interfaces,
+/// providing a clean abstraction for data access.
+impl<T> DataProvider<T> for RingBuffer<T>
+where
+    T: Send + Sync,
+{
+    fn get(&self, sequence: i64) -> &T {
+        self.get(sequence)
+    }
+}
 
 /// A thread-safe wrapper around the ring buffer
 ///
