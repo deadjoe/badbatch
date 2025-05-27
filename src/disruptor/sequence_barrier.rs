@@ -75,30 +75,16 @@ pub trait SequenceBarrier: Send + Sync {
     /// # Errors
     /// Returns `DisruptorError::Alert` if shutdown is signaled or barrier is alerted
     fn wait_for_with_shutdown(&self, sequence: i64, shutdown_flag: &AtomicBool) -> Result<i64> {
-        // Default implementation that periodically checks shutdown flag
-        loop {
-            // Check shutdown flag first
-            if shutdown_flag.load(Ordering::Acquire) {
-                return Err(DisruptorError::Alert);
-            }
-
-            // Check if we're alerted
-            self.check_alert()?;
-
-            // Try to wait for the sequence (this might block)
-            match self.wait_for(sequence) {
-                Ok(available_sequence) => return Ok(available_sequence),
-                Err(DisruptorError::Alert) => {
-                    // Check if it's due to shutdown or barrier alert
-                    if shutdown_flag.load(Ordering::Acquire) {
-                        return Err(DisruptorError::Alert);
-                    }
-                    // If it's a barrier alert, re-throw
-                    return Err(DisruptorError::Alert);
-                }
-                Err(e) => return Err(e),
-            }
+        // Check shutdown flag first
+        if shutdown_flag.load(Ordering::Acquire) {
+            return Err(DisruptorError::Alert);
         }
+
+        // Check if we're alerted
+        self.check_alert()?;
+
+        // Try to wait for the sequence (this might block)
+        self.wait_for(sequence)
     }
 }
 

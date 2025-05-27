@@ -6,12 +6,15 @@
 use crate::disruptor::{
     event_factory::ClosureEventFactory,
     producer::{Producer, SimpleProducer},
+    sequence_barrier::{ProcessingSequenceBarrier, SimpleSequenceBarrier},
     sequencer::{MultiProducerSequencer, SingleProducerSequencer},
-    EventHandler, RingBuffer, Sequencer, WaitStrategy, Sequence, SequenceBarrier,
-    sequence_barrier::{SimpleSequenceBarrier, ProcessingSequenceBarrier},
+    EventHandler, RingBuffer, Sequence, SequenceBarrier, Sequencer, WaitStrategy,
 };
 use std::marker::PhantomData;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread::{self, JoinHandle};
 
 /// Core Disruptor components shared between DSL and Builder APIs
@@ -64,7 +67,10 @@ where
         for mut consumer in self.consumers.drain(..) {
             if let Some(handle) = consumer.join_handle.take() {
                 if let Err(e) = handle.join() {
-                    eprintln!("Error joining consumer thread '{}': {:?}", consumer.thread_name, e);
+                    eprintln!(
+                        "Error joining consumer thread '{}': {:?}",
+                        consumer.thread_name, e
+                    );
                 }
             }
         }
@@ -94,9 +100,8 @@ where
 {
     // Create the ring buffer
     let closure_factory = ClosureEventFactory::new(event_factory);
-    let ring_buffer = Arc::new(
-        RingBuffer::new(size, closure_factory).expect("Failed to create ring buffer"),
-    );
+    let ring_buffer =
+        Arc::new(RingBuffer::new(size, closure_factory).expect("Failed to create ring buffer"));
 
     // Create the appropriate sequencer
     let sequencer: Arc<dyn Sequencer> = if is_multi_producer {
@@ -118,24 +123,30 @@ where
     let mut consumer_threads: Vec<Consumer> = Vec::new();
     let mut consumer_sequences: Vec<Arc<Sequence>> = Vec::new();
 
-    for (_consumer_index, mut consumer_info) in consumers.into_iter().enumerate() {
+    for mut consumer_info in consumers.into_iter() {
         // Resolve dependencies: replace placeholder sequences with actual consumer sequences
         if !consumer_info.dependent_sequences.is_empty() {
             let mut actual_dependencies = Vec::new();
             let dependency_count = consumer_info.dependent_sequences.len();
 
-            // Take the last N consumer sequences as dependencies
-            let start_index = if consumer_sequences.len() >= dependency_count {
-                consumer_sequences.len() - dependency_count
+            // For dependency chains, take only the immediately previous consumer
+            // This ensures A -> B -> C dependency chain where B depends on A, C depends on B
+            if dependency_count == 1 && !consumer_sequences.is_empty() {
+                // Take only the last consumer sequence (immediately previous consumer)
+                let last_index = consumer_sequences.len() - 1;
+                actual_dependencies.push(consumer_sequences[last_index].clone());
             } else {
-                0
-            };
+                // Fallback: take the last N consumer sequences as dependencies
+                let start_index = if consumer_sequences.len() >= dependency_count {
+                    consumer_sequences.len() - dependency_count
+                } else {
+                    0
+                };
 
-            for i in start_index..consumer_sequences.len() {
-                actual_dependencies.push(consumer_sequences[i].clone());
+                for sequence in consumer_sequences.iter().skip(start_index) {
+                    actual_dependencies.push(sequence.clone());
+                }
             }
-
-
 
             consumer_info.dependent_sequences = actual_dependencies;
         }
@@ -348,8 +359,10 @@ where
             // Set CPU affinity if specified
             if let Some(core_id) = cpu_affinity {
                 if let Err(e) = set_thread_affinity(core_id) {
-                    eprintln!("Warning: Failed to set CPU affinity for thread '{}' to core {}: {}",
-                             thread_name, core_id, e);
+                    eprintln!(
+                        "Warning: Failed to set CPU affinity for thread '{}' to core {}: {}",
+                        thread_name, core_id, e
+                    );
                 }
             }
 
@@ -367,15 +380,21 @@ where
                 match sequence_barrier.wait_for_with_shutdown(next_sequence, &shutdown_flag) {
                     Ok(available_sequence) => {
                         // Process all available events
-                        while next_sequence <= available_sequence && !shutdown_flag.load(Ordering::Acquire) {
+                        while next_sequence <= available_sequence
+                            && !shutdown_flag.load(Ordering::Acquire)
+                        {
                             let end_of_batch = next_sequence == available_sequence;
 
                             // Get the event from the ring buffer
                             // SAFETY: We have exclusive access to this sequence range
-                            let event = unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
+                            let event =
+                                unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
 
                             // Process the event
-                            if let Err(_) = event_handler.on_event(event, next_sequence, end_of_batch) {
+                            if event_handler
+                                .on_event(event, next_sequence, end_of_batch)
+                                .is_err()
+                            {
                                 // TODO: Handle exceptions properly
                                 break;
                             }
@@ -436,10 +455,7 @@ where
 {
     fn new(core: DisruptorCore<E>) -> Self {
         let producer = core.create_producer();
-        Self {
-            core,
-            producer,
-        }
+        Self { core, producer }
     }
 
     /// Get a reference to the producer
@@ -588,7 +604,10 @@ where
     }
 
     /// Add a dependent event handler that waits for previous consumers (closure-based)
-    pub fn handle_events_with<H>(mut self, handler: H) -> SingleProducerBuilder<HasConsumers, E, F, W>
+    pub fn handle_events_with<H>(
+        mut self,
+        handler: H,
+    ) -> SingleProducerBuilder<HasConsumers, E, F, W>
     where
         H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
     {
@@ -613,7 +632,10 @@ where
     }
 
     /// Add a dependent stateful event handler that waits for previous consumers
-    pub fn handle_events_with_handler<H>(mut self, handler: H) -> SingleProducerBuilder<HasConsumers, E, F, W>
+    pub fn handle_events_with_handler<H>(
+        mut self,
+        handler: H,
+    ) -> SingleProducerBuilder<HasConsumers, E, F, W>
     where
         H: EventHandler<E> + Send + Sync + 'static,
     {
@@ -806,10 +828,10 @@ where
         self
     }
 
-    /// Create a dependency chain - the next consumer will depend on all previous consumers
+    /// Create a dependency chain - the next consumer will depend on the previous consumer
     ///
     /// This method allows creating consumer dependency chains similar to disruptor-rs.
-    /// The next consumer added will wait for all previously added consumers to complete
+    /// The next consumer added will wait for the immediately previous consumer to complete
     /// before processing events.
     ///
     /// # Examples
@@ -825,8 +847,9 @@ where
     ///     })
     /// ```
     pub fn and_then(self) -> DependentConsumerBuilder<E, F, W> {
-        // Mark that the next consumer should depend on all current consumers
-        let dependency_count = self.shared.consumers.len();
+        // Mark that the next consumer should depend on only the previous consumer
+        // In a dependency chain: A -> B -> C, B depends on A, C depends on B
+        let dependency_count = 1; // Only depend on the immediately previous consumer
 
         DependentConsumerBuilder {
             builder: self,
@@ -959,7 +982,8 @@ where
         // Create the ring buffer with a closure event factory
         let closure_factory = ClosureEventFactory::new(self.event_factory);
         let ring_buffer = Arc::new(
-            RingBuffer::new(self.shared.size, closure_factory).expect("Failed to create ring buffer"),
+            RingBuffer::new(self.shared.size, closure_factory)
+                .expect("Failed to create ring buffer"),
         );
 
         // Create a multi producer sequencer
@@ -1291,6 +1315,7 @@ mod tests {
     #[test]
     fn test_builder_with_different_wait_strategies() {
         use crate::disruptor::wait_strategy::{SleepingWaitStrategy, YieldingWaitStrategy};
+        use std::time::Duration;
 
         let (tx1, rx1) = mpsc::channel();
         let (tx2, rx2) = mpsc::channel();
@@ -1322,9 +1347,29 @@ mod tests {
             .build();
 
         // Test with SleepingWaitStrategy
-        let mut disruptor3 = build_single_producer(8, test_event_factory, SleepingWaitStrategy::new())
-            .handle_events_with(handler3)
-            .build();
+        let mut disruptor3 =
+            build_single_producer(8, test_event_factory, SleepingWaitStrategy::new())
+                .handle_events_with(handler3)
+                .build();
+
+        // Publish a single event to each disruptor to ensure they're working
+        disruptor1.publish(|event| {
+            event.value = 1;
+            event.data = "test1".to_string();
+        });
+
+        disruptor2.publish(|event| {
+            event.value = 2;
+            event.data = "test2".to_string();
+        });
+
+        disruptor3.publish(|event| {
+            event.value = 3;
+            event.data = "test3".to_string();
+        });
+
+        // Give time for processing
+        std::thread::sleep(Duration::from_millis(50));
 
         // Properly shutdown all disruptors
         disruptor1.shutdown();
@@ -1340,11 +1385,12 @@ mod tests {
     fn test_builder_with_different_buffer_sizes() {
         // Test various power-of-2 sizes
         for &size in &[2, 4, 8, 16, 32, 64, 128, 256, 512, 1024] {
-            let mut disruptor = build_single_producer(size, test_event_factory, BusySpinWaitStrategy)
-                .handle_events_with(move |event: &mut TestEvent, sequence: i64, _: bool| {
-                    event.value = sequence;
-                })
-                .build();
+            let mut disruptor =
+                build_single_producer(size, test_event_factory, BusySpinWaitStrategy)
+                    .handle_events_with(move |event: &mut TestEvent, sequence: i64, _: bool| {
+                        event.value = sequence;
+                    })
+                    .build();
 
             // Properly shutdown the disruptor
             disruptor.shutdown();
@@ -1417,9 +1463,12 @@ mod tests {
 
     #[test]
     fn test_disruptor_handle_publishing() {
-        let mut disruptor_handle = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
-            .handle_events_with(|_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {})
-            .build();
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .handle_events_with(
+                    |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {},
+                )
+                .build();
 
         // Test single event publishing
         disruptor_handle.publish(|event| {
@@ -1442,12 +1491,15 @@ mod tests {
     #[test]
     fn test_disruptor_handle_shutdown() {
         // Create a disruptor with a simple event handler that doesn't block
-        let mut disruptor_handle = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
-            .thread_name("test-consumer")
-            .handle_events_with(|_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
-                // Simple handler that doesn't block
-            })
-            .build();
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .thread_name("test-consumer")
+                .handle_events_with(
+                    |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        // Simple handler that doesn't block
+                    },
+                )
+                .build();
 
         // Verify we have one consumer
         assert_eq!(disruptor_handle.consumer_count(), 1);
@@ -1472,9 +1524,11 @@ mod tests {
         // Create a disruptor with a simple event handler
         let disruptor_handle = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
             .thread_name("test-consumer")
-            .handle_events_with(|_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
-                // Simple handler
-            })
+            .handle_events_with(
+                |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                    // Simple handler
+                },
+            )
             .build();
 
         // Convert to producer (this should shutdown consumer threads)
@@ -1542,7 +1596,10 @@ mod tests {
         assert!(result2.is_ok());
 
         println!("Builder API completeness test passed!");
-        println!("Single producer builder: {} consumers", builder.shared.consumers.len());
+        println!(
+            "Single producer builder: {} consumers",
+            builder.shared.consumers.len()
+        );
         println!("Multi producer builder: {} consumers", multi_consumer_count);
     }
 
@@ -1550,13 +1607,14 @@ mod tests {
     #[test]
     fn test_api_comparison_with_disruptor_rs() {
         // BadBatch API style (current implementation)
-        let mut bad_batch_disruptor = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
-            .pin_at_core(0)
-            .thread_name("badBatch-consumer")
-            .handle_events_with(|event: &mut TestEvent, sequence: i64, _: bool| {
-                event.value = sequence;
-            })
-            .build();
+        let mut bad_batch_disruptor =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .pin_at_core(0)
+                .thread_name("badBatch-consumer")
+                .handle_events_with(|event: &mut TestEvent, sequence: i64, _: bool| {
+                    event.value = sequence;
+                })
+                .build();
 
         // BadBatch provides DisruptorHandle with lifecycle management
         assert_eq!(bad_batch_disruptor.consumer_count(), 1);
@@ -1592,12 +1650,15 @@ mod tests {
         use std::time::Duration;
 
         // Create a disruptor with BusySpinWaitStrategy (the problematic one)
-        let mut disruptor_handle = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
-            .thread_name("shutdown-test-consumer")
-            .handle_events_with(|_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
-                // Simple handler that doesn't block
-            })
-            .build();
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .thread_name("shutdown-test-consumer")
+                .handle_events_with(
+                    |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        // Simple handler that doesn't block
+                    },
+                )
+                .build();
 
         // Verify we have one consumer
         assert_eq!(disruptor_handle.consumer_count(), 1);
@@ -1608,7 +1669,11 @@ mod tests {
         let elapsed = start.elapsed();
 
         // Shutdown should complete within a reasonable time (much less than before)
-        assert!(elapsed < Duration::from_secs(2), "Shutdown took too long: {:?}", elapsed);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "Shutdown took too long: {:?}",
+            elapsed
+        );
 
         println!("Shutdown completed successfully in {:?}", elapsed);
     }
@@ -1618,19 +1683,26 @@ mod tests {
         use std::time::Duration;
 
         // Test with YieldingWaitStrategy
-        let mut disruptor_handle = build_single_producer(8, test_event_factory, YieldingWaitStrategy)
-            .thread_name("yielding-test-consumer")
-            .handle_events_with(|_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
-                // Simple handler
-            })
-            .build();
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, YieldingWaitStrategy)
+                .thread_name("yielding-test-consumer")
+                .handle_events_with(
+                    |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        // Simple handler
+                    },
+                )
+                .build();
 
         // Shutdown should complete quickly
         let start = std::time::Instant::now();
         disruptor_handle.shutdown();
         let elapsed = start.elapsed();
 
-        assert!(elapsed < Duration::from_secs(2), "YieldingWaitStrategy shutdown took too long: {:?}", elapsed);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "YieldingWaitStrategy shutdown took too long: {:?}",
+            elapsed
+        );
 
         println!("YieldingWaitStrategy shutdown completed in {:?}", elapsed);
     }
@@ -1647,23 +1719,31 @@ mod tests {
         let counter2_clone = counter2.clone();
 
         // Create a disruptor with dependency chain
-        let mut disruptor_handle = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
-            .thread_name("first-consumer")
-            .handle_events_with(move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
-                // First consumer processes events
-                event.value += 1;
-                counter1_clone.fetch_add(1, Ordering::SeqCst);
-                // Small delay to ensure ordering
-                std::thread::sleep(Duration::from_millis(1));
-            })
-            .and_then()
-            .thread_name("second-consumer")
-            .handle_events_with(move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
-                // Second consumer should see the modified value from first consumer
-                assert!(event.value > 0, "Second consumer should see modified value from first consumer");
-                counter2_clone.fetch_add(1, Ordering::SeqCst);
-            })
-            .build();
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .thread_name("first-consumer")
+                .handle_events_with(
+                    move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        // First consumer processes events
+                        event.value += 1;
+                        counter1_clone.fetch_add(1, Ordering::SeqCst);
+                        // Small delay to ensure ordering
+                        std::thread::sleep(Duration::from_millis(1));
+                    },
+                )
+                .and_then()
+                .thread_name("second-consumer")
+                .handle_events_with(
+                    move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        // Second consumer should see the modified value from first consumer
+                        assert!(
+                            event.value > 0,
+                            "Second consumer should see modified value from first consumer"
+                        );
+                        counter2_clone.fetch_add(1, Ordering::SeqCst);
+                    },
+                )
+                .build();
 
         // Verify we have two consumers
         assert_eq!(disruptor_handle.consumer_count(), 2);
@@ -1682,8 +1762,16 @@ mod tests {
         disruptor_handle.shutdown();
 
         // Verify both consumers processed the events
-        assert_eq!(counter1.load(Ordering::SeqCst), 5, "First consumer should process all events");
-        assert_eq!(counter2.load(Ordering::SeqCst), 5, "Second consumer should process all events");
+        assert_eq!(
+            counter1.load(Ordering::SeqCst),
+            5,
+            "First consumer should process all events"
+        );
+        assert_eq!(
+            counter2.load(Ordering::SeqCst),
+            5,
+            "Second consumer should process all events"
+        );
 
         println!("Dependency chain test completed successfully");
     }
@@ -1701,7 +1789,12 @@ mod tests {
         }
 
         impl EventHandler<TestEvent> for CountingEventHandler {
-            fn on_event(&mut self, event: &mut TestEvent, _sequence: i64, _end_of_batch: bool) -> crate::disruptor::Result<()> {
+            fn on_event(
+                &mut self,
+                event: &mut TestEvent,
+                _sequence: i64,
+                _end_of_batch: bool,
+            ) -> crate::disruptor::Result<()> {
                 self.counter += 1;
                 event.value = self.counter as i64; // Set the event value to our internal counter
                 self.total_processed.fetch_add(1, Ordering::SeqCst);
@@ -1714,7 +1807,10 @@ mod tests {
             }
 
             fn on_shutdown(&mut self) -> crate::disruptor::Result<()> {
-                println!("CountingEventHandler shutdown, processed {} events", self.counter);
+                println!(
+                    "CountingEventHandler shutdown, processed {} events",
+                    self.counter
+                );
                 Ok(())
             }
         }
@@ -1723,13 +1819,14 @@ mod tests {
         let total_processed_clone = total_processed.clone();
 
         // Create a disruptor with a stateful event handler
-        let mut disruptor_handle = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
-            .thread_name("stateful-consumer")
-            .handle_events_with_handler(CountingEventHandler {
-                counter: 0,
-                total_processed: total_processed_clone,
-            })
-            .build();
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .thread_name("stateful-consumer")
+                .handle_events_with_handler(CountingEventHandler {
+                    counter: 0,
+                    total_processed: total_processed_clone,
+                })
+                .build();
 
         // Verify we have one consumer
         assert_eq!(disruptor_handle.consumer_count(), 1);
@@ -1748,7 +1845,11 @@ mod tests {
         disruptor_handle.shutdown();
 
         // Verify the stateful handler processed all events
-        assert_eq!(total_processed.load(Ordering::SeqCst), 10, "Stateful handler should process all events");
+        assert_eq!(
+            total_processed.load(Ordering::SeqCst),
+            10,
+            "Stateful handler should process all events"
+        );
 
         println!("Stateful event handler test completed successfully");
     }
@@ -1767,11 +1868,19 @@ mod tests {
         }
 
         impl EventHandler<TestEvent> for StatefulHandler {
-            fn on_event(&mut self, event: &mut TestEvent, _sequence: i64, _end_of_batch: bool) -> crate::disruptor::Result<()> {
+            fn on_event(
+                &mut self,
+                event: &mut TestEvent,
+                _sequence: i64,
+                _end_of_batch: bool,
+            ) -> crate::disruptor::Result<()> {
                 self.counter += 1;
                 event.value += 100; // Add 100 to distinguish from closure handler
                 self.total.fetch_add(1, Ordering::SeqCst);
-                println!("StatefulHandler {} processed event, counter: {}", self.id, self.counter);
+                println!(
+                    "StatefulHandler {} processed event, counter: {}",
+                    self.id, self.counter
+                );
                 Ok(())
             }
         }
@@ -1782,19 +1891,22 @@ mod tests {
         let closure_total_clone = closure_total.clone();
 
         // Create a disruptor with both stateful and closure handlers
-        let mut disruptor_handle = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
-            .thread_name("stateful-handler")
-            .handle_events_with_handler(StatefulHandler {
-                id: "handler-1".to_string(),
-                counter: 0,
-                total: stateful_total_clone,
-            })
-            .thread_name("closure-handler")
-            .handle_events_with(move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
-                event.value += 1; // Add 1 to distinguish from stateful handler
-                closure_total_clone.fetch_add(1, Ordering::SeqCst);
-            })
-            .build();
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .thread_name("stateful-handler")
+                .handle_events_with_handler(StatefulHandler {
+                    id: "handler-1".to_string(),
+                    counter: 0,
+                    total: stateful_total_clone,
+                })
+                .thread_name("closure-handler")
+                .handle_events_with(
+                    move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        event.value += 1; // Add 1 to distinguish from stateful handler
+                        closure_total_clone.fetch_add(1, Ordering::SeqCst);
+                    },
+                )
+                .build();
 
         // Verify we have two consumers
         assert_eq!(disruptor_handle.consumer_count(), 2);
@@ -1813,8 +1925,16 @@ mod tests {
         disruptor_handle.shutdown();
 
         // Verify both handlers processed all events
-        assert_eq!(stateful_total.load(Ordering::SeqCst), 5, "Stateful handler should process all events");
-        assert_eq!(closure_total.load(Ordering::SeqCst), 5, "Closure handler should process all events");
+        assert_eq!(
+            stateful_total.load(Ordering::SeqCst),
+            5,
+            "Stateful handler should process all events"
+        );
+        assert_eq!(
+            closure_total.load(Ordering::SeqCst),
+            5,
+            "Closure handler should process all events"
+        );
 
         println!("Mixed handler types test completed successfully");
     }
@@ -1831,27 +1951,48 @@ mod tests {
         let stage2_count_clone = stage2_count.clone();
 
         // Create a simple 2-stage dependency chain
-        let mut disruptor_handle = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
-            .thread_name("stage1")
-            .handle_events_with(move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
-                // Stage 1: Add 100 to the value
-                println!("Stage 1 starting sequence {} (initial value: {})", sequence, event.value);
-                event.value += 100;
-                stage1_count_clone.fetch_add(1, Ordering::SeqCst);
-                println!("Stage 1 completed sequence {} (final value: {})", sequence, event.value);
-                // Small delay to ensure ordering
-                std::thread::sleep(Duration::from_millis(2));
-            })
-            .and_then()
-            .thread_name("stage2")
-            .handle_events_with(move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
-                // Stage 2: Should see the value modified by Stage 1
-                println!("Stage 2 processing sequence {} (value: {})", sequence, event.value);
-                assert!(event.value >= 100, "Stage 2 should see value modified by Stage 1, got: {}", event.value);
-                stage2_count_clone.fetch_add(1, Ordering::SeqCst);
-                println!("Stage 2 completed sequence {} (value: {})", sequence, event.value);
-            })
-            .build();
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .thread_name("stage1")
+                .handle_events_with(
+                    move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+                        // Stage 1: Add 100 to the value
+                        println!(
+                            "Stage 1 starting sequence {} (initial value: {})",
+                            sequence, event.value
+                        );
+                        event.value += 100;
+                        stage1_count_clone.fetch_add(1, Ordering::SeqCst);
+                        println!(
+                            "Stage 1 completed sequence {} (final value: {})",
+                            sequence, event.value
+                        );
+                        // Small delay to ensure ordering
+                        std::thread::sleep(Duration::from_millis(2));
+                    },
+                )
+                .and_then()
+                .thread_name("stage2")
+                .handle_events_with(
+                    move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+                        // Stage 2: Should see the value modified by Stage 1
+                        println!(
+                            "Stage 2 processing sequence {} (value: {})",
+                            sequence, event.value
+                        );
+                        assert!(
+                            event.value >= 100,
+                            "Stage 2 should see value modified by Stage 1, got: {}",
+                            event.value
+                        );
+                        stage2_count_clone.fetch_add(1, Ordering::SeqCst);
+                        println!(
+                            "Stage 2 completed sequence {} (value: {})",
+                            sequence, event.value
+                        );
+                    },
+                )
+                .build();
 
         // Verify we have two consumers
         assert_eq!(disruptor_handle.consumer_count(), 2);
@@ -1876,13 +2017,20 @@ mod tests {
         let shutdown_duration = shutdown_start.elapsed();
 
         // Verify shutdown was fast
-        assert!(shutdown_duration < Duration::from_secs(3), "Shutdown took too long: {:?}", shutdown_duration);
+        assert!(
+            shutdown_duration < Duration::from_secs(3),
+            "Shutdown took too long: {:?}",
+            shutdown_duration
+        );
 
         // Verify both stages processed all events
         let stage1_processed = stage1_count.load(Ordering::SeqCst);
         let stage2_processed = stage2_count.load(Ordering::SeqCst);
 
-        println!("Stage 1 processed: {}, Stage 2 processed: {}", stage1_processed, stage2_processed);
+        println!(
+            "Stage 1 processed: {}, Stage 2 processed: {}",
+            stage1_processed, stage2_processed
+        );
 
         assert_eq!(stage1_processed, 1, "Stage 1 should process 1 event");
         assert_eq!(stage2_processed, 1, "Stage 2 should process 1 event");
@@ -1958,12 +2106,255 @@ mod tests {
         let stage1_processed = stage1_count.load(Ordering::SeqCst);
         let stage2_processed = stage2_count.load(Ordering::SeqCst);
 
-        println!("📊 Final counts: Stage 1={}, Stage 2={}", stage1_processed, stage2_processed);
+        println!(
+            "📊 Final counts: Stage 1={}, Stage 2={}",
+            stage1_processed, stage2_processed
+        );
 
         assert_eq!(stage1_processed, 1, "Stage 1 should process 1 event");
         assert_eq!(stage2_processed, 1, "Stage 2 should process 1 event");
 
         println!("✅ Dependency chain debug test completed successfully!");
+    }
+
+    #[test]
+    fn test_four_stage_dependency_chain() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        println!("🔍 Starting 4-stage dependency chain test...");
+
+        let stage_counts = [
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+        ];
+
+        let validation_count = stage_counts[0].clone();
+        let transformation_count = stage_counts[1].clone();
+        let enrichment_count = stage_counts[2].clone();
+        let final_count = stage_counts[3].clone();
+
+        // Create a 4-stage dependency chain: validation -> transformation -> enrichment -> final
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .thread_name("validation")
+                .handle_events_with(
+                    move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+                        println!(
+                            "🔵 Validation: sequence={}, value={}",
+                            sequence, event.value
+                        );
+                        event.data = "|validated".to_string();
+                        validation_count.fetch_add(1, Ordering::SeqCst);
+                        println!("🔵 Validation DONE: sequence={}", sequence);
+                    },
+                )
+                .and_then()
+                .thread_name("transformation")
+                .handle_events_with(
+                    move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+                        println!(
+                            "🟡 Transformation: sequence={}, data={}",
+                            sequence, event.data
+                        );
+                        if !event.data.contains("|validated") {
+                            panic!(
+                                "Transformation stage should see validated data, got: {}",
+                                event.data
+                            );
+                        }
+                        event.data.push_str("|transformed");
+                        event.value *= 2;
+                        transformation_count.fetch_add(1, Ordering::SeqCst);
+                        println!("🟡 Transformation DONE: sequence={}", sequence);
+                    },
+                )
+                .and_then()
+                .thread_name("enrichment")
+                .handle_events_with(
+                    move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+                        println!("🟠 Enrichment: sequence={}, data={}", sequence, event.data);
+                        if !event.data.contains("|transformed") {
+                            panic!(
+                                "Enrichment stage should see transformed data, got: {}",
+                                event.data
+                            );
+                        }
+                        event.data.push_str("|enriched");
+                        event.value += 1000;
+                        enrichment_count.fetch_add(1, Ordering::SeqCst);
+                        println!("🟠 Enrichment DONE: sequence={}", sequence);
+                    },
+                )
+                .and_then()
+                .thread_name("final")
+                .handle_events_with(
+                    move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+                        println!("🟢 Final: sequence={}, data={}", sequence, event.data);
+                        if !event.data.contains("|enriched") {
+                            panic!("Final stage should see enriched data, got: {}", event.data);
+                        }
+                        final_count.fetch_add(1, Ordering::SeqCst);
+                        println!("🟢 Final DONE: sequence={}", sequence);
+                    },
+                )
+                .build();
+
+        println!("📊 Created 4-stage dependency chain");
+        assert_eq!(disruptor_handle.consumer_count(), 4);
+
+        // Publish a few events with delays
+        let num_events = 3;
+        println!("📤 Publishing {} events...", num_events);
+
+        for i in 0..num_events {
+            disruptor_handle.publish(|event| {
+                event.value = i;
+                event.data = String::new();
+            });
+            println!("📤 Published event {}", i);
+
+            // Small delay between publications
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Give time for processing
+        println!("⏳ Waiting for processing...");
+        std::thread::sleep(Duration::from_millis(200));
+
+        println!("🛑 Shutting down...");
+        disruptor_handle.shutdown();
+
+        // Verify all stages processed all events
+        for (stage_idx, count) in stage_counts.iter().enumerate() {
+            let processed = count.load(Ordering::SeqCst);
+            println!("📊 Stage {} processed: {}", stage_idx, processed);
+            assert_eq!(
+                processed, num_events as usize,
+                "Stage {} should process all {} events",
+                stage_idx, num_events
+            );
+        }
+
+        println!("✅ 4-stage dependency chain test completed successfully!");
+    }
+
+    #[test]
+    fn test_dependency_chain_validation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        println!("🔍 Starting dependency chain validation test...");
+
+        let stage1_count = Arc::new(AtomicUsize::new(0));
+        let stage2_count = Arc::new(AtomicUsize::new(0));
+        let stage3_count = Arc::new(AtomicUsize::new(0));
+
+        let stage1_count_clone = stage1_count.clone();
+        let stage2_count_clone = stage2_count.clone();
+        let stage3_count_clone = stage3_count.clone();
+
+        // Create a simple 3-stage dependency chain with validation
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .thread_name("stage1")
+                .handle_events_with(
+                    move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+                        println!("🔵 Stage1: seq={}, value={}", sequence, event.value);
+                        event.data = "|stage1".to_string();
+                        stage1_count_clone.fetch_add(1, Ordering::SeqCst);
+                        println!("🔵 Stage1 DONE: seq={}", sequence);
+                    },
+                )
+                .and_then()
+                .thread_name("stage2")
+                .handle_events_with(
+                    move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+                        println!("🟡 Stage2: seq={}, data={}", sequence, event.data);
+                        // Validate that stage1 processed this event
+                        if !event.data.contains("|stage1") {
+                            panic!("Stage2 should see stage1 data, got: {}", event.data);
+                        }
+                        event.data.push_str("|stage2");
+                        stage2_count_clone.fetch_add(1, Ordering::SeqCst);
+                        println!("🟡 Stage2 DONE: seq={}", sequence);
+                    },
+                )
+                .and_then()
+                .thread_name("stage3")
+                .handle_events_with(
+                    move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+                        println!("🟢 Stage3: seq={}, data={}", sequence, event.data);
+                        // Validate that both stage1 and stage2 processed this event
+                        if !event.data.contains("|stage1") {
+                            panic!("Stage3 should see stage1 data, got: {}", event.data);
+                        }
+                        if !event.data.contains("|stage2") {
+                            panic!("Stage3 should see stage2 data, got: {}", event.data);
+                        }
+                        event.data.push_str("|stage3");
+                        stage3_count_clone.fetch_add(1, Ordering::SeqCst);
+                        println!("🟢 Stage3 DONE: seq={}", sequence);
+                    },
+                )
+                .build();
+
+        println!("📊 Created 3-stage dependency chain");
+        assert_eq!(disruptor_handle.consumer_count(), 3);
+
+        // Publish events one by one with delays
+        let num_events = 5;
+        println!("📤 Publishing {} events...", num_events);
+
+        for i in 0..num_events {
+            disruptor_handle.publish(|event| {
+                event.value = i;
+                event.data = String::new();
+            });
+            println!("📤 Published event {}", i);
+
+            // Small delay between publications to reduce contention
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // Give time for processing
+        println!("⏳ Waiting for processing...");
+        std::thread::sleep(Duration::from_millis(300));
+
+        println!("🛑 Shutting down...");
+        disruptor_handle.shutdown();
+
+        // Verify all stages processed all events
+        let stage1_processed = stage1_count.load(Ordering::SeqCst);
+        let stage2_processed = stage2_count.load(Ordering::SeqCst);
+        let stage3_processed = stage3_count.load(Ordering::SeqCst);
+
+        println!(
+            "📊 Final counts: Stage1={}, Stage2={}, Stage3={}",
+            stage1_processed, stage2_processed, stage3_processed
+        );
+
+        assert_eq!(
+            stage1_processed, num_events as usize,
+            "Stage1 should process all {} events",
+            num_events
+        );
+        assert_eq!(
+            stage2_processed, num_events as usize,
+            "Stage2 should process all {} events",
+            num_events
+        );
+        assert_eq!(
+            stage3_processed, num_events as usize,
+            "Stage3 should process all {} events",
+            num_events
+        );
+
+        println!("✅ Dependency chain validation test completed successfully!");
     }
 
     #[test]
@@ -1980,36 +2371,53 @@ mod tests {
         let stage2_count_clone = stage2_count.clone();
 
         // Create a 2-stage dependency chain with slower processing to reduce race conditions
-        let mut disruptor_handle = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
-            .thread_name("robust-stage1")
-            .handle_events_with(move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
-                println!("🔵 Stage 1: sequence={}, initial_value={}", sequence, event.value);
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .thread_name("robust-stage1")
+                .handle_events_with(
+                    move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+                        println!(
+                            "🔵 Stage 1: sequence={}, initial_value={}",
+                            sequence, event.value
+                        );
 
-                // Modify the event
-                let original_value = event.value;
-                event.value = original_value + 1000;
+                        // Modify the event
+                        let original_value = event.value;
+                        event.value = original_value + 1000;
 
-                // Add a longer delay to ensure proper ordering
-                std::thread::sleep(Duration::from_millis(10));
+                        // Add a longer delay to ensure proper ordering
+                        std::thread::sleep(Duration::from_millis(10));
 
-                stage1_count_clone.fetch_add(1, Ordering::SeqCst);
-                println!("🔵 Stage 1 DONE: sequence={}, final_value={}", sequence, event.value);
-            })
-            .and_then()
-            .thread_name("robust-stage2")
-            .handle_events_with(move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
-                println!("🟢 Stage 2: sequence={}, value={}", sequence, event.value);
+                        stage1_count_clone.fetch_add(1, Ordering::SeqCst);
+                        println!(
+                            "🔵 Stage 1 DONE: sequence={}, final_value={}",
+                            sequence, event.value
+                        );
+                    },
+                )
+                .and_then()
+                .thread_name("robust-stage2")
+                .handle_events_with(
+                    move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+                        println!("🟢 Stage 2: sequence={}, value={}", sequence, event.value);
 
-                // Verify we see the modification from Stage 1
-                if event.value < 1000 {
-                    println!("❌ DEPENDENCY VIOLATION: sequence={}, saw {} (should be >= 1000)", sequence, event.value);
-                    panic!("Dependency chain violation at sequence {}: saw {}", sequence, event.value);
-                }
+                        // Verify we see the modification from Stage 1
+                        if event.value < 1000 {
+                            println!(
+                                "❌ DEPENDENCY VIOLATION: sequence={}, saw {} (should be >= 1000)",
+                                sequence, event.value
+                            );
+                            panic!(
+                                "Dependency chain violation at sequence {}: saw {}",
+                                sequence, event.value
+                            );
+                        }
 
-                stage2_count_clone.fetch_add(1, Ordering::SeqCst);
-                println!("🟢 Stage 2 DONE: sequence={}", sequence);
-            })
-            .build();
+                        stage2_count_clone.fetch_add(1, Ordering::SeqCst);
+                        println!("🟢 Stage 2 DONE: sequence={}", sequence);
+                    },
+                )
+                .build();
 
         println!("📊 Created robust 2-stage pipeline");
         assert_eq!(disruptor_handle.consumer_count(), 2);
@@ -2040,13 +2448,27 @@ mod tests {
         let stage1_processed = stage1_count.load(Ordering::SeqCst);
         let stage2_processed = stage2_count.load(Ordering::SeqCst);
 
-        println!("📊 Final counts: Stage 1={}, Stage 2={}", stage1_processed, stage2_processed);
+        println!(
+            "📊 Final counts: Stage 1={}, Stage 2={}",
+            stage1_processed, stage2_processed
+        );
 
-        assert_eq!(stage1_processed, num_events as usize, "Stage 1 should process all {} events", num_events);
-        assert_eq!(stage2_processed, num_events as usize, "Stage 2 should process all {} events", num_events);
+        assert_eq!(
+            stage1_processed, num_events as usize,
+            "Stage 1 should process all {} events",
+            num_events
+        );
+        assert_eq!(
+            stage2_processed, num_events as usize,
+            "Stage 2 should process all {} events",
+            num_events
+        );
 
         println!("✅ Robust dependency chain test completed successfully!");
-        println!("   All {} events processed correctly through dependency chain", num_events);
+        println!(
+            "   All {} events processed correctly through dependency chain",
+            num_events
+        );
     }
 
     #[test]
@@ -2058,17 +2480,23 @@ mod tests {
         // Test all three improvements together (without complex dependency logic)
 
         // 1. Test shutdown functionality
-        let mut disruptor_handle = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
-            .thread_name("shutdown-test")
-            .handle_events_with(|_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
-                // Simple handler
-            })
-            .build();
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .thread_name("shutdown-test")
+                .handle_events_with(
+                    |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        // Simple handler
+                    },
+                )
+                .build();
 
         let shutdown_start = std::time::Instant::now();
         disruptor_handle.shutdown();
         let shutdown_duration = shutdown_start.elapsed();
-        assert!(shutdown_duration < Duration::from_secs(2), "Shutdown should be fast");
+        assert!(
+            shutdown_duration < Duration::from_secs(2),
+            "Shutdown should be fast"
+        );
         println!("✅ Shutdown test passed: {:?}", shutdown_duration);
 
         // 2. Test stateful handlers
@@ -2078,7 +2506,12 @@ mod tests {
         }
 
         impl EventHandler<TestEvent> for CountingHandler {
-            fn on_event(&mut self, event: &mut TestEvent, _sequence: i64, _end_of_batch: bool) -> crate::disruptor::Result<()> {
+            fn on_event(
+                &mut self,
+                event: &mut TestEvent,
+                _sequence: i64,
+                _end_of_batch: bool,
+            ) -> crate::disruptor::Result<()> {
                 self.count += 1;
                 event.value = self.count as i64;
                 self.total.fetch_add(1, Ordering::SeqCst);
@@ -2089,13 +2522,14 @@ mod tests {
         let total_processed = Arc::new(AtomicUsize::new(0));
         let total_processed_clone = total_processed.clone();
 
-        let mut disruptor_handle = build_single_producer(8, test_event_factory, YieldingWaitStrategy)
-            .thread_name("stateful-test")
-            .handle_events_with_handler(CountingHandler {
-                count: 0,
-                total: total_processed_clone,
-            })
-            .build();
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, YieldingWaitStrategy)
+                .thread_name("stateful-test")
+                .handle_events_with_handler(CountingHandler {
+                    count: 0,
+                    total: total_processed_clone,
+                })
+                .build();
 
         // Publish some events
         for i in 0..5 {
@@ -2116,17 +2550,22 @@ mod tests {
         let stage1_count_clone = stage1_count.clone();
         let stage2_count_clone = stage2_count.clone();
 
-        let mut disruptor_handle = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
-            .thread_name("stage1")
-            .handle_events_with(move |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
-                stage1_count_clone.fetch_add(1, Ordering::SeqCst);
-            })
-            .and_then()
-            .thread_name("stage2")
-            .handle_events_with(move |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
-                stage2_count_clone.fetch_add(1, Ordering::SeqCst);
-            })
-            .build();
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .thread_name("stage1")
+                .handle_events_with(
+                    move |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        stage1_count_clone.fetch_add(1, Ordering::SeqCst);
+                    },
+                )
+                .and_then()
+                .thread_name("stage2")
+                .handle_events_with(
+                    move |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        stage2_count_clone.fetch_add(1, Ordering::SeqCst);
+                    },
+                )
+                .build();
 
         // Verify we have two consumers
         assert_eq!(disruptor_handle.consumer_count(), 2);
@@ -2147,11 +2586,20 @@ mod tests {
 
         assert!(stage1_processed > 0, "Stage 1 should process events");
         assert!(stage2_processed > 0, "Stage 2 should process events");
-        println!("✅ and_then() structure test passed: stage1={}, stage2={}", stage1_processed, stage2_processed);
+        println!(
+            "✅ and_then() structure test passed: stage1={}, stage2={}",
+            stage1_processed, stage2_processed
+        );
 
         println!("🎉 All comprehensive validation tests passed!");
-        println!("   ✅ Shutdown fix: Fast shutdown in {:?}", shutdown_duration);
-        println!("   ✅ Stateful handlers: Processed {} events", total_processed.load(Ordering::SeqCst));
+        println!(
+            "   ✅ Shutdown fix: Fast shutdown in {:?}",
+            shutdown_duration
+        );
+        println!(
+            "   ✅ Stateful handlers: Processed {} events",
+            total_processed.load(Ordering::SeqCst)
+        );
         println!("   ✅ and_then() structure: 2-stage pipeline created");
     }
 
@@ -2167,13 +2615,16 @@ mod tests {
         let processed_count_clone = processed_count.clone();
 
         // Test Builder API (current implementation)
-        let mut builder_disruptor = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
-            .thread_name("builder-consumer")
-            .handle_events_with(move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
-                event.value = sequence + 1000;
-                processed_count_clone.fetch_add(1, Ordering::SeqCst);
-            })
-            .build();
+        let mut builder_disruptor =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .thread_name("builder-consumer")
+                .handle_events_with(
+                    move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+                        event.value = sequence + 1000;
+                        processed_count_clone.fetch_add(1, Ordering::SeqCst);
+                    },
+                )
+                .build();
 
         // Verify the builder API works
         assert_eq!(builder_disruptor.consumer_count(), 1);
@@ -2223,46 +2674,52 @@ mod tests {
         let mut disruptor = build_single_producer(64, test_event_factory, BusySpinWaitStrategy)
             // Stage 1: Data validation and enrichment
             .thread_name("stage1-validator")
-            .handle_events_with(move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
-                // Simulate data validation
-                if event.value < 0 {
-                    event.value = 0; // Fix invalid data
-                }
+            .handle_events_with(
+                move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                    // Simulate data validation
+                    if event.value < 0 {
+                        event.value = 0; // Fix invalid data
+                    }
 
-                // Enrich data
-                event.value += 100; // Add base value
-                event.data = format!("validated_{}", event.data);
+                    // Enrich data
+                    event.value += 100; // Add base value
+                    event.data = format!("validated_{}", event.data);
 
-                stage1_clone.fetch_add(1, Ordering::SeqCst);
+                    stage1_clone.fetch_add(1, Ordering::SeqCst);
 
-                // Simulate processing time
-                std::thread::sleep(Duration::from_micros(10));
-            })
+                    // Simulate processing time
+                    std::thread::sleep(Duration::from_micros(10));
+                },
+            )
             // Stage 2: Business logic processing (depends on Stage 1)
             .and_then()
             .thread_name("stage2-processor")
-            .handle_events_with(move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
-                // Apply business logic
-                event.value *= 2; // Double the value
-                event.data = format!("processed_{}", event.data);
+            .handle_events_with(
+                move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                    // Apply business logic
+                    event.value *= 2; // Double the value
+                    event.data = format!("processed_{}", event.data);
 
-                stage2_clone.fetch_add(1, Ordering::SeqCst);
+                    stage2_clone.fetch_add(1, Ordering::SeqCst);
 
-                // Simulate processing time
-                std::thread::sleep(Duration::from_micros(15));
-            })
+                    // Simulate processing time
+                    std::thread::sleep(Duration::from_micros(15));
+                },
+            )
             // Stage 3: Final output formatting (depends on Stage 2)
             .and_then()
             .thread_name("stage3-formatter")
-            .handle_events_with(move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
-                // Format for output
-                event.data = format!("final_{}_seq_{}", event.data, sequence);
+            .handle_events_with(
+                move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
+                    // Format for output
+                    event.data = format!("final_{}_seq_{}", event.data, sequence);
 
-                stage3_clone.fetch_add(1, Ordering::SeqCst);
+                    stage3_clone.fetch_add(1, Ordering::SeqCst);
 
-                // Simulate processing time
-                std::thread::sleep(Duration::from_micros(5));
-            })
+                    // Simulate processing time
+                    std::thread::sleep(Duration::from_micros(5));
+                },
+            )
             .build();
 
         println!("✅ Created 3-stage processing pipeline");
@@ -2284,7 +2741,10 @@ mod tests {
         assert_eq!(stage2_processed.load(Ordering::SeqCst), 1);
         assert_eq!(stage3_processed.load(Ordering::SeqCst), 1);
 
-        println!("   ✅ Single event processed through all 3 stages in {:?}", start_time.elapsed());
+        println!(
+            "   ✅ Single event processed through all 3 stages in {:?}",
+            start_time.elapsed()
+        );
 
         // Test 2: Batch processing
         println!("📝 Test 2: Batch processing (100 events)");
@@ -2310,8 +2770,14 @@ mod tests {
         assert_eq!(stage2_processed.load(Ordering::SeqCst), 101);
         assert_eq!(stage3_processed.load(Ordering::SeqCst), 101);
 
-        println!("   ✅ 100 events processed through all 3 stages in {:?}", batch_duration);
-        println!("   📊 Throughput: {:.2} events/ms", 100.0 / batch_duration.as_millis() as f64);
+        println!(
+            "   ✅ 100 events processed through all 3 stages in {:?}",
+            batch_duration
+        );
+        println!(
+            "   📊 Throughput: {:.2} events/ms",
+            100.0 / batch_duration.as_millis() as f64
+        );
 
         // Test 3: High-frequency publishing
         println!("📝 Test 3: High-frequency publishing (1000 events)");
@@ -2337,8 +2803,14 @@ mod tests {
         assert_eq!(stage2_processed.load(Ordering::SeqCst), 1101);
         assert_eq!(stage3_processed.load(Ordering::SeqCst), 1101);
 
-        println!("   ✅ 1000 events processed through all 3 stages in {:?}", hf_duration);
-        println!("   📊 Throughput: {:.2} events/ms", 1000.0 / hf_duration.as_millis() as f64);
+        println!(
+            "   ✅ 1000 events processed through all 3 stages in {:?}",
+            hf_duration
+        );
+        println!(
+            "   📊 Throughput: {:.2} events/ms",
+            1000.0 / hf_duration.as_millis() as f64
+        );
 
         // Test 4: Graceful shutdown
         println!("📝 Test 4: Graceful shutdown");
@@ -2348,8 +2820,14 @@ mod tests {
 
         let shutdown_duration = shutdown_start.elapsed();
 
-        println!("   ✅ Graceful shutdown completed in {:?}", shutdown_duration);
-        assert!(shutdown_duration < Duration::from_millis(500), "Shutdown should be fast");
+        println!(
+            "   ✅ Graceful shutdown completed in {:?}",
+            shutdown_duration
+        );
+        assert!(
+            shutdown_duration < Duration::from_millis(500),
+            "Shutdown should be fast"
+        );
 
         println!("🎉 End-to-end integration test completed successfully!");
         println!("   ✅ 3-stage dependency chain: Working correctly");
@@ -2357,7 +2835,10 @@ mod tests {
         println!("   ✅ Batch processing (100 events): ✅");
         println!("   ✅ High-frequency processing (1000 events): ✅");
         println!("   ✅ Graceful shutdown: ✅");
-        println!("   📊 Total events processed: {}", stage3_processed.load(Ordering::SeqCst));
+        println!(
+            "   📊 Total events processed: {}",
+            stage3_processed.load(Ordering::SeqCst)
+        );
     }
 
     #[test]
@@ -2387,13 +2868,16 @@ mod tests {
             return;
         }
 
-        let mut disruptor_handle = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
-            .thread_name("cpu-affinity-test")
-            .pin_at_core(target_core)
-            .handle_events_with(move |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
-                processed_count_clone.fetch_add(1, Ordering::SeqCst);
-            })
-            .build();
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .thread_name("cpu-affinity-test")
+                .pin_at_core(target_core)
+                .handle_events_with(
+                    move |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        processed_count_clone.fetch_add(1, Ordering::SeqCst);
+                    },
+                )
+                .build();
 
         // Publish some events
         for i in 0..5 {
@@ -2411,7 +2895,10 @@ mod tests {
         // Verify events were processed
         assert_eq!(processed_count.load(Ordering::SeqCst), 5);
 
-        println!("✅ CPU affinity test passed: Consumer pinned to core {} processed 5 events", target_core);
+        println!(
+            "✅ CPU affinity test passed: Consumer pinned to core {} processed 5 events",
+            target_core
+        );
     }
 
     #[test]
@@ -2435,18 +2922,23 @@ mod tests {
         let consumer1_count_clone = consumer1_count.clone();
         let consumer2_count_clone = consumer2_count.clone();
 
-        let mut disruptor_handle = build_single_producer(8, test_event_factory, YieldingWaitStrategy)
-            .thread_name("consumer-core-0")
-            .pin_at_core(0)
-            .handle_events_with(move |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
-                consumer1_count_clone.fetch_add(1, Ordering::SeqCst);
-            })
-            .thread_name("consumer-core-1")
-            .pin_at_core(1)
-            .handle_events_with(move |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
-                consumer2_count_clone.fetch_add(1, Ordering::SeqCst);
-            })
-            .build();
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, YieldingWaitStrategy)
+                .thread_name("consumer-core-0")
+                .pin_at_core(0)
+                .handle_events_with(
+                    move |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        consumer1_count_clone.fetch_add(1, Ordering::SeqCst);
+                    },
+                )
+                .thread_name("consumer-core-1")
+                .pin_at_core(1)
+                .handle_events_with(
+                    move |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        consumer2_count_clone.fetch_add(1, Ordering::SeqCst);
+                    },
+                )
+                .build();
 
         // Verify we have two consumers
         assert_eq!(disruptor_handle.consumer_count(), 2);
@@ -2473,19 +2965,33 @@ mod tests {
 
         // In LMAX Disruptor, parallel consumers each process all events
         // So each consumer should process all 10 events
-        assert_eq!(consumer1_processed, 10, "Consumer 1 should process all 10 events");
-        assert_eq!(consumer2_processed, 10, "Consumer 2 should process all 10 events");
+        assert_eq!(
+            consumer1_processed, 10,
+            "Consumer 1 should process all 10 events"
+        );
+        assert_eq!(
+            consumer2_processed, 10,
+            "Consumer 2 should process all 10 events"
+        );
 
         println!("✅ Multi-core CPU affinity test passed:");
-        println!("   Consumer on core 0 processed: {} events", consumer1_processed);
-        println!("   Consumer on core 1 processed: {} events", consumer2_processed);
-        println!("   Both consumers processed all events in parallel (correct LMAX Disruptor behavior)");
+        println!(
+            "   Consumer on core 0 processed: {} events",
+            consumer1_processed
+        );
+        println!(
+            "   Consumer on core 1 processed: {} events",
+            consumer2_processed
+        );
+        println!(
+            "   Both consumers processed all events in parallel (correct LMAX Disruptor behavior)"
+        );
     }
 
     #[test]
     fn test_core_interfaces_activation() {
         use crate::disruptor::core_interfaces::DataProvider;
-        use crate::disruptor::{RingBuffer, DefaultEventFactory};
+        use crate::disruptor::{DefaultEventFactory, RingBuffer};
 
         // Test DataProvider trait implementation for RingBuffer
         let factory = DefaultEventFactory::<TestEvent>::new();
@@ -2515,7 +3021,12 @@ mod tests {
         }
 
         impl EventHandler<TestEvent> for ProcessingStageHandler {
-            fn on_event(&mut self, event: &mut TestEvent, sequence: i64, _end_of_batch: bool) -> crate::disruptor::Result<()> {
+            fn on_event(
+                &mut self,
+                event: &mut TestEvent,
+                sequence: i64,
+                _end_of_batch: bool,
+            ) -> crate::disruptor::Result<()> {
                 self.processed_count += 1;
 
                 // In LMAX Disruptor, all consumers process the same event instance
@@ -2549,8 +3060,10 @@ mod tests {
                 // Small delay to ensure proper ordering in dependency chain
                 std::thread::sleep(Duration::from_millis(1));
 
-                println!("Stage '{}' processed sequence {} (value: {}, data: '{}'), stage count: {}",
-                        self.stage_name, sequence, event.value, event.data, self.processed_count);
+                println!(
+                    "Stage '{}' processed sequence {} (value: {}, data: '{}'), stage count: {}",
+                    self.stage_name, sequence, event.value, event.data, self.processed_count
+                );
                 Ok(())
             }
 
@@ -2560,7 +3073,10 @@ mod tests {
             }
 
             fn on_shutdown(&mut self) -> crate::disruptor::Result<()> {
-                println!("Stage '{}' shutdown, processed {} events", self.stage_name, self.processed_count);
+                println!(
+                    "Stage '{}' shutdown, processed {} events",
+                    self.stage_name, self.processed_count
+                );
                 Ok(())
             }
         }
@@ -2658,14 +3174,33 @@ mod tests {
         disruptor_handle.shutdown();
 
         let shutdown_duration = shutdown_start.elapsed();
-        assert!(shutdown_duration < Duration::from_secs(3),
-               "Shutdown took too long: {:?}", shutdown_duration);
+        assert!(
+            shutdown_duration < Duration::from_secs(3),
+            "Shutdown took too long: {:?}",
+            shutdown_duration
+        );
 
         // Verify all stages processed all events
-        assert_eq!(validation_total.load(Ordering::SeqCst), 8, "Validation stage should process all events");
-        assert_eq!(transformation_total.load(Ordering::SeqCst), 8, "Transformation stage should process all events");
-        assert_eq!(enrichment_total.load(Ordering::SeqCst), 8, "Enrichment stage should process all events");
-        assert_eq!(final_total.load(Ordering::SeqCst), 8, "Final stage should process all events");
+        assert_eq!(
+            validation_total.load(Ordering::SeqCst),
+            8,
+            "Validation stage should process all events"
+        );
+        assert_eq!(
+            transformation_total.load(Ordering::SeqCst),
+            8,
+            "Transformation stage should process all events"
+        );
+        assert_eq!(
+            enrichment_total.load(Ordering::SeqCst),
+            8,
+            "Enrichment stage should process all events"
+        );
+        assert_eq!(
+            final_total.load(Ordering::SeqCst),
+            8,
+            "Final stage should process all events"
+        );
 
         println!("✅ Comprehensive test completed successfully!");
         println!("   - Shutdown fix: ✅ Completed in {:?}", shutdown_duration);
