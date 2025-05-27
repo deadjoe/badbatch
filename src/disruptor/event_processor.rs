@@ -381,6 +381,18 @@ mod tests {
         INITIAL_CURSOR_VALUE,
     };
     use std::sync::atomic::AtomicI64;
+    use crate::disruptor::SingleProducerSequencer;
+
+    // Helper function to create a test sequence barrier
+    fn create_test_sequence_barrier(cursor: Arc<Sequence>, wait_strategy: Arc<BlockingWaitStrategy>) -> Arc<ProcessingSequenceBarrier> {
+        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone())) as Arc<dyn crate::disruptor::Sequencer>;
+        Arc::new(ProcessingSequenceBarrier::new(
+            cursor,
+            wait_strategy,
+            vec![],
+            sequencer,
+        ))
+    }
 
     #[derive(Debug, Default)]
     #[allow(dead_code)]
@@ -419,13 +431,17 @@ mod tests {
 
     #[test]
     fn test_batch_event_processor_creation() {
+        use crate::disruptor::SingleProducerSequencer;
+
         let data_provider = Arc::new(TestDataProvider::new(8));
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone())) as Arc<dyn crate::disruptor::Sequencer>;
         let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
             cursor,
             wait_strategy,
             vec![],
+            sequencer,
         ));
         let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
@@ -446,11 +462,7 @@ mod tests {
         let data_provider = Arc::new(TestDataProvider::new(8));
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
-            cursor,
-            wait_strategy,
-            vec![],
-        ));
+        let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
         let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
@@ -471,11 +483,7 @@ mod tests {
         let data_provider = Arc::new(TestDataProvider::new(8));
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
-            cursor,
-            wait_strategy,
-            vec![],
-        ));
+        let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
         let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
@@ -497,11 +505,7 @@ mod tests {
         let data_provider = Arc::new(TestDataProvider::new(8));
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
-            cursor,
-            wait_strategy,
-            vec![],
-        ));
+        let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
         let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
@@ -551,11 +555,7 @@ mod tests {
         let data_provider = Arc::new(TestDataProvider::new(8));
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
-            cursor,
-            wait_strategy,
-            vec![],
-        ));
+        let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
         let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
@@ -626,11 +626,7 @@ mod tests {
         let data_provider = Arc::new(TestDataProvider::new(8));
         let cursor = Arc::new(Sequence::new(2)); // Set cursor to 2, so sequences 0, 1, 2 are available
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
-            cursor,
-            wait_strategy,
-            vec![],
-        ));
+        let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
 
         let (event_handler, count, sequences) = CountingEventHandler::new();
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
@@ -665,11 +661,7 @@ mod tests {
         let data_provider = Arc::new(TestDataProvider::new(8));
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
-            cursor,
-            wait_strategy,
-            vec![],
-        ));
+        let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
         let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
@@ -693,11 +685,7 @@ mod tests {
         let data_provider = Arc::new(TestDataProvider::new(8));
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
-            cursor,
-            wait_strategy,
-            vec![],
-        ));
+        let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
         let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
@@ -719,11 +707,7 @@ mod tests {
         let data_provider = Arc::new(TestDataProvider::new(8));
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
-            cursor,
-            wait_strategy,
-            vec![],
-        ));
+        let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
         let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 

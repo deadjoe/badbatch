@@ -563,8 +563,39 @@ impl WaitStrategy for BusySpinWaitStrategy {
         dependent_sequences: &[Arc<Sequence>],
         shutdown_flag: &AtomicBool,
     ) -> Result<i64> {
-        // First, wait for the cursor (producer) to reach the required sequence
-        while cursor.get() < sequence {
+        // Simplified logic following LMAX Disruptor pattern
+        let mut available_sequence;
+
+        // Create a combined sequence that represents the minimum of cursor and dependent sequences
+        let dependent_sequence = if dependent_sequences.is_empty() {
+            cursor.clone()
+        } else {
+            // For dependent sequences, we need to wait for the minimum
+            loop {
+                // Check shutdown flag
+                if shutdown_flag.load(Ordering::Acquire) {
+                    return Err(DisruptorError::Alert);
+                }
+
+                let cursor_value = cursor.get();
+                let min_dependent = Sequence::get_minimum_sequence(dependent_sequences);
+
+                // The available sequence is the minimum of cursor and dependent sequences
+                available_sequence = std::cmp::min(cursor_value, min_dependent);
+
+                if available_sequence >= sequence {
+                    return Ok(available_sequence);
+                }
+
+                std::hint::spin_loop();
+            }
+        };
+
+        // Simple case: only wait for cursor
+        while {
+            available_sequence = dependent_sequence.get();
+            available_sequence < sequence
+        } {
             // Check shutdown flag
             if shutdown_flag.load(Ordering::Acquire) {
                 return Err(DisruptorError::Alert);
@@ -572,38 +603,7 @@ impl WaitStrategy for BusySpinWaitStrategy {
             std::hint::spin_loop();
         }
 
-        // Then, wait for all dependent sequences to reach the required sequence
-        if !dependent_sequences.is_empty() {
-            loop {
-                // Ensure we see the most up-to-date dependent sequence values
-                std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
-
-                let minimum_dependent_sequence =
-                    Sequence::get_minimum_sequence(dependent_sequences);
-
-                if minimum_dependent_sequence >= sequence {
-                    // Add an additional memory barrier to ensure we see all
-                    // memory writes that happened before the sequence update
-                    std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
-
-                    // Add a very small delay to ensure event modifications are visible
-                    // This is critical for dependency chains to work correctly
-                    std::thread::sleep(std::time::Duration::from_nanos(100));
-
-                    // Final memory barrier to ensure complete visibility
-                    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-                    break;
-                }
-                // Check shutdown flag
-                if shutdown_flag.load(Ordering::Acquire) {
-                    return Err(DisruptorError::Alert);
-                }
-                std::hint::spin_loop();
-            }
-        }
-
-        // Return the cursor sequence as the available sequence
-        Ok(cursor.get())
+        Ok(available_sequence)
     }
 
     fn signal_all_when_blocking(&self) {

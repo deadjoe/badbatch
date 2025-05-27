@@ -5,6 +5,7 @@
 //! overwrite events that haven't been consumed yet.
 
 use crate::disruptor::{is_power_of_two, DisruptorError, Result, Sequence, WaitStrategy};
+use crate::disruptor::sequence_barrier::SimpleSequenceBarrier;
 use crossbeam_utils::CachePadded;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -311,11 +312,12 @@ impl Sequencer for SingleProducerSequencer {
         }
     }
 
-    fn new_barrier(&self, sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
-        Arc::new(ProcessingSequenceBarrier::new(
+    fn new_barrier(&self, _sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
+        // For now, we'll create a simple barrier without sequencer reference
+        // This will be improved in the next step
+        Arc::new(SimpleSequenceBarrier::new(
             self.cursor.clone(),
             Arc::clone(&self.wait_strategy),
-            sequences_to_track,
         ))
     }
 
@@ -648,11 +650,12 @@ impl Sequencer for MultiProducerSequencer {
         }
     }
 
-    fn new_barrier(&self, sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
-        Arc::new(ProcessingSequenceBarrier::new(
+    fn new_barrier(&self, _sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
+        // For now, use SimpleSequenceBarrier until we solve the circular dependency
+        // This will be improved in the next step
+        Arc::new(SimpleSequenceBarrier::new(
             self.cursor.clone(),
             Arc::clone(&self.wait_strategy),
-            sequences_to_track,
         ))
     }
 
@@ -684,55 +687,6 @@ impl Sequencer for MultiProducerSequencer {
 
 // Forward declaration for SequenceBarrier - we'll implement this in sequence_barrier.rs
 use crate::disruptor::SequenceBarrier;
-
-// Temporary implementation for ProcessingSequenceBarrier
-// This will be moved to sequence_barrier.rs
-pub struct ProcessingSequenceBarrier {
-    cursor: Arc<Sequence>,
-    wait_strategy: Arc<dyn WaitStrategy>,
-    dependent_sequences: Vec<Arc<Sequence>>,
-}
-
-impl ProcessingSequenceBarrier {
-    pub fn new(
-        cursor: Arc<Sequence>,
-        wait_strategy: Arc<dyn WaitStrategy>,
-        dependent_sequences: Vec<Arc<Sequence>>,
-    ) -> Self {
-        Self {
-            cursor,
-            wait_strategy,
-            dependent_sequences,
-        }
-    }
-}
-
-impl SequenceBarrier for ProcessingSequenceBarrier {
-    fn wait_for(&self, sequence: i64) -> Result<i64> {
-        self.wait_strategy
-            .wait_for(sequence, self.cursor.clone(), &self.dependent_sequences)
-    }
-
-    fn get_cursor(&self) -> Arc<Sequence> {
-        self.cursor.clone()
-    }
-
-    fn is_alerted(&self) -> bool {
-        false // Simplified implementation
-    }
-
-    fn alert(&self) {
-        // Simplified implementation
-    }
-
-    fn clear_alert(&self) {
-        // Simplified implementation
-    }
-
-    fn check_alert(&self) -> Result<()> {
-        Ok(()) // Simplified implementation
-    }
-}
 
 #[cfg(test)]
 mod tests {
