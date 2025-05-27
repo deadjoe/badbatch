@@ -164,6 +164,7 @@ where
                 sequencer.get_cursor(),
                 Arc::new(wait_strategy.clone()),
                 consumer_info.dependent_sequences,
+                sequencer.clone(),
             )) as Arc<dyn SequenceBarrier>
         };
 
