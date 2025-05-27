@@ -103,6 +103,8 @@ pub struct ProcessingSequenceBarrier {
     dependent_sequences: Vec<Arc<Sequence>>,
     /// Alert flag for interrupting waiting threads
     alerted: AtomicBool,
+    /// Reference to the sequencer for getting highest published sequence
+    sequencer: Arc<dyn crate::disruptor::Sequencer>,
 }
 
 impl ProcessingSequenceBarrier {
@@ -112,6 +114,7 @@ impl ProcessingSequenceBarrier {
     /// * `cursor` - The cursor sequence to track
     /// * `wait_strategy` - The wait strategy to use
     /// * `dependent_sequences` - Sequences that this barrier depends on
+    /// * `sequencer` - The sequencer for getting highest published sequence
     ///
     /// # Returns
     /// A new ProcessingSequenceBarrier instance
@@ -119,12 +122,14 @@ impl ProcessingSequenceBarrier {
         cursor: Arc<Sequence>,
         wait_strategy: Arc<dyn crate::disruptor::WaitStrategy>,
         dependent_sequences: Vec<Arc<Sequence>>,
+        sequencer: Arc<dyn crate::disruptor::Sequencer>,
     ) -> Self {
         Self {
             cursor,
             wait_strategy,
             dependent_sequences,
             alerted: AtomicBool::new(false),
+            sequencer,
         }
     }
 }
@@ -144,7 +149,19 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
         // Check again after waiting in case we were alerted while waiting
         self.check_alert()?;
 
-        Ok(available_sequence)
+        // Critical memory barrier to ensure all previous writes are visible
+        // This matches disruptor-rs fence(Ordering::Acquire) at line 177
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+
+        // CRITICAL FIX: Call sequencer.getHighestPublishedSequence like LMAX Disruptor
+        // This is essential for MultiProducer scenarios to ensure we only process
+        // contiguous published sequences
+        if available_sequence < sequence {
+            return Ok(available_sequence);
+        }
+
+        let highest_published = self.sequencer.get_highest_published_sequence(sequence, available_sequence);
+        Ok(highest_published)
     }
 
     fn get_cursor(&self) -> Arc<Sequence> {
@@ -191,6 +208,10 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
 
         // Check again after waiting in case we were alerted while waiting
         self.check_alert()?;
+
+        // Critical memory barrier to ensure all previous writes are visible
+        // This matches disruptor-rs fence(Ordering::Acquire) at line 177
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
 
         Ok(available_sequence)
     }
@@ -243,6 +264,10 @@ impl SequenceBarrier for SimpleSequenceBarrier {
         )?;
 
         self.check_alert()?;
+
+        // Critical memory barrier to ensure all previous writes are visible
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+
         Ok(available_sequence)
     }
 
@@ -288,6 +313,10 @@ impl SequenceBarrier for SimpleSequenceBarrier {
         )?;
 
         self.check_alert()?;
+
+        // Critical memory barrier to ensure all previous writes are visible
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+
         Ok(available_sequence)
     }
 }
@@ -299,12 +328,21 @@ mod tests {
 
     #[test]
     fn test_processing_sequence_barrier() {
+        use crate::disruptor::SingleProducerSequencer;
+
         let cursor = Arc::new(Sequence::new(10));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let dependent_sequences = vec![Arc::new(Sequence::new(5))];
 
-        let barrier =
-            ProcessingSequenceBarrier::new(cursor.clone(), wait_strategy, dependent_sequences);
+        // Create a test sequencer
+        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone())) as Arc<dyn crate::disruptor::Sequencer>;
+
+        let barrier = ProcessingSequenceBarrier::new(
+            cursor.clone(),
+            wait_strategy,
+            dependent_sequences,
+            sequencer,
+        );
 
         // Should be able to wait for a sequence that's already available
         let result = barrier.wait_for(5);
