@@ -18,7 +18,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 // BadBatch Disruptor imports
-use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy, Producer};
+use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
 
 // Benchmark configuration
 const DATA_STRUCTURE_SIZE: usize = 128;
