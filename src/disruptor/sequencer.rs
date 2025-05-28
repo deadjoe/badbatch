@@ -529,31 +529,43 @@ impl Sequencer for MultiProducerSequencer {
             return Err(DisruptorError::InvalidSequence(n));
         }
 
-        // This is the key difference from the original implementation:
-        // Use getAndAdd to atomically claim the sequences
-        let current = self.cursor.get_and_add(n);
-        let next_sequence = current + n;
-        let wrap_point = next_sequence - self.buffer_size as i64;
-        let cached_gating_sequence = self.cached_gating_sequence.load(Ordering::Acquire);
+        // Following LMAX Disruptor design: Use CAS loop instead of getAndAdd
+        // This ensures sequence allocation is contiguous
+        let mut current;
+        let mut next;
 
-        // Check if we would wrap around and overtake consumers
-        if wrap_point > cached_gating_sequence || cached_gating_sequence > current {
-            // Get the actual minimum sequence from gating sequences
-            let mut gating_sequence;
-            while {
-                gating_sequence = self.get_minimum_sequence();
-                wrap_point > gating_sequence
-            } {
-                // Wait briefly before checking again (equivalent to LockSupport.parkNanos(1L))
-                std::thread::sleep(std::time::Duration::from_nanos(1));
+        // Try claiming the sequence using CAS
+        loop {
+            current = self.cursor.get();
+            next = current + n;
+
+            // Check if we have available capacity
+            let wrap_point = next - self.buffer_size as i64;
+            let cached_gating_sequence = self.cached_gating_sequence.load(Ordering::Acquire);
+
+            if wrap_point > cached_gating_sequence || cached_gating_sequence > current {
+                // Get the actual minimum sequence from gating sequences
+                let min_sequence = self.get_minimum_sequence();
+
+                // If we don't have enough capacity, wait until we do
+                if wrap_point > min_sequence {
+                    // Wait briefly before checking again (equivalent to LockSupport.parkNanos(1L))
+                    std::thread::sleep(std::time::Duration::from_nanos(1));
+                    continue;
+                }
+
+                // Update the cached gating sequence
+                self.cached_gating_sequence.store(min_sequence, Ordering::Release);
             }
 
-            // Update the cached gating sequence
-            self.cached_gating_sequence
-                .store(gating_sequence, Ordering::Release);
+            // Try to claim the sequences using CAS
+            if self.cursor.compare_and_set(current, next) {
+                break;
+            }
+            // If CAS failed, another producer claimed this sequence, try again with new current
         }
 
-        Ok(next_sequence)
+        Ok(next)
     }
 
     fn try_next(&self) -> Option<i64> {
