@@ -144,11 +144,8 @@ lcov.info
 coverage/
 *.profdata
 
-# Documentation build
-/doc/
-/docs/book/
-/docs/target/
-mdbook-linkcheck.md
+# Documentation Internal
+docs
 
 # Environment and configuration
 .env
