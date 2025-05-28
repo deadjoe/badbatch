@@ -376,16 +376,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::disruptor::SingleProducerSequencer;
     use crate::disruptor::{
         BlockingWaitStrategy, DefaultExceptionHandler, NoOpEventHandler, ProcessingSequenceBarrier,
         INITIAL_CURSOR_VALUE,
     };
     use std::sync::atomic::AtomicI64;
-    use crate::disruptor::SingleProducerSequencer;
 
     // Helper function to create a test sequence barrier
-    fn create_test_sequence_barrier(cursor: Arc<Sequence>, wait_strategy: Arc<BlockingWaitStrategy>) -> Arc<ProcessingSequenceBarrier> {
-        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone())) as Arc<dyn crate::disruptor::Sequencer>;
+    fn create_test_sequence_barrier(
+        cursor: Arc<Sequence>,
+        wait_strategy: Arc<BlockingWaitStrategy>,
+    ) -> Arc<ProcessingSequenceBarrier> {
+        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone()))
+            as Arc<dyn crate::disruptor::Sequencer>;
         Arc::new(ProcessingSequenceBarrier::new(
             cursor,
             wait_strategy,
@@ -436,7 +440,8 @@ mod tests {
         let data_provider = Arc::new(TestDataProvider::new(8));
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone())) as Arc<dyn crate::disruptor::Sequencer>;
+        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone()))
+            as Arc<dyn crate::disruptor::Sequencer>;
         let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
             cursor,
             wait_strategy,

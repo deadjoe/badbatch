@@ -160,7 +160,9 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
             return Ok(available_sequence);
         }
 
-        let highest_published = self.sequencer.get_highest_published_sequence(sequence, available_sequence);
+        let highest_published = self
+            .sequencer
+            .get_highest_published_sequence(sequence, available_sequence);
         Ok(highest_published)
     }
 
@@ -335,7 +337,8 @@ mod tests {
         let dependent_sequences = vec![Arc::new(Sequence::new(5))];
 
         // Create a test sequencer
-        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone())) as Arc<dyn crate::disruptor::Sequencer>;
+        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone()))
+            as Arc<dyn crate::disruptor::Sequencer>;
 
         let barrier = ProcessingSequenceBarrier::new(
             cursor.clone(),
