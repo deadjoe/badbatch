@@ -4,8 +4,8 @@
 //! Sequencers manage the allocation of sequence numbers and ensure that producers don't
 //! overwrite events that haven't been consumed yet.
 
-use crate::disruptor::{is_power_of_two, DisruptorError, Result, Sequence, WaitStrategy};
 use crate::disruptor::sequence_barrier::SimpleSequenceBarrier;
+use crate::disruptor::{is_power_of_two, DisruptorError, Result, Sequence, WaitStrategy};
 use crossbeam_utils::CachePadded;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
