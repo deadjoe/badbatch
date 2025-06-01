@@ -106,7 +106,7 @@ fn badbatch_spsc_modern() {
         let sink = Arc::clone(&sink);
         move |event: &mut Event, _sequence: i64, _end_of_batch: bool| {
             sink.fetch_add(event.val, Ordering::Release);
-            Ok(())
+            // 现代 API 处理器应该返回 () 而不是 Result
         }
     };
 
@@ -143,7 +143,7 @@ fn badbatch_mpsc_modern() {
         let sink = Arc::clone(&sink);
         move |event: &mut Event, _sequence: i64, _end_of_batch: bool| {
             sink.fetch_add(event.val, Ordering::Release);
-            Ok(())
+            // 现代 API 处理器应该返回 () 而不是 Result
         }
     };
 
@@ -198,7 +198,7 @@ fn badbatch_spsc_traditional() {
             _end_of_batch: bool,
         ) -> badbatch::disruptor::Result<()> {
             self.sink.fetch_add(event.val, Ordering::Release);
-            Ok(())
+            // 现代 API 处理器应该返回 () 而不是 Result
         }
     }
 
@@ -225,10 +225,9 @@ fn badbatch_spsc_traditional() {
         ProducerType::Single,
         Box::new(badbatch::disruptor::BlockingWaitStrategy::new()),
     )
-    .unwrap()
+    .expect("创建 Disruptor 失败")
     .handle_events_with(handler)
-    .build()
-    .unwrap();
+    .build();
 
     disruptor.start().unwrap();
 
@@ -305,7 +304,7 @@ fn badbatch_mpsc_traditional() {
             _end_of_batch: bool,
         ) -> badbatch::disruptor::Result<()> {
             self.sink.fetch_add(event.val, Ordering::Release);
-            Ok(())
+            // 现代 API 处理器应该返回 () 而不是 Result
         }
     }
 
@@ -332,10 +331,9 @@ fn badbatch_mpsc_traditional() {
         ProducerType::Multi,
         Box::new(badbatch::disruptor::BlockingWaitStrategy::new()),
     )
-    .unwrap()
+    .expect("创建 Disruptor 失败")
     .handle_events_with(handler)
-    .build()
-    .unwrap();
+    .build();
 
     disruptor.start().unwrap();
 
