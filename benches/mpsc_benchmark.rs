@@ -351,7 +351,7 @@ fn badbatch_mpsc_traditional(
     };
 
     // 创建并配置 Disruptor
-    let mut disruptor = Disruptor::new(
+    let disruptor = Arc::new(Mutex::new(Disruptor::new(
         factory,
         DATA_STRUCTURE_SIZE,
         ProducerType::Multi,
@@ -359,10 +359,10 @@ fn badbatch_mpsc_traditional(
     )
     .expect("创建 Disruptor 失败")
     .handle_events_with(handler)
-    .build();
+    .build()));
 
     // 启动 Disruptor
-    disruptor.start().unwrap();
+    disruptor.lock().unwrap().start().unwrap();
 
     let benchmark_id = BenchmarkId::new("badbatch_traditional", param_description);
     let burst_size = Arc::new(AtomicI64::new(0));
@@ -370,14 +370,14 @@ fn badbatch_mpsc_traditional(
     let mut burst_producers = (0..PRODUCERS)
         .map(|_| {
             let burst_size = Arc::clone(&burst_size);
-            let disruptor_ref = &disruptor;
+            let disruptor_clone = Arc::clone(&disruptor);
             BurstProducer::new(move || {
                 let burst_size = burst_size.load(Acquire);
                 for i in 0..burst_size {
                     let translator = BenchEventTranslator {
                         data: black_box(i),
                     };
-                    disruptor_ref.publish_event(translator).unwrap();
+                    disruptor_clone.lock().unwrap().publish_event(translator).unwrap();
                 }
             })
         })
@@ -395,7 +395,7 @@ fn badbatch_mpsc_traditional(
     burst_producers.iter_mut().for_each(BurstProducer::stop);
     
     // 关闭 Disruptor
-    disruptor.shutdown().unwrap();
+    disruptor.lock().unwrap().shutdown().unwrap();
 }
 
 criterion_group!(mpsc, mpsc_benchmark);
