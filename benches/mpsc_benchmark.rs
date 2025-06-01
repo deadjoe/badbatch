@@ -256,7 +256,7 @@ fn badbatch_mpsc_modern(
             // 使用 black_box 避免死代码消除
             black_box(event.data);
             sink.fetch_add(1, Release);
-            Ok(())
+            // 现代 API 处理器应该返回 () 而不是 Result
         }
     };
 

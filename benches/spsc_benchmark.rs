@@ -133,7 +133,7 @@ fn badbatch_spsc_modern(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64)
         let sink = Arc::clone(&sink);
         move |event: &mut Event, _sequence: i64, _end_of_batch: bool| {
             sink.store(event.data, Ordering::Release);
-            Ok(())
+            // 现代 API 处理器应该返回 () 而不是 Result
         }
     };
 
