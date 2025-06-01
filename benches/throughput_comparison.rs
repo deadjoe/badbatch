@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 // BadBatch Disruptor imports
-use badbatch::disruptor::{build_multi_producer, build_single_producer, BusySpinWaitStrategy};
+use badbatch::disruptor::{build_multi_producer, build_single_producer, BusySpinWaitStrategy, Disruptor, EventHandler, EventTranslator, ProducerType};
 
 // Benchmark configuration
 const BUF_SIZE: usize = 32_768;
@@ -106,6 +106,7 @@ fn badbatch_spsc_modern() {
         let sink = Arc::clone(&sink);
         move |event: &mut Event, _sequence: i64, _end_of_batch: bool| {
             sink.fetch_add(event.val, Ordering::Release);
+            Ok(())
         }
     };
 
@@ -116,6 +117,7 @@ fn badbatch_spsc_modern() {
     // Publish into the Disruptor using batch publishing for efficiency
     thread::scope(|s| {
         s.spawn(move || {
+            // 对于大量事件，使用批量发布以提高效率
             for _ in 0..MAX_PRODUCER_EVENTS / BATCH_SIZE {
                 producer.batch_publish(BATCH_SIZE, |batch| {
                     for event in batch {
@@ -141,6 +143,7 @@ fn badbatch_mpsc_modern() {
         let sink = Arc::clone(&sink);
         move |event: &mut Event, _sequence: i64, _end_of_batch: bool| {
             sink.fetch_add(event.val, Ordering::Release);
+            Ok(())
         }
     };
 
@@ -166,7 +169,7 @@ fn badbatch_mpsc_modern() {
             for _ in 0..MAX_PRODUCER_EVENTS / BATCH_SIZE {
                 producer2.batch_publish(BATCH_SIZE, |batch| {
                     for event in batch {
-                        event.val = 1;
+                        event.val = black_box(1);
                     }
                 });
             }
@@ -182,11 +185,6 @@ fn badbatch_mpsc_modern() {
 
 /// BadBatch Disruptor SPSC throughput test using traditional LMAX API
 fn badbatch_spsc_traditional() {
-    use badbatch::disruptor::{
-        BlockingWaitStrategy, DefaultEventFactory, Disruptor, EventHandler, EventTranslator,
-        ProducerType, Result,
-    };
-
     // Event handler implementation
     struct ThroughputEventHandler {
         sink: Arc<AtomicI32>,
@@ -198,7 +196,7 @@ fn badbatch_spsc_traditional() {
             event: &mut Event,
             _sequence: i64,
             _end_of_batch: bool,
-        ) -> Result<()> {
+        ) -> badbatch::disruptor::Result<()> {
             self.sink.fetch_add(event.val, Ordering::Release);
             Ok(())
         }
@@ -216,7 +214,7 @@ fn badbatch_spsc_traditional() {
     }
 
     let sink = Arc::new(AtomicI32::new(0));
-    let factory = DefaultEventFactory::<Event>::new();
+    let factory = badbatch::disruptor::DefaultEventFactory::<Event>::new();
     let handler = ThroughputEventHandler {
         sink: Arc::clone(&sink),
     };
@@ -225,11 +223,12 @@ fn badbatch_spsc_traditional() {
         factory,
         BUF_SIZE,
         ProducerType::Single,
-        Box::new(BlockingWaitStrategy::new()),
+        Box::new(badbatch::disruptor::BlockingWaitStrategy::new()),
     )
     .unwrap()
     .handle_events_with(handler)
-    .build();
+    .build()
+    .unwrap();
 
     disruptor.start().unwrap();
 
@@ -245,6 +244,9 @@ fn badbatch_spsc_traditional() {
 
     // Verify all events were processed
     assert_eq!(sink.load(Ordering::Acquire), MAX_PRODUCER_EVENTS as i32);
+    
+    // 关闭 Disruptor
+    disruptor.shutdown().unwrap();
 }
 
 /// Benchmark functions for Criterion
@@ -288,12 +290,99 @@ fn badbatch_spsc_traditional_benchmark(c: &mut Criterion) {
     });
 }
 
+/// BadBatch Disruptor MPSC throughput test using traditional LMAX API
+fn badbatch_mpsc_traditional() {
+    // Event handler implementation
+    struct ThroughputEventHandler {
+        sink: Arc<AtomicI32>,
+    }
+
+    impl EventHandler<Event> for ThroughputEventHandler {
+        fn on_event(
+            &mut self,
+            event: &mut Event,
+            _sequence: i64,
+            _end_of_batch: bool,
+        ) -> badbatch::disruptor::Result<()> {
+            self.sink.fetch_add(event.val, Ordering::Release);
+            Ok(())
+        }
+    }
+
+    // Event translator implementation
+    struct ThroughputEventTranslator {
+        val: i32,
+    }
+
+    impl EventTranslator<Event> for ThroughputEventTranslator {
+        fn translate_to(&self, event: &mut Event, _sequence: i64) {
+            event.val = self.val;
+        }
+    }
+
+    let sink = Arc::new(AtomicI32::new(0));
+    let factory = badbatch::disruptor::DefaultEventFactory::<Event>::new();
+    let handler = ThroughputEventHandler {
+        sink: Arc::clone(&sink),
+    };
+
+    let mut disruptor = Disruptor::new(
+        factory,
+        BUF_SIZE,
+        ProducerType::Multi,
+        Box::new(badbatch::disruptor::BlockingWaitStrategy::new()),
+    )
+    .unwrap()
+    .handle_events_with(handler)
+    .build()
+    .unwrap();
+
+    disruptor.start().unwrap();
+
+    // Publish events using traditional API with two producers
+    thread::scope(|s| {
+        let disruptor_ref = &disruptor;
+        
+        s.spawn(move || {
+            for _ in 0..MAX_PRODUCER_EVENTS {
+                let translator = ThroughputEventTranslator { val: black_box(1) };
+                disruptor_ref.publish_event(translator).unwrap();
+            }
+        });
+        
+        s.spawn(move || {
+            for _ in 0..MAX_PRODUCER_EVENTS {
+                let translator = ThroughputEventTranslator { val: black_box(1) };
+                disruptor_ref.publish_event(translator).unwrap();
+            }
+        });
+    });
+
+    // Verify all events were processed
+    assert_eq!(
+        sink.load(Ordering::Acquire),
+        (MAX_PRODUCER_EVENTS * 2) as i32
+    );
+    
+    // 关闭 Disruptor
+    disruptor.shutdown().unwrap();
+}
+
+fn badbatch_mpsc_traditional_benchmark(c: &mut Criterion) {
+    c.bench_function("badbatch_mpsc_traditional_throughput", |b| {
+        b.iter(|| {
+            badbatch_mpsc_traditional();
+        });
+    });
+}
+
 criterion_group!(
     throughput_comparison,
     crossbeam_spsc_benchmark,
     badbatch_spsc_modern_benchmark,
     badbatch_spsc_traditional_benchmark,
     crossbeam_mpsc_benchmark,
-    badbatch_mpsc_modern_benchmark
+    badbatch_mpsc_modern_benchmark,
+    badbatch_mpsc_traditional_benchmark
 );
 criterion_main!(throughput_comparison);
