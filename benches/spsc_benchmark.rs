@@ -18,7 +18,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 // BadBatch Disruptor imports
-use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
+use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy, Disruptor, EventHandler, EventTranslator, ProducerType};
 
 // Benchmark configuration
 const DATA_STRUCTURE_SIZE: usize = 128;
@@ -133,6 +133,7 @@ fn badbatch_spsc_modern(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64)
         let sink = Arc::clone(&sink);
         move |event: &mut Event, _sequence: i64, _end_of_batch: bool| {
             sink.store(event.data, Ordering::Release);
+            Ok(())
         }
     };
 
@@ -146,13 +147,22 @@ fn badbatch_spsc_modern(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64)
             pause(*pause_ms);
             let start = Instant::now();
             for _ in 0..iters {
-                // Use batch publishing for efficiency
-                producer.batch_publish(*size as usize, |batch| {
-                    for (i, event) in batch.enumerate() {
-                        event.data = black_box(i as i64 + 1);
+                // 对于小批量，使用单个发布
+                if *size <= 10 {
+                    for data in 1..=*size {
+                        producer.publish(|event| {
+                            event.data = black_box(data);
+                        });
                     }
-                });
-                // Wait for the last data element to be received inside processor
+                } else {
+                    // 对于大批量，使用批量发布以提高效率
+                    producer.batch_publish(*size as usize, |batch| {
+                        for (i, event) in batch.enumerate() {
+                            event.data = black_box(i as i64 + 1);
+                        }
+                    });
+                }
+                // 等待最后一个数据元素被处理
                 let last_data = black_box(*size);
                 while sink.load(Ordering::Acquire) != last_data {}
             }
@@ -167,10 +177,6 @@ fn badbatch_spsc_traditional(
     inputs: (i64, u64),
     param: &str,
 ) {
-    use badbatch::disruptor::{
-        BlockingWaitStrategy, Disruptor, EventHandler, EventTranslator, ProducerType, Result,
-    };
-
     // Event handler implementation
     struct BenchEventHandler {
         sink: Arc<AtomicI64>,
@@ -182,7 +188,7 @@ fn badbatch_spsc_traditional(
             event: &mut Event,
             _sequence: i64,
             _end_of_batch: bool,
-        ) -> Result<()> {
+        ) -> badbatch::disruptor::Result<()> {
             self.sink.store(event.data, Ordering::Release);
             Ok(())
         }
@@ -205,16 +211,19 @@ fn badbatch_spsc_traditional(
         sink: Arc::clone(&sink),
     };
 
+    // 创建并配置 Disruptor
     let mut disruptor = Disruptor::new(
         factory,
         DATA_STRUCTURE_SIZE,
         ProducerType::Single,
-        Box::new(BlockingWaitStrategy::new()),
+        Box::new(badbatch::disruptor::BlockingWaitStrategy::new()),
     )
     .unwrap()
     .handle_events_with(handler)
-    .build();
+    .build()
+    .unwrap();
 
+    // 启动 Disruptor
     disruptor.start().unwrap();
 
     let benchmark_id = BenchmarkId::new("badbatch_traditional", param);
@@ -229,13 +238,16 @@ fn badbatch_spsc_traditional(
                     };
                     disruptor.publish_event(translator).unwrap();
                 }
-                // Wait for the last data element to be processed
+                // 等待最后一个数据元素被处理
                 let last_data = black_box(*size);
                 while sink.load(Ordering::Acquire) != last_data {}
             }
             start.elapsed()
         })
     });
+
+    // 关闭 Disruptor
+    disruptor.shutdown().unwrap();
 }
 
 criterion_group!(spsc, spsc_benchmark);
