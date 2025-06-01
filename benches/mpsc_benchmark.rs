@@ -17,7 +17,7 @@ use std::sync::atomic::{
     AtomicBool, AtomicI64,
     Ordering::{Acquire, Relaxed, Release},
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -370,7 +370,7 @@ fn badbatch_mpsc_traditional(
     let mut burst_producers = (0..PRODUCERS)
         .map(|_| {
             let burst_size = Arc::clone(&burst_size);
-            let disruptor_clone = Arc::clone(&disruptor);
+            let disruptor_clone: Arc<Mutex<Disruptor<Event>>> = Arc::clone(&disruptor);
             BurstProducer::new(move || {
                 let burst_size = burst_size.load(Acquire);
                 for i in 0..burst_size {
