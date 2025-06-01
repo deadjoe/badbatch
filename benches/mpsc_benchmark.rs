@@ -357,10 +357,9 @@ fn badbatch_mpsc_traditional(
         ProducerType::Multi,
         Box::new(badbatch::disruptor::BlockingWaitStrategy::new()),
     )
-    .unwrap()
+    .expect("创建 Disruptor 失败")
     .handle_events_with(handler)
-    .build()
-    .unwrap();
+    .build();
 
     // 启动 Disruptor
     disruptor.start().unwrap();
