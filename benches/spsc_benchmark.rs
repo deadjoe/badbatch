@@ -220,8 +220,7 @@ fn badbatch_spsc_traditional(
     )
     .expect("创建 Disruptor 失败")
     .handle_events_with(handler)
-    .build()
-    .expect("构建 Disruptor 失败");
+    .build();
 
     // 启动 Disruptor
     disruptor.start().unwrap();
