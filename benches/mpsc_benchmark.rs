@@ -17,12 +17,12 @@ use std::sync::atomic::{
     AtomicBool, AtomicI64,
     Ordering::{Acquire, Relaxed, Release},
 };
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 // BadBatch Disruptor imports
-use badbatch::disruptor::{build_multi_producer, BusySpinWaitStrategy, Disruptor, EventHandler, EventTranslator, ProducerType};
+use badbatch::disruptor::{build_multi_producer, BusySpinWaitStrategy};
 
 // Benchmark configuration
 const PRODUCERS: usize = 2;
@@ -307,82 +307,56 @@ fn badbatch_mpsc_modern(
     burst_producers.iter_mut().for_each(BurstProducer::stop);
 }
 
-/// BadBatch Disruptor MPSC benchmark using traditional LMAX API
+/// BadBatch Disruptor MPSC benchmark using reference implementation pattern
 fn badbatch_mpsc_traditional(
     group: &mut BenchmarkGroup<WallTime>,
     params: (i64, u64),
     param_description: &str,
 ) {
-    // 事件处理器实现
-    struct BenchEventHandler {
-        sink: Arc<AtomicI64>,
-    }
-
-    impl EventHandler<Event> for BenchEventHandler {
-        fn on_event(
-            &mut self,
-            event: &mut Event,
-            _sequence: i64,
-            _end_of_batch: bool,
-        ) -> badbatch::disruptor::Result<()> {
-            // 使用 black_box 避免死代码消除
-            black_box(event.data);
-            self.sink.fetch_add(1, Release);
-            Ok(())
-        }
-    }
-
-    // 事件转换器实现
-    struct BenchEventTranslator {
-        data: i64,
-    }
-
-    impl EventTranslator<Event> for BenchEventTranslator {
-        fn translate_to(&self, event: &mut Event, _sequence: i64) {
-            event.data = self.data;
-        }
-    }
-
-    // 使用 AtomicI64 计数接收到的事件数量
+    // Simple factory function (using closure like the reference implementation)
+    let factory = || Event { data: 0 };
+    
+    // Use an AtomicI64 to count number of received events
     let sink = Arc::new(AtomicI64::new(0));
-    let factory = badbatch::disruptor::DefaultEventFactory::<Event>::new();
-    let handler = BenchEventHandler {
-        sink: Arc::clone(&sink),
+    
+    // Create the processor function
+    let processor = {
+        let sink = Arc::clone(&sink);
+        move |event: &mut Event, _sequence: i64, _end_of_batch: bool| {
+            // Black box event to avoid dead code elimination
+            black_box(event.data);
+            sink.fetch_add(1, Release);
+        }
     };
-
-    // 创建并配置 Disruptor
-    let disruptor = Arc::new(Mutex::new(Disruptor::new(
-        factory,
-        DATA_STRUCTURE_SIZE,
-        ProducerType::Multi,
-        Box::new(badbatch::disruptor::BlockingWaitStrategy::new()),
-    )
-    .expect("创建 Disruptor 失败")
-    .handle_events_with(handler)
-    .build()));
-
-    // 启动 Disruptor
-    disruptor.lock().unwrap().start().unwrap();
-
+    
+    // Create and configure Disruptor using the build_multi_producer pattern
+    let producer = build_multi_producer(DATA_STRUCTURE_SIZE, factory, BusySpinWaitStrategy::new())
+        .handle_events_with(processor)
+        .build();
+    
     let benchmark_id = BenchmarkId::new("badbatch_traditional", param_description);
     let burst_size = Arc::new(AtomicI64::new(0));
-
+    
+    // Create burst producers
     let mut burst_producers = (0..PRODUCERS)
         .map(|_| {
             let burst_size = Arc::clone(&burst_size);
-            let disruptor_clone: Arc<Mutex<Disruptor<Event>>> = Arc::clone(&disruptor);
+            let producer = producer.clone();
+            
             BurstProducer::new(move || {
                 let burst_size = burst_size.load(Acquire);
-                for i in 0..burst_size {
-                    let translator = BenchEventTranslator {
-                        data: black_box(i),
-                    };
-                    disruptor_clone.lock().unwrap().publish_event(translator).unwrap();
-                }
+                producer.batch_publish(burst_size as usize, |iter| {
+                    for (i, e) in iter.enumerate() {
+                        e.data = black_box(i as i64);
+                    }
+                });
             })
         })
         .collect::<Vec<BurstProducer>>();
-
+    
+    // Original producer not used after cloning
+    drop(producer);
+    
     run_benchmark(
         group,
         benchmark_id,
@@ -391,11 +365,9 @@ fn badbatch_mpsc_traditional(
         params,
         &burst_producers,
     );
-
-    burst_producers.iter_mut().for_each(BurstProducer::stop);
     
-    // 关闭 Disruptor
-    disruptor.lock().unwrap().shutdown().unwrap();
+    // Clean up
+    burst_producers.iter_mut().for_each(BurstProducer::stop);
 }
 
 criterion_group!(mpsc, mpsc_benchmark);
