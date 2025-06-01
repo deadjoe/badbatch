@@ -18,7 +18,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 // BadBatch Disruptor imports
-use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy, Disruptor, EventHandler, EventTranslator, ProducerType};
+use badbatch::disruptor::BusySpinWaitStrategy;
+use badbatch::disruptor::build_single_producer;
 
 // Benchmark configuration
 const DATA_STRUCTURE_SIZE: usize = 128;
@@ -177,89 +178,96 @@ fn badbatch_spsc_traditional(
     inputs: (i64, u64),
     param: &str,
 ) {
-    // Event handler implementation
-    struct BenchEventHandler {
-        sink: Arc<AtomicI64>,
-    }
-
-    impl EventHandler<Event> for BenchEventHandler {
-        fn on_event(
-            &mut self,
-            event: &mut Event,
-            _sequence: i64,
-            _end_of_batch: bool,
-        ) -> badbatch::disruptor::Result<()> {
-            self.sink.store(event.data, Ordering::Release);
-            Ok(())
-        }
-    }
-
-    // Event translator implementation
-    struct BenchEventTranslator {
-        data: i64,
-    }
-
-    impl EventTranslator<Event> for BenchEventTranslator {
-        fn translate_to(&self, event: &mut Event, _sequence: i64) {
-            event.data = self.data;
-        }
-    }
-
+    // Simple factory function (using closure like the reference implementation)
+    let factory = || Event { data: 0 };
+    
+    // Create a shared counter for event processing validation
     let sink = Arc::new(AtomicI64::new(0));
-    let factory = badbatch::disruptor::DefaultEventFactory::<Event>::new();
-    let handler = BenchEventHandler {
-        sink: Arc::clone(&sink),
+
+    // Create the processor function (following the reference implementation pattern)
+    let processor = {
+        let sink = Arc::clone(&sink);
+        move |event: &mut Event, _sequence: i64, _end_of_batch: bool| {
+            // Store the data value to the sink (no debug logs)
+            sink.store(event.data, Ordering::Release);
+        }
     };
+    
+    // Create and configure Disruptor using the build_single_producer pattern
+    let mut producer = build_single_producer(DATA_STRUCTURE_SIZE, factory, BusySpinWaitStrategy::new())
+        .handle_events_with(processor)
+        .build();
 
-    // 创建并配置 Disruptor
-    // 创建 Disruptor 实例
-    let mut disruptor = Disruptor::new(
-        factory,
-        DATA_STRUCTURE_SIZE,
-        ProducerType::Single,
-        Box::new(badbatch::disruptor::BlockingWaitStrategy::new()),
-    )
-    .expect("创建 Disruptor 失败")
-    .handle_events_with(handler)
-    .build();
-
-    // 启动 Disruptor
-    disruptor.start().unwrap();
-
+    // Send a test event to verify event processor is working (without excessive logging)
+    sink.store(0, Ordering::Release); // Reset sink value before test
+    
+    // Publish test event using the batch_publish approach
+    producer.batch_publish(1, |iter| {
+        for e in iter {
+            e.data = 999;
+        }
+    });
+    
+    // Wait to see if the event is processed
+    let test_start = Instant::now();
+    let mut test_processed = false;
+    while test_start.elapsed() < Duration::from_millis(200) {
+        if sink.load(Ordering::Acquire) == 999 {
+            test_processed = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    
+    if !test_processed {
+        println!("WARNING: Initial test event not processed! Disruptor may not be functioning correctly.");
+    }
+    
     let benchmark_id = BenchmarkId::new("badbatch_traditional", param);
-    // 使用引用而不是移动所有权
-    let disruptor_ref = &disruptor;
+    // Use mutable reference to producer
+    let producer_ref = &mut producer;
     group.bench_with_input(benchmark_id, &inputs, move |b, (size, pause_ms)| {
         b.iter_custom(|iters| {
             pause(*pause_ms);
-            // 每次迭代前先重置 sink 的值
+            // Reset sink before each iteration
             sink.store(0, Ordering::Release);
             let start = Instant::now();
-            for _ in 0..iters {
-                for data in 1..=*size {
-                    let translator = BenchEventTranslator {
-                        data: black_box(data),
-                    };
-                    disruptor_ref.publish_event(translator).unwrap();
-                }
-                // 等待最后一个数据元素被处理，增加超时机制
-                let last_data = black_box(*size);
-                let max_wait = Instant::now() + Duration::from_millis(100); // 100ms 超时
-                while sink.load(Ordering::Acquire) != last_data {
-                    if Instant::now() > max_wait {
-                        // 超时后跳出循环
+            
+            for _iter in 0..iters {
+                
+                // Use batch_publish for better performance (following reference implementation)
+                producer_ref.batch_publish(*size as usize, |events| {
+                    for (i, e) in events.enumerate() {
+                        e.data = black_box(i as i64 + 1);
+                    }
+                });
+                
+                // Wait for events to be processed
+                let start_wait = Instant::now();
+                
+                // Wait for the last data element to be processed (silently)
+                loop {
+                    let current = sink.load(Ordering::Acquire);
+                    if current == *size as i64 {
                         break;
                     }
-                    // 添加小延迟减少 CPU 使用
-                    thread::yield_now();
+
+                    // Extended timeout to give more time for event processing
+                    if start_wait.elapsed() > Duration::from_secs(10) {
+                        // Only log timeouts as they indicate a problem
+                        println!("Timeout waiting for events: {}/{}", current, *size);
+                        break;
+                    }
+
+                    thread::sleep(Duration::from_millis(10));
                 }
             }
             start.elapsed()
         })
     });
 
-    // 关闭 Disruptor
-    disruptor.shutdown().unwrap();
+    // Shutdown Disruptor
+    producer.shutdown();
 }
 
 criterion_group!(spsc, spsc_benchmark);
