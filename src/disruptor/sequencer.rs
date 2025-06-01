@@ -555,7 +555,8 @@ impl Sequencer for MultiProducerSequencer {
                 }
 
                 // Update the cached gating sequence
-                self.cached_gating_sequence.store(min_sequence, Ordering::Release);
+                self.cached_gating_sequence
+                    .store(min_sequence, Ordering::Release);
             }
 
             // Try to claim the sequences using CAS
