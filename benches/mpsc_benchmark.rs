@@ -22,7 +22,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 // BadBatch Disruptor imports
-use badbatch::disruptor::{build_multi_producer, BusySpinWaitStrategy};
+use badbatch::disruptor::{build_multi_producer, BusySpinWaitStrategy, Disruptor, EventHandler, EventTranslator, ProducerType};
 
 // Benchmark configuration
 const PRODUCERS: usize = 2;
@@ -59,6 +59,7 @@ pub fn mpsc_benchmark(c: &mut Criterion) {
 
             crossbeam_mpsc(&mut group, params, &param_description);
             badbatch_mpsc_modern(&mut group, params, &param_description);
+            badbatch_mpsc_traditional(&mut group, params, &param_description);
         }
     }
     group.finish();
@@ -246,15 +247,16 @@ fn badbatch_mpsc_modern(
     param_description: &str,
 ) {
     let factory = || Event { data: 0 };
-    // Use an AtomicI64 to count number of received events
+    // 使用 AtomicI64 计数接收到的事件数量
     let sink = Arc::new(AtomicI64::new(0));
 
     let processor = {
         let sink = Arc::clone(&sink);
         move |event: &mut Event, _sequence: i64, _end_of_batch: bool| {
-            // Black box event to avoid dead code elimination
+            // 使用 black_box 避免死代码消除
             black_box(event.data);
             sink.fetch_add(1, Release);
+            Ok(())
         }
     };
 
@@ -271,16 +273,27 @@ fn badbatch_mpsc_modern(
             let producer = producer.clone();
             BurstProducer::new(move || {
                 let burst_size = burst_size.load(Acquire);
-                producer.batch_publish(burst_size as usize, |batch| {
-                    for (i, event) in batch.enumerate() {
-                        event.data = black_box(i as i64);
+                // 根据批量大小选择不同的发布策略
+                if burst_size <= 10 {
+                    // 对于小批量，单个发布
+                    for i in 0..burst_size {
+                        producer.publish(|event| {
+                            event.data = black_box(i);
+                        });
                     }
-                });
+                } else {
+                    // 对于大批量，使用批量发布
+                    producer.batch_publish(burst_size as usize, |batch| {
+                        for (i, event) in batch.enumerate() {
+                            event.data = black_box(i as i64);
+                        }
+                    });
+                }
             })
         })
         .collect::<Vec<BurstProducer>>();
 
-    drop(producer); // Original producer not used
+    drop(producer); // 原始生产者不使用
 
     run_benchmark(
         group,
@@ -292,6 +305,98 @@ fn badbatch_mpsc_modern(
     );
 
     burst_producers.iter_mut().for_each(BurstProducer::stop);
+}
+
+/// BadBatch Disruptor MPSC benchmark using traditional LMAX API
+fn badbatch_mpsc_traditional(
+    group: &mut BenchmarkGroup<WallTime>,
+    params: (i64, u64),
+    param_description: &str,
+) {
+    // 事件处理器实现
+    struct BenchEventHandler {
+        sink: Arc<AtomicI64>,
+    }
+
+    impl EventHandler<Event> for BenchEventHandler {
+        fn on_event(
+            &mut self,
+            event: &mut Event,
+            _sequence: i64,
+            _end_of_batch: bool,
+        ) -> badbatch::disruptor::Result<()> {
+            // 使用 black_box 避免死代码消除
+            black_box(event.data);
+            self.sink.fetch_add(1, Release);
+            Ok(())
+        }
+    }
+
+    // 事件转换器实现
+    struct BenchEventTranslator {
+        data: i64,
+    }
+
+    impl EventTranslator<Event> for BenchEventTranslator {
+        fn translate_to(&self, event: &mut Event, _sequence: i64) {
+            event.data = self.data;
+        }
+    }
+
+    // 使用 AtomicI64 计数接收到的事件数量
+    let sink = Arc::new(AtomicI64::new(0));
+    let factory = badbatch::disruptor::DefaultEventFactory::<Event>::new();
+    let handler = BenchEventHandler {
+        sink: Arc::clone(&sink),
+    };
+
+    // 创建并配置 Disruptor
+    let mut disruptor = Disruptor::new(
+        factory,
+        DATA_STRUCTURE_SIZE,
+        ProducerType::Multi,
+        Box::new(badbatch::disruptor::BlockingWaitStrategy::new()),
+    )
+    .unwrap()
+    .handle_events_with(handler)
+    .build()
+    .unwrap();
+
+    // 启动 Disruptor
+    disruptor.start().unwrap();
+
+    let benchmark_id = BenchmarkId::new("badbatch_traditional", param_description);
+    let burst_size = Arc::new(AtomicI64::new(0));
+
+    let mut burst_producers = (0..PRODUCERS)
+        .map(|_| {
+            let burst_size = Arc::clone(&burst_size);
+            let disruptor_ref = &disruptor;
+            BurstProducer::new(move || {
+                let burst_size = burst_size.load(Acquire);
+                for i in 0..burst_size {
+                    let translator = BenchEventTranslator {
+                        data: black_box(i),
+                    };
+                    disruptor_ref.publish_event(translator).unwrap();
+                }
+            })
+        })
+        .collect::<Vec<BurstProducer>>();
+
+    run_benchmark(
+        group,
+        benchmark_id,
+        burst_size,
+        sink,
+        params,
+        &burst_producers,
+    );
+
+    burst_producers.iter_mut().for_each(BurstProducer::stop);
+    
+    // 关闭 Disruptor
+    disruptor.shutdown().unwrap();
 }
 
 criterion_group!(mpsc, mpsc_benchmark);

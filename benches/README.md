@@ -38,61 +38,74 @@ The benchmarks cover realistic usage patterns:
 Tests single producer, single consumer scenarios with varying burst patterns.
 
 **Configuration:**
-- Buffer size: 128 events
+
+- Buffer size: 128 slots
 - Burst sizes: 1, 10, 100 events
 - Pause intervals: 0ms, 1ms, 10ms
-- Event type: `Event { data: i64 }`
+- Event type: `i64`
+- Wait strategy: BusySpinWaitStrategy
 
 **Test Cases:**
+
 - `base_overhead` - Measures benchmark infrastructure overhead
 - `crossbeam_channel` - Crossbeam bounded channel baseline
 - `badbatch_modern` - Modern API with batch publishing
-- `badbatch_traditional` - Traditional LMAX API with EventTranslator
+- `badbatch_traditional` - Traditional LMAX API with EventHandler and EventTranslator
 
 **Key Features:**
-- Batch publishing optimization for modern API
-- Individual event publishing for traditional API
-- Proper thread synchronization and measurement
+
+- Single producer, single consumer (SPSC) benchmark
+- Modern API (closure-based) and traditional API (EventHandler) tests
+- Batch publishing for large bursts, single publishing for small bursts
+- Configurable burst sizes and pause intervals
+- Precise overhead measurement
 - Black-box optimization prevention
 
 ### 2. MPSC Benchmark (`mpsc_benchmark.rs`)
 
-Tests multi-producer, single consumer scenarios with coordinated burst production.
+**Features:**
 
-**Configuration:**
-- Producers: 2 concurrent threads
-- Buffer size: 256 events
-- Burst sizes: 1, 10, 100 events per producer
+- Multi-producer, single consumer (MPSC) benchmark
+- Thread-per-producer architecture
+- Modern API (closure-based) and traditional API (EventHandler) tests
+- Batch publishing for large bursts, single publishing for small bursts
+- Burst sizes: 1, 10, 100 events
 - Pause intervals: 0ms, 1ms, 10ms
-- Event type: `Event { data: i64 }`
+- Event type: `i64`
 
 **Advanced Features:**
+
 - **BurstProducer Pattern**: Reusable producer threads with atomic coordination
 - **Cache-Friendly Barriers**: Uses `CachePadded<AtomicBool>` for thread coordination
 - **Realistic Multi-Threading**: Simulates real-world concurrent access patterns
 - **Proper Resource Management**: Clean thread lifecycle management
 
 **Test Cases:**
+
 - `base_overhead` - Multi-threaded measurement overhead
 - `crossbeam_channel` - Multi-producer crossbeam baseline
 - `badbatch_modern` - Modern API with cloneable producers
+- `badbatch_traditional` - Traditional LMAX API with EventHandler and EventTranslator
 
 ### 3. Throughput Comparison (`throughput_comparison.rs`)
 
 High-volume throughput tests measuring raw event processing capacity.
 
 **Configuration:**
+
 - Buffer size: 32,768 events
 - Total events: 10,000,000 per test
 - Batch size: 2,000 events per batch
-- Event type: `Event { val: i32 }`
+- Event type: `Event { val: i64 }`
 
 **Test Scenarios:**
+
 - **SPSC Throughput**: Single producer → single consumer
 - **MPSC Throughput**: Dual producer → single consumer
-- **API Comparison**: Modern vs Traditional API performance
+- **API Comparison**: Modern vs Traditional API performance for both SPSC and MPSC
 
 **Validation:**
+
 - Automatic event count verification
 - End-to-end processing confirmation
 - Memory safety guarantees
@@ -198,6 +211,7 @@ cargo bench -- --output-format html
 ```
 
 Reports include:
+
 - Performance graphs and charts
 - Statistical distributions
 - Comparison between runs
@@ -205,7 +219,7 @@ Reports include:
 
 ### Example Output
 
-```
+```text
 spsc/base_overhead/1       time:   [45.234 ns 45.891 ns 46.548 ns]
                            thrpt:  [21.478 Melem/s 21.789 Melem/s 22.101 Melem/s]
 
@@ -222,23 +236,31 @@ spsc/badbatch_modern/burst: 1, pause: 0 ms
 
 ### Expected Results
 
-Based on the implementation architecture:
+基于实现架构，预期性能特征如下：
 
-1. **Modern API Performance**: Should outperform crossbeam due to:
-   - Lock-free ring buffer design
-   - Batch processing optimizations
-   - Zero-allocation event handling
-   - Cache-friendly memory layout
+1. **现代 API 性能**：应优于 crossbeam，原因如下：
+   - 无锁环形缓冲区设计
+   - 批处理优化
+   - 零分配事件处理
+   - 缓存友好的内存布局
+   - 大批量事件的高效发布
 
-2. **Traditional API Performance**: May show different characteristics due to:
-   - Individual event publishing overhead
-   - EventTranslator abstraction costs
-   - More complex event lifecycle
+2. **传统 API 性能**：可能表现出不同的特征，原因如下：
+   - EventHandler 和 EventTranslator 抽象的开销
+   - 更复杂的事件生命周期管理
+   - 单个事件发布的额外开销
+   - 更灵活的事件处理模式
 
-3. **Multi-Producer Scaling**: MPSC scenarios test:
-   - Contention handling efficiency
-   - Memory barrier performance
-   - Thread coordination overhead
+3. **多生产者扩展性**：MPSC 场景测试：
+   - 竞争处理效率
+   - 内存屏障性能
+   - 线程协调开销
+   - 多线程环境下的资源管理
+
+4. **批量大小影响**：
+   - 较大批量（10-100）应显示更高的吞吐量
+   - 较小批量（1）更能测试单事件处理延迟
+   - 批量发布在现代 API 中应表现出更高效率
 
 ### Optimization Opportunities
 
@@ -249,6 +271,8 @@ Benchmarks help identify:
 - **Cache miss** patterns
 - **Thread contention** issues
 - **API design** efficiency
+- **Batch size impact** on performance
+- **Producer count scaling** characteristics
 
 ## Understanding Benchmark Results
 
@@ -275,11 +299,14 @@ spsc/badbatch_modern/burst: 10, pause: 0 ms
 Compare different implementations:
 
 ```text
-Implementation           | Mean Time    | Throughput   | Relative Performance
--------------------------|--------------|--------------|--------------------
-crossbeam_channel        | 159.23 ns    | 6.28 Melem/s | Baseline (1.00x)
-badbatch_modern          | 91.23 ns     | 10.96 Melem/s| 1.75x faster
-badbatch_traditional     | 112.45 ns    | 8.89 Melem/s | 1.42x faster
+Implementation                  | Mean Time    | Throughput   | Relative Performance
+--------------------------------|--------------|--------------|--------------------
+crossbeam_channel (SPSC)        | 159.23 ns    | 6.28 Melem/s | Baseline (1.00x)
+badbatch_modern (SPSC)          | 91.23 ns     | 10.96 Melem/s| 1.75x faster
+badbatch_traditional (SPSC)     | 112.45 ns    | 8.89 Melem/s | 1.42x faster
+crossbeam_channel (MPSC)        | 189.67 ns    | 5.27 Melem/s | Baseline (1.00x)
+badbatch_modern (MPSC)          | 108.45 ns    | 9.22 Melem/s | 1.75x faster
+badbatch_traditional (MPSC)     | 134.78 ns    | 7.42 Melem/s | 1.41x faster
 ```
 
 ## Benchmark Configuration
@@ -291,6 +318,12 @@ Modify benchmark parameters by editing constants:
 ```rust
 // In spsc_benchmark.rs
 const DATA_STRUCTURE_SIZE: usize = 128;
+const BURST_SIZES: [u64; 3] = [1, 10, 100];
+const PAUSES_MS: [u64; 3] = [0, 1, 10];
+
+// In mpsc_benchmark.rs
+const PRODUCERS: usize = 2;
+const DATA_STRUCTURE_SIZE: usize = 256;
 const BURST_SIZES: [u64; 3] = [1, 10, 100];
 const PAUSES_MS: [u64; 3] = [0, 1, 10];
 
@@ -383,9 +416,10 @@ fn custom_benchmark(c: &mut Criterion) {
                 payload: [0u8; 64], // Adjust based on size
             };
 
-            let processor = |event: &CustomEvent, _seq: i64, _eob: bool| {
+            let processor = |event: &mut CustomEvent, _seq: i64, _eob: bool| {
                 // Process large payload
                 criterion::black_box(&event.payload);
+                Ok(())
             };
 
             let mut producer = build_single_producer(1024, factory, BusySpinWaitStrategy)
