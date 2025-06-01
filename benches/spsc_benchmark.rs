@@ -218,10 +218,10 @@ fn badbatch_spsc_traditional(
         ProducerType::Single,
         Box::new(badbatch::disruptor::BlockingWaitStrategy::new()),
     )
-    .unwrap()
+    .expect("创建 Disruptor 失败")
     .handle_events_with(handler)
     .build()
-    .unwrap();
+    .expect("构建 Disruptor 失败");
 
     // 启动 Disruptor
     disruptor.start().unwrap();
