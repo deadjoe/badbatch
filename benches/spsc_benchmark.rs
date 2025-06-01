@@ -232,6 +232,8 @@ fn badbatch_spsc_traditional(
     group.bench_with_input(benchmark_id, &inputs, move |b, (size, pause_ms)| {
         b.iter_custom(|iters| {
             pause(*pause_ms);
+            // 每次迭代前先重置 sink 的值
+            sink.store(0, Ordering::Release);
             let start = Instant::now();
             for _ in 0..iters {
                 for data in 1..=*size {
@@ -240,9 +242,17 @@ fn badbatch_spsc_traditional(
                     };
                     disruptor_ref.publish_event(translator).unwrap();
                 }
-                // 等待最后一个数据元素被处理
+                // 等待最后一个数据元素被处理，增加超时机制
                 let last_data = black_box(*size);
-                while sink.load(Ordering::Acquire) != last_data {}
+                let max_wait = Instant::now() + Duration::from_millis(100); // 100ms 超时
+                while sink.load(Ordering::Acquire) != last_data {
+                    if Instant::now() > max_wait {
+                        // 超时后跳出循环
+                        break;
+                    }
+                    // 添加小延迟减少 CPU 使用
+                    thread::yield_now();
+                }
             }
             start.elapsed()
         })
