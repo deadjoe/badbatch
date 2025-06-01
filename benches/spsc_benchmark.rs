@@ -212,7 +212,8 @@ fn badbatch_spsc_traditional(
     };
 
     // 创建并配置 Disruptor
-    let mut disruptor = Disruptor::new(
+    // 使用 Arc 包装 Disruptor 以便在闭包内外共享
+    let disruptor = Arc::new(Disruptor::new(
         factory,
         DATA_STRUCTURE_SIZE,
         ProducerType::Single,
@@ -220,12 +221,13 @@ fn badbatch_spsc_traditional(
     )
     .expect("创建 Disruptor 失败")
     .handle_events_with(handler)
-    .build();
+    .build());
 
     // 启动 Disruptor
     disruptor.start().unwrap();
 
     let benchmark_id = BenchmarkId::new("badbatch_traditional", param);
+    let disruptor_clone = Arc::clone(&disruptor);
     group.bench_with_input(benchmark_id, &inputs, move |b, (size, pause_ms)| {
         b.iter_custom(|iters| {
             pause(*pause_ms);
@@ -235,7 +237,7 @@ fn badbatch_spsc_traditional(
                     let translator = BenchEventTranslator {
                         data: black_box(data),
                     };
-                    disruptor.publish_event(translator).unwrap();
+                    disruptor_clone.publish_event(translator).unwrap();
                 }
                 // 等待最后一个数据元素被处理
                 let last_data = black_box(*size);
