@@ -115,7 +115,7 @@ where
 ///
 /// This producer works with any Sequencer implementation (single or multi-producer)
 /// and correctly follows the LMAX Disruptor pattern for sequence allocation and publishing.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SimpleProducer<T>
 where
     T: Send + Sync,

@@ -21,7 +21,7 @@ use std::thread::{self, JoinHandle};
 ///
 /// This struct contains the common implementation used by both the DSL-style
 /// Disruptor class and the Builder-style API to avoid code duplication.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DisruptorCore<E> {
     pub ring_buffer: Arc<RingBuffer<E>>,
     pub sequencer: Arc<dyn Sequencer>,
@@ -269,7 +269,7 @@ pub fn build_multi_producer<E, F, W>(
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + 'static,
+    W: WaitStrategy + Send + Sync + Clone + 'static,
 {
     MultiProducerBuilder::new(size, event_factory, wait_strategy)
 }
@@ -296,6 +296,20 @@ pub struct Consumer {
     join_handle: Option<JoinHandle<()>>,
     /// Thread name for debugging
     thread_name: String,
+}
+
+impl Clone for Consumer {
+    /// Creates a clone of this consumer
+    ///
+    /// Note: The cloned consumer will have its `join_handle` set to `None`
+    /// as thread handles cannot be cloned. This means you can only join the
+    /// original consumer thread once.
+    fn clone(&self) -> Self {
+        Self {
+            join_handle: None, // JoinHandle cannot be cloned
+            thread_name: self.thread_name.clone(),
+        }
+    }
 }
 
 impl Consumer {
@@ -439,7 +453,7 @@ where
 /// This handle provides access to the producer and manages the lifecycle
 /// of consumer threads. When dropped, it will attempt to gracefully
 /// shutdown all consumer threads.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DisruptorHandle<E>
 where
     E: Send + Sync + 'static,
@@ -457,6 +471,14 @@ where
     fn new(core: DisruptorCore<E>) -> Self {
         let producer = core.create_producer();
         Self { core, producer }
+    }
+    
+    /// Creates a new producer that shares the same ring buffer and sequencer
+    ///
+    /// This is useful for multi-producer scenarios where you need multiple threads
+    /// to publish events to the same ring buffer.
+    pub fn create_producer(&self) -> SimpleProducer<E> {
+        self.core.create_producer()
     }
 
     /// Get a reference to the producer
@@ -880,7 +902,7 @@ pub struct MultiProducerBuilder<State, E, F, W>
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + 'static,
+    W: WaitStrategy + Send + Sync + Clone + 'static,
 {
     event_factory: F,
     shared: SharedBuilderState<E, W>,
@@ -891,7 +913,7 @@ impl<E, F, W> MultiProducerBuilder<NoConsumers, E, F, W>
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + 'static,
+    W: WaitStrategy + Send + Sync + Clone + 'static,
 {
     fn new(size: usize, event_factory: F, wait_strategy: W) -> Self {
         Self {
@@ -948,7 +970,7 @@ impl<E, F, W> MultiProducerBuilder<HasConsumers, E, F, W>
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + 'static,
+    W: WaitStrategy + Send + Sync + Clone + 'static,
 {
     /// Set CPU core affinity for the next event handler
     pub fn pin_at_core(mut self, core_id: usize) -> Self {
@@ -978,24 +1000,20 @@ where
         self
     }
 
-    /// Build the Disruptor and return a Producer that can be cloned
-    pub fn build(self) -> CloneableProducer<E> {
-        // Create the ring buffer with a closure event factory
-        let closure_factory = ClosureEventFactory::new(self.event_factory);
-        let ring_buffer = Arc::new(
-            RingBuffer::new(self.shared.size, closure_factory)
-                .expect("Failed to create ring buffer"),
+    /// Build the Disruptor and return a DisruptorHandle
+    ///
+    /// This creates the RingBuffer, MultiProducerSequencer, and starts all event processors.
+    pub fn build(self) -> DisruptorHandle<E> {
+        // Use the unified factory function to create the core components and start consumer threads
+        let core = create_disruptor_core(
+            self.shared.size,
+            self.event_factory,
+            self.shared.wait_strategy,
+            self.shared.consumers,
+            true, // Multi producer
         );
 
-        // Create a multi producer sequencer
-        let sequencer = Arc::new(MultiProducerSequencer::new(
-            self.shared.size,
-            Arc::new(self.shared.wait_strategy),
-        ));
-
-        // TODO: Create and start event processors in background threads
-        // For now, we'll create a cloneable producer wrapper
-        CloneableProducer::new(ring_buffer, sequencer)
+        DisruptorHandle::new(core)
     }
 }
 
@@ -1015,7 +1033,10 @@ impl<E> CloneableProducer<E>
 where
     E: Send + Sync,
 {
-    fn new(ring_buffer: Arc<RingBuffer<E>>, sequencer: Arc<dyn Sequencer>) -> Self {
+    /// Creates a new CloneableProducer with the given ring buffer and sequencer
+    ///
+    /// This constructor allows creating custom producer instances from existing components
+    pub fn new(ring_buffer: Arc<RingBuffer<E>>, sequencer: Arc<dyn Sequencer>) -> Self {
         Self {
             ring_buffer,
             sequencer,
