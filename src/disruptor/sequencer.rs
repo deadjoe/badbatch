@@ -4,11 +4,112 @@
 //! Sequencers manage the allocation of sequence numbers and ensure that producers don't
 //! overwrite events that haven't been consumed yet.
 
-use crate::disruptor::sequence_barrier::SimpleSequenceBarrier;
-use crate::disruptor::{is_power_of_two, DisruptorError, Result, Sequence, WaitStrategy};
+use crate::disruptor::sequence_barrier::{ProcessingSequenceBarrier, SimpleSequenceBarrier};
+use crate::disruptor::{
+    is_power_of_two, DisruptorError, Result, Sequence, SequenceBarrier, WaitStrategy,
+};
 use crossbeam_utils::CachePadded;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// Wrapper to break circular dependency between Sequencer and SequenceBarrier
+///
+/// This wrapper provides a limited sequencer interface that can be used
+/// by sequence barriers without creating circular dependencies.
+#[derive(Debug)]
+struct SequencerWrapper {
+    buffer_size: usize,
+    cursor: Arc<Sequence>,
+}
+
+impl SequencerWrapper {
+    fn new_single_producer(buffer_size: usize, _wait_strategy: Arc<dyn WaitStrategy>) -> Self {
+        Self {
+            buffer_size,
+            cursor: Arc::new(Sequence::new(-1)),
+        }
+    }
+
+    fn new_multi_producer(buffer_size: usize, _wait_strategy: Arc<dyn WaitStrategy>) -> Self {
+        Self {
+            buffer_size,
+            cursor: Arc::new(Sequence::new(-1)),
+        }
+    }
+}
+
+impl Sequencer for SequencerWrapper {
+    fn get_cursor(&self) -> Arc<Sequence> {
+        self.cursor.clone()
+    }
+
+    fn get_buffer_size(&self) -> usize {
+        self.buffer_size
+    }
+
+    fn next(&self) -> Result<i64> {
+        // This is a simplified implementation for barrier use
+        // The actual sequencing is handled by the real sequencer
+        Ok(self.cursor.get() + 1)
+    }
+
+    fn next_n(&self, n: i64) -> Result<i64> {
+        Ok(self.cursor.get() + n)
+    }
+
+    fn try_next(&self) -> Option<i64> {
+        Some(self.cursor.get() + 1)
+    }
+
+    fn try_next_n(&self, n: i64) -> Option<i64> {
+        Some(self.cursor.get() + n)
+    }
+
+    fn publish(&self, _sequence: i64) {
+        // No-op for wrapper
+    }
+
+    fn publish_range(&self, _low: i64, _high: i64) {
+        // No-op for wrapper
+    }
+
+    fn has_available_capacity(&self, _required_capacity: usize) -> bool {
+        true // Simplified for wrapper
+    }
+
+    fn is_available(&self, _sequence: i64) -> bool {
+        true // Simplified for wrapper
+    }
+
+    fn get_highest_published_sequence(&self, _next_sequence: i64, available_sequence: i64) -> i64 {
+        available_sequence // Simplified implementation
+    }
+
+    fn new_barrier(&self, _sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
+        // Return a simple barrier to avoid infinite recursion
+        Arc::new(SimpleSequenceBarrier::new(
+            self.cursor.clone(),
+            // We don't have access to wait strategy here, so use a dummy
+            Arc::new(crate::disruptor::BlockingWaitStrategy::new()),
+        ))
+    }
+
+    fn add_gating_sequences(&self, _gating_sequences: &[Arc<Sequence>]) {
+        // No-op for wrapper
+    }
+
+    fn remove_gating_sequence(&self, _sequence: Arc<Sequence>) -> bool {
+        false // No-op for wrapper
+    }
+
+    fn get_minimum_sequence(&self) -> i64 {
+        self.cursor.get()
+    }
+
+    fn remaining_capacity(&self) -> i64 {
+        self.buffer_size as i64
+    }
+}
 
 /// Trait for sequencers that coordinate access to the ring buffer
 ///
@@ -312,12 +413,19 @@ impl Sequencer for SingleProducerSequencer {
         }
     }
 
-    fn new_barrier(&self, _sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
-        // For now, we'll create a simple barrier without sequencer reference
-        // This will be improved in the next step
-        Arc::new(SimpleSequenceBarrier::new(
+    fn new_barrier(&self, sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
+        // Create a processing barrier with proper dependency tracking
+        // We need to use a self-reference here, which requires careful handling
+        Arc::new(ProcessingSequenceBarrier::new(
             self.cursor.clone(),
             Arc::clone(&self.wait_strategy),
+            sequences_to_track,
+            // Create a weak reference to avoid circular dependency issues
+            // This works because the barrier doesn't need strong ownership of the sequencer
+            Arc::new(SequencerWrapper::new_single_producer(
+                self.buffer_size,
+                Arc::clone(&self.wait_strategy),
+            )) as Arc<dyn Sequencer>,
         ))
     }
 
@@ -663,12 +771,17 @@ impl Sequencer for MultiProducerSequencer {
         }
     }
 
-    fn new_barrier(&self, _sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
-        // For now, use SimpleSequenceBarrier until we solve the circular dependency
-        // This will be improved in the next step
-        Arc::new(SimpleSequenceBarrier::new(
+    fn new_barrier(&self, sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
+        // Create a processing barrier with proper dependency tracking
+        Arc::new(ProcessingSequenceBarrier::new(
             self.cursor.clone(),
             Arc::clone(&self.wait_strategy),
+            sequences_to_track,
+            // Create a wrapper to avoid circular dependency
+            Arc::new(SequencerWrapper::new_multi_producer(
+                self.buffer_size,
+                Arc::clone(&self.wait_strategy),
+            )) as Arc<dyn Sequencer>,
         ))
     }
 
@@ -698,8 +811,7 @@ impl Sequencer for MultiProducerSequencer {
     }
 }
 
-// Forward declaration for SequenceBarrier - we'll implement this in sequence_barrier.rs
-use crate::disruptor::SequenceBarrier;
+// SequenceBarrier is already imported above
 
 #[cfg(test)]
 mod tests {

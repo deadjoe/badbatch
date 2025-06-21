@@ -405,13 +405,22 @@ where
                             let event =
                                 unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
 
-                            // Process the event
-                            if event_handler
-                                .on_event(event, next_sequence, end_of_batch)
-                                .is_err()
+                            // Process the event with proper exception handling
+                            if let Err(e) =
+                                event_handler.on_event(event, next_sequence, end_of_batch)
                             {
-                                // TODO: Handle exceptions properly
-                                break;
+                                // Log the error but continue processing
+                                // This follows LMAX Disruptor's approach of not stopping on individual event errors
+                                eprintln!(
+                                    "Event processing error in thread '{}' at sequence {}: {:?}",
+                                    thread_name, next_sequence, e
+                                );
+
+                                // You could also use an exception handler here if available:
+                                // exception_handler.handle_event_exception(e, next_sequence, event);
+
+                                // Continue processing the next event instead of breaking
+                                // This ensures the consumer doesn't stop due to a single bad event
                             }
 
                             // Critical: Update sequence AFTER event processing is completely done

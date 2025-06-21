@@ -233,34 +233,44 @@ where
         // Each processor runs its actual event processing logic
         for (index, processor) in self.event_processors.iter().enumerate() {
             // Clone the processor for the thread
-            let _processor_clone = Arc::clone(processor);
+            let processor_clone = Arc::clone(processor);
             let shutdown_flag = Arc::clone(&self.shutdown_flag);
 
             let handle = thread::spawn(move || -> Result<()> {
                 println!("Event processor {} starting", index);
 
-                // For now, we'll implement a simplified event processing loop
-                // This is a temporary solution until we properly implement the full
-                // event processor architecture with interior mutability
+                // Start the processor's lifecycle
+                processor_clone.on_start();
 
-                // Simulate event processing work
-                while !shutdown_flag.load(Ordering::Acquire) {
-                    // This is the critical fix: actually do some event processing work!
-                    // In a real implementation, this would:
-                    // 1. Wait for available events from the sequence barrier
-                    // 2. Process events in batches
-                    // 3. Update the processor's sequence
-
-                    // For now, we'll simulate processing by yielding
-                    // This prevents the busy-wait loop that was the main problem
-                    thread::sleep(std::time::Duration::from_millis(1));
-
-                    // Check for shutdown signal
-                    if shutdown_flag.load(Ordering::Acquire) {
-                        break;
+                // Main event processing loop - this is the real implementation
+                let mut running = true;
+                while running && !shutdown_flag.load(Ordering::Acquire) {
+                    match processor_clone.try_run_once() {
+                        Ok(true) => {
+                            // Successfully processed events, continue
+                        }
+                        Ok(false) => {
+                            // No events available, yield to prevent busy waiting
+                            thread::yield_now();
+                        }
+                        Err(DisruptorError::Alert) => {
+                            // Processor was halted, stop processing
+                            running = false;
+                        }
+                        Err(DisruptorError::Timeout) => {
+                            // Timeout occurred, notify and continue
+                            processor_clone.notify_timeout(processor_clone.get_sequence().get());
+                        }
+                        Err(e) => {
+                            // Other errors, log and continue
+                            eprintln!("Event processor {} error: {:?}", index, e);
+                            thread::sleep(std::time::Duration::from_millis(1));
+                        }
                     }
                 }
 
+                // Shutdown lifecycle
+                processor_clone.on_shutdown();
                 println!("Event processor {} shutting down", index);
                 Ok(())
             });
