@@ -472,7 +472,7 @@ where
         let producer = core.create_producer();
         Self { core, producer }
     }
-    
+
     /// Creates a new producer that shares the same ring buffer and sequencer
     ///
     /// This is useful for multi-producer scenarios where you need multiple threads
