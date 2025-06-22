@@ -14,10 +14,6 @@ categories = ["concurrency", "data-structures", "network-programming"]
 name = "badbatch"
 path = "src/lib.rs"
 
-[features]
-default = []
-shared-ring-buffer = []
-
 [dependencies]
 # Core dependencies
 tokio = { version = "1.0", features = ["full"] }
@@ -47,14 +43,10 @@ tokio-test = "0.4"
 crossbeam = "0.8"  # For performance comparison benchmarks
 proptest = "1.0"  # Property-based testing
 
-# Benchmark configurations
-# [[bench]]
-# name = "spsc_benchmark"
-# harness = false
-
-# [[bench]]
-# name = "mpsc_benchmark"
-# harness = false
+[features]
+default = []
+shared-ring-buffer = []
+full-benchmarks = []
 
 [profile.release]
 # Optimize for performance
@@ -70,6 +62,31 @@ lto = true
 codegen-units = 1
 debug = true
 
+# Benchmark configurations
 [[bench]]
-name = "badbatch_spsc_benchmark"
+name = "single_producer_single_consumer"
+harness = false
+
+[[bench]]
+name = "multi_producer_single_consumer"
+harness = false
+
+[[bench]]
+name = "pipeline_processing"
+harness = false
+
+[[bench]]
+name = "latency_comparison"
+harness = false
+
+[[bench]]
+name = "throughput_comparison"
+harness = false
+
+[[bench]]
+name = "buffer_size_scaling"
+harness = false
+
+[[bench]]
+name = "comprehensive_benchmarks"
 harness = false

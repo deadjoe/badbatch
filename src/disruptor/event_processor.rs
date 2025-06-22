@@ -245,8 +245,11 @@ where
 
         let next_sequence = self.sequence.get() + 1;
 
-        // Try to get the next available sequence without blocking
-        let available_sequence = match self.sequence_barrier.wait_for(next_sequence) {
+        // Try to get the next available sequence with a timeout to prevent infinite blocking
+        let available_sequence = match self.sequence_barrier.wait_for_with_timeout(
+            next_sequence,
+            std::time::Duration::from_millis(1), // Very short timeout
+        ) {
             Ok(seq) => seq,
             Err(DisruptorError::Alert) => {
                 // We've been alerted to stop

@@ -29,6 +29,22 @@ pub trait SequenceBarrier: Send + Sync {
     /// Returns an error if waiting is interrupted or an alert occurs
     fn wait_for(&self, sequence: i64) -> Result<i64>;
 
+    /// Wait for the given sequence with timeout
+    ///
+    /// This method blocks until the specified sequence is available or
+    /// until the timeout expires.
+    ///
+    /// # Arguments
+    /// * `sequence` - The sequence to wait for
+    /// * `timeout` - Maximum time to wait
+    ///
+    /// # Returns
+    /// The actual available sequence (may be higher than requested)
+    ///
+    /// # Errors
+    /// Returns an error if waiting is interrupted, times out, or an alert occurs
+    fn wait_for_with_timeout(&self, sequence: i64, timeout: std::time::Duration) -> Result<i64>;
+
     /// Get the cursor sequence that this barrier is tracking
     ///
     /// # Returns
@@ -166,6 +182,35 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
         Ok(highest_published)
     }
 
+    fn wait_for_with_timeout(&self, sequence: i64, timeout: std::time::Duration) -> Result<i64> {
+        // Check if we've been alerted before starting to wait
+        self.check_alert()?;
+
+        // Use the wait strategy with timeout to wait for the sequence
+        let available_sequence = self.wait_strategy.wait_for_with_timeout(
+            sequence,
+            self.cursor.clone(),
+            &self.dependent_sequences,
+            timeout,
+        )?;
+
+        // Check again after waiting in case we were alerted while waiting
+        self.check_alert()?;
+
+        // Critical memory barrier to ensure all previous writes are visible
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+
+        // CRITICAL FIX: Call sequencer.getHighestPublishedSequence like LMAX Disruptor
+        if available_sequence < sequence {
+            return Ok(available_sequence);
+        }
+
+        let highest_published = self
+            .sequencer
+            .get_highest_published_sequence(sequence, available_sequence);
+        Ok(highest_published)
+    }
+
     fn get_cursor(&self) -> Arc<Sequence> {
         self.cursor.clone()
     }
@@ -263,6 +308,25 @@ impl SequenceBarrier for SimpleSequenceBarrier {
             sequence,
             self.cursor.clone(),
             &[], // No dependent sequences
+        )?;
+
+        self.check_alert()?;
+
+        // Critical memory barrier to ensure all previous writes are visible
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+
+        Ok(available_sequence)
+    }
+
+    fn wait_for_with_timeout(&self, sequence: i64, timeout: std::time::Duration) -> Result<i64> {
+        self.check_alert()?;
+
+        // For a simple barrier, we only wait for the cursor with timeout
+        let available_sequence = self.wait_strategy.wait_for_with_timeout(
+            sequence,
+            self.cursor.clone(),
+            &[], // No dependent sequences
+            timeout,
         )?;
 
         self.check_alert()?;
