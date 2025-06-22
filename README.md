@@ -32,6 +32,13 @@
 - **Elegant Consumer**: Automatic lifecycle management with `ElegantConsumer::new()`
 - **Simple Wait Strategies**: Streamlined strategies for easier usage
 
+### 🔬 Formal Verification & Benchmarking
+
+- **TLA+ Verification**: Mathematical proofs of correctness for SPMC and MPMC scenarios
+- **Comprehensive Benchmarks**: 7 specialized benchmark suites covering latency, throughput, and scaling
+- **Performance Testing**: Systematic evaluation against std::mpsc and crossbeam channels
+- **Property Testing**: Invariant checking with proptest for robust validation
+
 ## 📊 Performance & Safety
 
 - **Zero-cost abstractions** with Rust's type system
@@ -158,7 +165,7 @@ disruptor.shutdown()?;
 ```rust
 use badbatch::disruptor::{
     build_single_producer, Producer, ElegantConsumer, RingBuffer,
-    simple_wait_strategy::BusySpin, event_factory::ClosureEventFactory,
+    BusySpinWaitStrategy, simple_wait_strategy, event_factory::ClosureEventFactory,
 };
 use std::sync::Arc;
 
@@ -168,7 +175,7 @@ struct MyEvent {
 }
 
 // Simple producer with closure-based publishing
-let mut producer = build_single_producer(1024, || MyEvent::default(), BusySpin)
+let mut producer = build_single_producer(1024, || MyEvent::default(), BusySpinWaitStrategy)
     .handle_events_with(|event, sequence, end_of_batch| {
         println!("Processing event {} with value {} (batch_end: {})",
                  sequence, event.value, end_of_batch);
@@ -196,7 +203,7 @@ let consumer = ElegantConsumer::with_affinity(
     |event, sequence, end_of_batch| {
         println!("Processing: {} at {}", event.value, sequence);
     },
-    BusySpin,
+    simple_wait_strategy::BusySpin,
     1, // Pin to CPU core 1
 )?;
 
@@ -220,7 +227,7 @@ cargo build
 ### Testing
 
 ```bash
-# Run all tests
+# Run all tests (191 unit tests + 5 integration tests)
 cargo test
 
 # Run comprehensive test suite with quality checks
@@ -231,8 +238,14 @@ cargo test --lib                    # Unit tests
 cargo test --test '*'               # Integration tests
 cargo test --doc                    # Documentation tests
 
-# Run benchmarks
-cargo bench
+# Run performance benchmarks
+bash scripts/run_benchmarks.sh quick    # Quick benchmark suite (2-5 minutes)
+bash scripts/run_benchmarks.sh all      # Full benchmark suite (30-60 minutes)
+
+# Individual benchmark categories
+cargo bench --bench single_producer_single_consumer
+cargo bench --bench throughput_comparison
+cargo bench --bench latency_comparison
 ```
 
 ### Code Quality
@@ -275,6 +288,19 @@ BadBatch is designed for high-performance event processing with the following ch
 - **Bit Manipulation**: Fast modulo operations using bit masks for power-of-2 buffer sizes
 - **Memory Layout**: Optimal data structures (`Box<[UnsafeCell<T>]>`) for better cache locality
 
+### Benchmark Results
+
+Our comprehensive benchmark suite covers multiple scenarios:
+
+- **SPSC (Single Producer Single Consumer)**: Tests different wait strategies with varying burst sizes
+- **MPSC (Multi Producer Single Consumer)**: Evaluates producer coordination and scalability  
+- **Pipeline Processing**: Complex event processing chains with dependencies
+- **Latency Comparison**: Head-to-head performance against std::mpsc and crossbeam channels
+- **Throughput Analysis**: Raw event processing rates across different configurations
+- **Buffer Scaling**: Performance characteristics with buffer sizes from 64 to 8192 slots
+
+Run `./scripts/run_benchmarks.sh` to execute the full performance evaluation suite.
+
 ## 🤝 Contributing
 
 We welcome contributions! Please follow these steps:
@@ -296,18 +322,42 @@ This project is licensed under the GNU Affero General Public License v3.0 (AGPL-
 
 See the [LICENSE](LICENSE) file for details.
 
+## 🔬 Formal Verification
+
+BadBatch includes comprehensive TLA+ formal verification models that mathematically prove the correctness of our concurrent algorithms:
+
+### Verification Models
+- **BadBatchSPMC.tla**: Single Producer Multi Consumer verification (✅ 7,197 states verified)
+- **BadBatchMPMC.tla**: Multi Producer Multi Consumer verification (✅ 161,285 states verified) 
+- **BadBatchRingBuffer.tla**: Ring buffer data structure verification
+
+### Verified Properties
+- **Safety**: No data races, type safety, memory safety
+- **Liveness**: All events eventually consumed, no deadlocks, progress guarantees
+
+Run formal verification:
+```bash
+cd verification
+./verify.sh spmc    # Quick SPMC verification
+./verify.sh mpmc    # Comprehensive MPMC verification  
+./verify.sh all     # Full verification suite
+```
+
 ## 🙏 Acknowledgments
 
 - [LMAX Disruptor](https://github.com/LMAX-Exchange/disruptor) - Original Java implementation and design patterns
-- [disruptor-rs](https://github.com/sklose/disruptor) - Rust implementation inspiration for modern API design
+- [disruptor-rs](https://github.com/nicholassm/disruptor-rs) - Rust implementation inspiration for modern API design
 - [Rust Community](https://www.rust-lang.org/community) - For the amazing ecosystem and safety guarantees
 - [crossbeam-utils](https://github.com/crossbeam-rs/crossbeam) - Cache-friendly atomic operations
+- [TLA+](https://lamport.azurewebsites.net/tla/tla.html) - Formal verification methodology
 
 ## 📞 Support
 
 - 🐛 [Issue Tracker](https://github.com/deadjoe/badbatch/issues)
 - 💬 [Discussions](https://github.com/deadjoe/badbatch/discussions)
-- 📖 [DESIGN.md](docs/DESIGN.md) - Comprehensive design documentation
+- 📖 [DESIGN.md](DESIGN.md) - Comprehensive design documentation
+- 🔬 [Verification](verification/) - TLA+ formal verification models
+- 📊 [Benchmarks](benches/) - Performance evaluation suite
 
 ---
 

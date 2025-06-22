@@ -119,7 +119,7 @@ impl SimpleWaitStrategy for Sleeping {
 ///
 /// This allows the simplified wait strategies to work with the existing
 /// LMAX Disruptor infrastructure while providing the simpler API.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SimpleWaitStrategyAdapter<S>
 where
     S: SimpleWaitStrategy,

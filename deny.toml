@@ -201,6 +201,9 @@ deny = [
 skip = [
     #"ansi_term@0.11.0",
     #{ crate = "ansi_term@0.11.0", reason = "you can specify a reason why it can't be updated/removed" },
+    { crate = "hermit-abi@0.3.9", reason = "Required by num_cpus for core_affinity compatibility" },
+    { crate = "wasi@0.11.0+wasi-snapshot-preview1", reason = "Required by older getrandom/rand for proptest compatibility" },
+    { crate = "windows-sys@0.52.0", reason = "Required by older tokio/socket2 for compatibility" },
 ]
 # Similarly to `skip` allows you to skip certain crates during duplicate
 # detection. Unlike skip, it also includes the entire tree of transitive
