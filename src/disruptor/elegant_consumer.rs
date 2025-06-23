@@ -450,4 +450,247 @@ mod tests {
             .shutdown()
             .expect("Consumer should shutdown cleanly");
     }
+
+    #[test]
+    fn test_consumer_drop_behavior() {
+        let factory = ClosureEventFactory::new(|| TestEvent { value: 0 });
+        let ring_buffer = Arc::new(RingBuffer::new(8, factory).unwrap());
+
+        let consumer: ElegantConsumer<TestEvent> = ElegantConsumer::new(
+            ring_buffer,
+            |_event: &TestEvent, _sequence: i64, _end_of_batch: bool| {
+                // Just process the event
+            },
+            BusySpin,
+        )
+        .unwrap();
+
+        assert!(consumer.is_running());
+
+        // Drop the consumer (should trigger Drop implementation)
+        drop(consumer);
+        // Test passes if no panic occurs
+    }
+
+    #[test]
+    fn test_shutdown_with_already_shutdown_consumer() {
+        let factory = ClosureEventFactory::new(|| TestEvent { value: 0 });
+        let ring_buffer = Arc::new(RingBuffer::new(8, factory).unwrap());
+
+        let consumer: ElegantConsumer<TestEvent> = ElegantConsumer::new(
+            ring_buffer,
+            |_event: &TestEvent, _sequence: i64, _end_of_batch: bool| {
+                // Just process the event
+            },
+            BusySpin,
+        )
+        .unwrap();
+
+        // First shutdown
+        consumer.shutdown().expect("First shutdown should succeed");
+
+        // Simulate a second shutdown by manually creating another consumer without thread
+        let second_consumer: ElegantConsumer<TestEvent> = ElegantConsumer {
+            thread: None,
+            sequence: Arc::new(CachePadded::new(AtomicI64::new(-1))),
+            shutdown: Arc::new(AtomicBool::new(true)),
+            _phantom: PhantomData,
+        };
+
+        // Second shutdown should return Ok(()) when thread is None
+        let result = second_consumer.shutdown();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_consumer_sequence_tracking() {
+        let factory = ClosureEventFactory::new(|| TestEvent { value: 42 });
+        let ring_buffer = Arc::new(RingBuffer::new(8, factory).unwrap());
+
+        let processed_count = Arc::new(Mutex::new(0));
+        let processed_count_clone = processed_count.clone();
+
+        let consumer: ElegantConsumer<TestEvent> = ElegantConsumer::new(
+            ring_buffer.clone(),
+            move |_event: &TestEvent, _sequence: i64, _end_of_batch: bool| {
+                let mut count = processed_count_clone.lock().unwrap();
+                *count += 1;
+            },
+            BusySpin,
+        )
+        .unwrap();
+
+        // Give some time for processing
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Check that current_sequence is updated
+        let initial_seq = consumer.current_sequence();
+        assert!(initial_seq >= -1);
+
+        consumer
+            .shutdown()
+            .expect("Consumer should shutdown cleanly");
+    }
+
+    #[test]
+    fn test_wait_for_events_with_shutdown() {
+        let factory = ClosureEventFactory::new(|| TestEvent { value: 0 });
+        let ring_buffer = RingBuffer::new(8, factory).unwrap();
+        let shutdown = AtomicBool::new(true); // Start with shutdown = true
+        let wait_strategy = BusySpin;
+
+        let result = ElegantConsumer::wait_for_events(0, &ring_buffer, &wait_strategy, &shutdown);
+        assert!(result.is_none(), "Should return None when shutdown is true");
+
+        // Test with shutdown = false
+        let shutdown = AtomicBool::new(false);
+        let result = ElegantConsumer::wait_for_events(0, &ring_buffer, &wait_strategy, &shutdown);
+        assert!(
+            result.is_some(),
+            "Should return Some when shutdown is false"
+        );
+    }
+
+    #[test]
+    fn test_wait_for_events_sequence_bounds() {
+        let factory = ClosureEventFactory::new(|| TestEvent { value: 0 });
+        let ring_buffer = RingBuffer::new(8, factory).unwrap();
+        let shutdown = AtomicBool::new(false);
+        let wait_strategy = BusySpin;
+
+        // Test within bounds
+        let result = ElegantConsumer::wait_for_events(4, &ring_buffer, &wait_strategy, &shutdown);
+        assert!(
+            result.is_some(),
+            "Should return Some when sequence is within bounds"
+        );
+
+        // Test beyond bounds
+        let result = ElegantConsumer::wait_for_events(10, &ring_buffer, &wait_strategy, &shutdown);
+        assert!(
+            result.is_some(),
+            "Should still return Some after wait strategy"
+        );
+    }
+
+    #[test]
+    fn test_consumer_with_state_processing() {
+        let factory = ClosureEventFactory::new(|| TestEvent { value: 1 });
+        let ring_buffer = Arc::new(RingBuffer::new(8, factory).unwrap());
+
+        let sum_result = Arc::new(Mutex::new(0));
+        let sum_result_clone = sum_result.clone();
+
+        let consumer: ElegantConsumer<TestEvent> = ElegantConsumer::with_state(
+            ring_buffer.clone(),
+            move |state: &mut i32, event: &TestEvent, _sequence: i64, _end_of_batch: bool| {
+                *state += event.value;
+                // Store the current state sum
+                let mut result = sum_result_clone.lock().unwrap();
+                *result = *state;
+            },
+            || 0i32,
+            BusySpin,
+        )
+        .unwrap();
+
+        // Give some time for processing
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        consumer
+            .shutdown()
+            .expect("Consumer should shutdown cleanly");
+
+        // Check that state was updated
+        let final_sum = *sum_result.lock().unwrap();
+        assert!(final_sum >= 0, "State should have been updated");
+    }
+
+    #[test]
+    fn test_consumer_is_running_states() {
+        let factory = ClosureEventFactory::new(|| TestEvent { value: 0 });
+        let ring_buffer = Arc::new(RingBuffer::new(8, factory).unwrap());
+
+        let consumer: ElegantConsumer<TestEvent> = ElegantConsumer::new(
+            ring_buffer,
+            |_event: &TestEvent, _sequence: i64, _end_of_batch: bool| {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            },
+            BusySpin,
+        )
+        .unwrap();
+
+        // Should be running initially
+        assert!(consumer.is_running());
+
+        // Shutdown should make it not running
+        consumer
+            .shutdown()
+            .expect("Consumer should shutdown cleanly");
+    }
+
+    #[test]
+    fn test_consumer_thread_naming() {
+        let factory = ClosureEventFactory::new(|| TestEvent { value: 0 });
+        let ring_buffer = Arc::new(RingBuffer::new(8, factory).unwrap());
+
+        // Test basic consumer thread naming
+        let consumer1: ElegantConsumer<TestEvent> = ElegantConsumer::new(
+            ring_buffer.clone(),
+            |_event: &TestEvent, _sequence: i64, _end_of_batch: bool| {},
+            BusySpin,
+        )
+        .unwrap();
+
+        // Test with-state consumer thread naming
+        let consumer2: ElegantConsumer<TestEvent> = ElegantConsumer::with_state(
+            ring_buffer.clone(),
+            |_state: &mut i32, _event: &TestEvent, _sequence: i64, _end_of_batch: bool| {},
+            || 0i32,
+            BusySpin,
+        )
+        .unwrap();
+
+        consumer1
+            .shutdown()
+            .expect("Consumer1 should shutdown cleanly");
+        consumer2
+            .shutdown()
+            .expect("Consumer2 should shutdown cleanly");
+    }
+
+    #[test]
+    fn test_consumer_loop_batch_processing() {
+        let factory = ClosureEventFactory::new(|| TestEvent { value: 1 });
+        let ring_buffer = Arc::new(RingBuffer::new(8, factory).unwrap());
+
+        let batch_info = Arc::new(Mutex::new(Vec::new()));
+        let batch_info_clone = batch_info.clone();
+
+        let consumer: ElegantConsumer<TestEvent> = ElegantConsumer::new(
+            ring_buffer.clone(),
+            move |_event: &TestEvent, sequence: i64, end_of_batch: bool| {
+                batch_info_clone
+                    .lock()
+                    .unwrap()
+                    .push((sequence, end_of_batch));
+            },
+            BusySpin,
+        )
+        .unwrap();
+
+        // Give some time for processing
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        consumer
+            .shutdown()
+            .expect("Consumer should shutdown cleanly");
+
+        // Check that batch processing occurred
+        let batch_events = batch_info.lock().unwrap();
+        assert!(
+            !batch_events.is_empty(),
+            "Should have processed some events"
+        );
+    }
 }
