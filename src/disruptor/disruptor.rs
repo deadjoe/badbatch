@@ -306,30 +306,50 @@ where
             return Ok(()); // Not started, nothing to shutdown
         }
 
-        // Signal shutdown to all threads
+        // Signal shutdown to all threads atomically
         self.shutdown_flag.store(true, Ordering::Release);
+        
+        // Ensure memory ordering before halting processors
+        std::sync::atomic::fence(Ordering::SeqCst);
 
-        // Halt all event processors
+        // Halt all event processors to ensure they stop processing
         for processor in &self.event_processors {
             processor.halt();
         }
 
-        // Wait for all threads to complete
+        // Give threads a brief moment to notice the shutdown signal
+        std::thread::sleep(std::time::Duration::from_millis(1));
+
+        // Wait for all threads to complete with better error handling
+        let mut join_errors = Vec::new();
         while let Some(handle) = self.thread_handles.pop() {
             match handle.join() {
                 Ok(Ok(())) => {
                     // Thread completed successfully
                 }
                 Ok(Err(e)) => {
-                    eprintln!("Event processor thread returned error: {:?}", e);
+                    let err_msg = format!("Event processor thread returned error: {:?}", e);
+                    eprintln!("{}", err_msg);
+                    join_errors.push(err_msg);
                 }
                 Err(_) => {
-                    eprintln!("Event processor thread panicked");
+                    let err_msg = "Event processor thread panicked".to_string();
+                    eprintln!("{}", err_msg);
+                    join_errors.push(err_msg);
                 }
             }
         }
 
         self.started = false;
+        
+        // Return error if any threads failed to shutdown cleanly
+        if !join_errors.is_empty() {
+            return Err(DisruptorError::ShutdownError(format!(
+                "Some threads failed to shutdown cleanly: {:?}", 
+                join_errors
+            )));
+        }
+        
         Ok(())
     }
 
@@ -460,8 +480,11 @@ where
     }
 
     unsafe fn get_mut(&self, sequence: i64) -> &mut T {
-        // This is unsafe but necessary for the Disruptor pattern
-        // The caller must ensure exclusive access
+        // SAFETY: The caller must ensure exclusive access to the sequence slot.
+        // This is guaranteed by the Disruptor pattern where:
+        // - Producers only access sequences they've claimed from the sequencer
+        // - Consumers only access sequences after all producers have published
+        // - The sequencer coordinates access to prevent overlapping claims
         &mut *self.get_mut_unchecked(sequence)
     }
 }
