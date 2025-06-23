@@ -9,8 +9,8 @@
 #[test]
 fn corrected_traditional_lmax_example() {
     use badbatch::disruptor::{
-        Disruptor, ProducerType, BlockingWaitStrategy, DefaultEventFactory,
-        EventHandler, EventTranslator,
+        BlockingWaitStrategy, DefaultEventFactory, Disruptor, EventHandler, EventTranslator,
+        ProducerType,
     };
 
     #[derive(Debug, Default)]
@@ -23,9 +23,16 @@ fn corrected_traditional_lmax_example() {
     struct MyEventHandler;
 
     impl EventHandler<MyEvent> for MyEventHandler {
-        fn on_event(&mut self, event: &mut MyEvent, sequence: i64, end_of_batch: bool) -> badbatch::disruptor::Result<()> {
-            println!("Processing event {} with value {} (end_of_batch: {})",
-                     sequence, event.value, end_of_batch);
+        fn on_event(
+            &mut self,
+            event: &mut MyEvent,
+            sequence: i64,
+            end_of_batch: bool,
+        ) -> badbatch::disruptor::Result<()> {
+            println!(
+                "Processing event {} with value {} (end_of_batch: {})",
+                sequence, event.value, end_of_batch
+            );
             Ok(())
         }
     }
@@ -37,7 +44,8 @@ fn corrected_traditional_lmax_example() {
         1024, // Buffer size (must be power of 2)
         ProducerType::Single,
         Box::new(BlockingWaitStrategy::new()),
-    ).unwrap()
+    )
+    .unwrap()
     .handle_events_with(MyEventHandler)
     .build();
 
@@ -71,8 +79,8 @@ fn corrected_traditional_lmax_example() {
 #[test]
 fn corrected_modern_disruptor_rs_example() {
     use badbatch::disruptor::{
-        build_single_producer, ElegantConsumer, RingBuffer,
-        BusySpinWaitStrategy, simple_wait_strategy::BusySpin, event_factory::ClosureEventFactory,
+        build_single_producer, event_factory::ClosureEventFactory, simple_wait_strategy::BusySpin,
+        BusySpinWaitStrategy, ElegantConsumer, RingBuffer,
     };
     use std::sync::Arc;
 
@@ -85,8 +93,10 @@ fn corrected_modern_disruptor_rs_example() {
     // The README showed BusySpin but the builder requires a WaitStrategy trait implementor
     let mut producer = build_single_producer(1024, MyEvent::default, BusySpinWaitStrategy)
         .handle_events_with(|event, sequence, end_of_batch| {
-            println!("Processing event {} with value {} (batch_end: {})",
-                     sequence, event.value, end_of_batch);
+            println!(
+                "Processing event {} with value {} (batch_end: {})",
+                sequence, event.value, end_of_batch
+            );
         })
         .build();
 
@@ -113,8 +123,9 @@ fn corrected_modern_disruptor_rs_example() {
             println!("Processing: {} at {}", event.value, sequence);
         },
         BusySpin, // This works correctly as ElegantConsumer uses SimpleWaitStrategy
-        1, // Pin to CPU core 1
-    ).unwrap();
+        1,        // Pin to CPU core 1
+    )
+    .unwrap();
 
     // Graceful shutdown
     consumer.shutdown().unwrap();
@@ -123,9 +134,7 @@ fn corrected_modern_disruptor_rs_example() {
 // Alternative modern API using SimpleWaitStrategyAdapter
 #[test]
 fn alternative_modern_api_with_adapter() {
-    use badbatch::disruptor::{
-        build_single_producer, simple_wait_strategy,
-    };
+    use badbatch::disruptor::{build_single_producer, simple_wait_strategy};
 
     #[derive(Debug, Default)]
     struct MyEvent {
@@ -135,13 +144,15 @@ fn alternative_modern_api_with_adapter() {
     // ALTERNATIVE: Use SimpleWaitStrategyAdapter to bridge the gap
     // This makes the simple wait strategies work with build_single_producer
     let mut producer = build_single_producer(
-        1024, 
-        MyEvent::default, 
-        simple_wait_strategy::busy_spin()  // Returns SimpleWaitStrategyAdapter<BusySpin>
+        1024,
+        MyEvent::default,
+        simple_wait_strategy::busy_spin(), // Returns SimpleWaitStrategyAdapter<BusySpin>
     )
     .handle_events_with(|event, sequence, end_of_batch| {
-        println!("Processing event {} with value {} (batch_end: {})",
-                 sequence, event.value, end_of_batch);
+        println!(
+            "Processing event {} with value {} (batch_end: {})",
+            sequence, event.value, end_of_batch
+        );
     })
     .build();
 
@@ -155,39 +166,81 @@ fn alternative_modern_api_with_adapter() {
 fn test_all_wait_strategy_options() {
     // Show all the wait strategy options that work with build_single_producer
     use badbatch::disruptor::build_single_producer;
-    
+
     #[derive(Debug, Default)]
     struct MyEvent {
         value: i64,
     }
 
     // Option 1: Traditional LMAX wait strategies
-    let _producer1 = build_single_producer(1024, MyEvent::default, badbatch::disruptor::BusySpinWaitStrategy)
-        .handle_events_with(|event, _seq, _end| { event.value = 1; })
-        .build();
+    let _producer1 = build_single_producer(
+        1024,
+        MyEvent::default,
+        badbatch::disruptor::BusySpinWaitStrategy,
+    )
+    .handle_events_with(|event, _seq, _end| {
+        event.value = 1;
+    })
+    .build();
 
-    let _producer2 = build_single_producer(1024, MyEvent::default, badbatch::disruptor::BlockingWaitStrategy::new())
-        .handle_events_with(|event, _seq, _end| { event.value = 2; })
-        .build();
+    let _producer2 = build_single_producer(
+        1024,
+        MyEvent::default,
+        badbatch::disruptor::BlockingWaitStrategy::new(),
+    )
+    .handle_events_with(|event, _seq, _end| {
+        event.value = 2;
+    })
+    .build();
 
-    let _producer3 = build_single_producer(1024, MyEvent::default, badbatch::disruptor::YieldingWaitStrategy)
-        .handle_events_with(|event, _seq, _end| { event.value = 3; })
-        .build();
+    let _producer3 = build_single_producer(
+        1024,
+        MyEvent::default,
+        badbatch::disruptor::YieldingWaitStrategy,
+    )
+    .handle_events_with(|event, _seq, _end| {
+        event.value = 3;
+    })
+    .build();
 
-    let _producer4 = build_single_producer(1024, MyEvent::default, badbatch::disruptor::SleepingWaitStrategy::new())
-        .handle_events_with(|event, _seq, _end| { event.value = 4; })
-        .build();
+    let _producer4 = build_single_producer(
+        1024,
+        MyEvent::default,
+        badbatch::disruptor::SleepingWaitStrategy::new(),
+    )
+    .handle_events_with(|event, _seq, _end| {
+        event.value = 4;
+    })
+    .build();
 
     // Option 2: Simple wait strategy adapters (using helper functions)
-    let _producer5 = build_single_producer(1024, MyEvent::default, badbatch::disruptor::simple_wait_strategy::busy_spin())
-        .handle_events_with(|event, _seq, _end| { event.value = 5; })
-        .build();
+    let _producer5 = build_single_producer(
+        1024,
+        MyEvent::default,
+        badbatch::disruptor::simple_wait_strategy::busy_spin(),
+    )
+    .handle_events_with(|event, _seq, _end| {
+        event.value = 5;
+    })
+    .build();
 
-    let _producer6 = build_single_producer(1024, MyEvent::default, badbatch::disruptor::simple_wait_strategy::yielding())
-        .handle_events_with(|event, _seq, _end| { event.value = 6; })
-        .build();
+    let _producer6 = build_single_producer(
+        1024,
+        MyEvent::default,
+        badbatch::disruptor::simple_wait_strategy::yielding(),
+    )
+    .handle_events_with(|event, _seq, _end| {
+        event.value = 6;
+    })
+    .build();
 
-    let _producer7 = build_single_producer(1024, MyEvent::default, badbatch::disruptor::simple_wait_strategy::sleeping())
-        .handle_events_with(|event, _seq, _end| { event.value = 7; })
-        .build();
+    let _producer7 = build_single_producer(
+        1024,
+        MyEvent::default,
+        badbatch::disruptor::simple_wait_strategy::sleeping(),
+    )
+    .handle_events_with(|event, _seq, _end| {
+        event.value = 7;
+    })
+    .build();
 }
