@@ -142,6 +142,7 @@ tarpaulin-report.json
 cobertura.xml
 lcov.info
 coverage/
+coverage-report/
 *.profdata
 
 # Documentation Internal
