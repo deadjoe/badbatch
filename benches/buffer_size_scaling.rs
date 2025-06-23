@@ -1,19 +1,19 @@
 //! Buffer Size Scaling Benchmarks
-//! 
+//!
 //! This benchmark suite tests how performance scales with different buffer sizes
 //! and identifies optimal buffer configurations for different workloads.
 
+use criterion::measurement::WallTime;
 use criterion::{
     black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
-use criterion::measurement::WallTime;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use badbatch::disruptor::{
-    event_translator::ClosureEventTranslator, BusySpinWaitStrategy, DefaultEventFactory,
-    Disruptor, EventHandler, ProducerType, Result as DisruptorResult, YieldingWaitStrategy,
+    event_translator::ClosureEventTranslator, BusySpinWaitStrategy, DefaultEventFactory, Disruptor,
+    EventHandler, ProducerType, Result as DisruptorResult, YieldingWaitStrategy,
 };
 
 // Buffer size configurations to test
@@ -65,11 +65,11 @@ impl EventHandler<ScalingEvent> for ScalingHandler {
                 std::hint::spin_loop();
             }
         }
-        
+
         // Process the event data
         let sum: i64 = event.data.iter().sum();
         black_box(sum);
-        
+
         self.last_id.store(event.id, Ordering::Release);
         self.counter.fetch_add(1, Ordering::Release);
         Ok(())
@@ -101,7 +101,7 @@ fn benchmark_fast_processing_scaling(
 
     let param = format!("fast_buf{}_work{}", buffer_size, workload_size);
     let benchmark_id = BenchmarkId::new("FastProcessing", param);
-    
+
     group.throughput(Throughput::Elements(workload_size));
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
@@ -109,7 +109,7 @@ fn benchmark_fast_processing_scaling(
             for _ in 0..iters {
                 counter.store(0, Ordering::Release);
                 last_id.store(0, Ordering::Release);
-                
+
                 for i in 1..=workload_size {
                     disruptor
                         .publish_event(ClosureEventTranslator::new(
@@ -120,7 +120,7 @@ fn benchmark_fast_processing_scaling(
                         ))
                         .unwrap();
                 }
-                
+
                 // Wait for all events to be processed
                 while last_id.load(Ordering::Acquire) < workload_size as i64 {
                     std::hint::spin_loop();
@@ -158,7 +158,7 @@ fn benchmark_medium_processing_scaling(
 
     let param = format!("medium_buf{}_work{}", buffer_size, workload_size);
     let benchmark_id = BenchmarkId::new("MediumProcessing", param);
-    
+
     group.throughput(Throughput::Elements(workload_size));
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
@@ -166,7 +166,7 @@ fn benchmark_medium_processing_scaling(
             for _ in 0..iters {
                 counter.store(0, Ordering::Release);
                 last_id.store(0, Ordering::Release);
-                
+
                 for i in 1..=workload_size {
                     disruptor
                         .publish_event(ClosureEventTranslator::new(
@@ -177,7 +177,7 @@ fn benchmark_medium_processing_scaling(
                         ))
                         .unwrap();
                 }
-                
+
                 // Wait for all events to be processed
                 while last_id.load(Ordering::Acquire) < workload_size as i64 {
                     std::thread::yield_now();
@@ -215,7 +215,7 @@ fn benchmark_slow_processing_scaling(
 
     let param = format!("slow_buf{}_work{}", buffer_size, workload_size);
     let benchmark_id = BenchmarkId::new("SlowProcessing", param);
-    
+
     group.throughput(Throughput::Elements(workload_size));
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
@@ -223,7 +223,7 @@ fn benchmark_slow_processing_scaling(
             for _ in 0..iters {
                 counter.store(0, Ordering::Release);
                 last_id.store(0, Ordering::Release);
-                
+
                 for i in 1..=workload_size {
                     disruptor
                         .publish_event(ClosureEventTranslator::new(
@@ -234,7 +234,7 @@ fn benchmark_slow_processing_scaling(
                         ))
                         .unwrap();
                 }
-                
+
                 // Wait for all events to be processed
                 while last_id.load(Ordering::Acquire) < workload_size as i64 {
                     std::thread::sleep(Duration::from_millis(1));
@@ -248,10 +248,7 @@ fn benchmark_slow_processing_scaling(
 }
 
 /// Test memory usage scaling with different buffer sizes
-fn benchmark_memory_scaling(
-    group: &mut BenchmarkGroup<WallTime>,
-    buffer_size: usize,
-) {
+fn benchmark_memory_scaling(group: &mut BenchmarkGroup<WallTime>, buffer_size: usize) {
     let factory = DefaultEventFactory::<ScalingEvent>::new();
     let handler = ScalingHandler::new(0);
     let counter = handler.get_counter();
@@ -269,7 +266,7 @@ fn benchmark_memory_scaling(
     disruptor.start().unwrap();
 
     let benchmark_id = BenchmarkId::new("MemoryUsage", buffer_size);
-    
+
     group.bench_function(benchmark_id, |b| {
         b.iter(|| {
             // Test memory allocation patterns by creating events with different payload sizes
@@ -280,7 +277,7 @@ fn benchmark_memory_scaling(
                         event.data = vec![1; payload_size];
                     },
                 ));
-                
+
                 if success {
                     // Wait for event to be processed
                     let initial_count = counter.load(Ordering::Acquire);
@@ -320,7 +317,7 @@ fn benchmark_buffer_utilization(
 
     let param = format!("util_buf{}_burst{}", buffer_size, burst_size);
     let benchmark_id = BenchmarkId::new("BufferUtil", param);
-    
+
     group.throughput(Throughput::Elements(burst_size));
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
@@ -328,7 +325,7 @@ fn benchmark_buffer_utilization(
             for _ in 0..iters {
                 counter.store(0, Ordering::Release);
                 last_id.store(0, Ordering::Release);
-                
+
                 // Publish a burst of events
                 for i in 1..=burst_size {
                     // Use try_publish to test buffer utilization
@@ -339,7 +336,7 @@ fn benchmark_buffer_utilization(
                                 event.data = vec![i as i64; 8];
                             },
                         ));
-                        
+
                         if success {
                             break;
                         }
@@ -347,7 +344,7 @@ fn benchmark_buffer_utilization(
                         std::hint::spin_loop();
                     }
                 }
-                
+
                 // Wait for all events to be processed
                 while last_id.load(Ordering::Acquire) < burst_size as i64 {
                     std::hint::spin_loop();
@@ -363,11 +360,11 @@ fn benchmark_buffer_utilization(
 /// Main buffer size scaling benchmark function
 pub fn buffer_scaling_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("BufferScaling");
-    
+
     // Configure benchmark group
     group.measurement_time(Duration::from_secs(20));
     group.warm_up_time(Duration::from_secs(5));
-    
+
     // Test fast processing scaling across all buffer sizes and workloads
     for &buffer_size in BUFFER_SIZES.iter() {
         for &workload_size in WORKLOAD_SIZES.iter() {
@@ -375,28 +372,28 @@ pub fn buffer_scaling_benchmark(c: &mut Criterion) {
             if buffer_size > 2048 && workload_size > 5_000 {
                 continue;
             }
-            
+
             benchmark_fast_processing_scaling(&mut group, buffer_size, workload_size);
         }
     }
-    
+
     // Test medium processing scaling for selected configurations
     for &buffer_size in [256, 1024, 4096].iter() {
         for &workload_size in [1_000, 5_000].iter() {
             benchmark_medium_processing_scaling(&mut group, buffer_size, workload_size);
         }
     }
-    
+
     // Test slow processing scaling for selected configurations
     for &buffer_size in [512, 2048].iter() {
         benchmark_slow_processing_scaling(&mut group, buffer_size, 1_000);
     }
-    
+
     // Test memory usage for all buffer sizes
     for &buffer_size in BUFFER_SIZES.iter() {
         benchmark_memory_scaling(&mut group, buffer_size);
     }
-    
+
     // Test buffer utilization patterns
     for &buffer_size in [256, 1024, 4096].iter() {
         for &burst_size in [100, 500].iter() {
@@ -406,7 +403,7 @@ pub fn buffer_scaling_benchmark(c: &mut Criterion) {
             }
         }
     }
-    
+
     group.finish();
 }
 

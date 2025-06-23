@@ -1,12 +1,12 @@
 //! Multi Producer Single Consumer (MPSC) Benchmarks
-//! 
-//! This benchmark suite tests the performance of the BadBatch Disruptor 
+//!
+//! This benchmark suite tests the performance of the BadBatch Disruptor
 //! in multi producer, single consumer scenarios with different configurations.
 
+use criterion::measurement::WallTime;
 use criterion::{
     black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
-use criterion::measurement::WallTime;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -42,7 +42,7 @@ impl MPSCCountingSink {
         let last_values = (0..producer_count)
             .map(|_| AtomicI64::new(0))
             .collect::<Vec<_>>();
-        
+
         Self {
             event_count: Arc::new(AtomicI64::new(0)),
             last_values: Arc::new(last_values),
@@ -73,7 +73,7 @@ impl EventHandler<MPSCEvent> for MPSCCountingSink {
         if event.producer_id < self.last_values.len() {
             self.last_values[event.producer_id].store(event.value, Ordering::Release);
         }
-        
+
         // Increment total event count
         self.event_count.fetch_add(1, Ordering::Release);
         Ok(())
@@ -101,18 +101,16 @@ impl BurstProducer {
         let join_handle = thread::spawn(move || {
             while !stop_flag_clone.load(Ordering::Acquire) {
                 // Wait for start signal
-                while start_barrier_clone.compare_exchange(
-                    true,
-                    false,
-                    Ordering::Acquire,
-                    Ordering::Relaxed,
-                ).is_err() {
+                while start_barrier_clone
+                    .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
+                    .is_err()
+                {
                     if stop_flag_clone.load(Ordering::Acquire) {
                         return;
                     }
                     std::hint::spin_loop();
                 }
-                
+
                 // Produce burst
                 produce_burst();
             }
@@ -151,24 +149,24 @@ fn run_mpsc_benchmark<F>(
 {
     group.bench_with_input(benchmark_id, &params, move |b, (size, pause_ms)| {
         setup_fn();
-        
+
         b.iter_custom(|iters| {
             burst_size.store(*size as i64, Ordering::Release);
             let expected_total = *size * burst_producers.len() as u64;
-            
+
             if *pause_ms > 0 {
                 thread::sleep(Duration::from_millis(*pause_ms));
             }
-            
+
             let start = Instant::now();
             for _ in 0..iters {
                 event_counter.store(0, Ordering::Release);
-                
+
                 // Start all producers simultaneously
                 for producer in burst_producers {
                     producer.start();
                 }
-                
+
                 // Wait for all events to be processed
                 while event_counter.load(Ordering::Acquire) < expected_total as i64 {
                     std::hint::spin_loop();
@@ -183,12 +181,12 @@ fn run_mpsc_benchmark<F>(
 fn baseline_mpsc_measurement(group: &mut BenchmarkGroup<WallTime>, burst_size: u64) {
     let event_counter = Arc::new(AtomicI64::new(0));
     let burst_size_atomic = Arc::new(AtomicI64::new(0));
-    
+
     let mut burst_producers: Vec<BurstProducer> = (0..PRODUCER_COUNT)
         .map(|_| {
             let counter = event_counter.clone();
             let burst_size_ref = burst_size_atomic.clone();
-            
+
             BurstProducer::new(move || {
                 let size = burst_size_ref.load(Ordering::Acquire);
                 for _ in 0..size {
@@ -200,7 +198,7 @@ fn baseline_mpsc_measurement(group: &mut BenchmarkGroup<WallTime>, burst_size: u
 
     let benchmark_id = BenchmarkId::new("baseline", burst_size);
     group.throughput(Throughput::Elements(burst_size * PRODUCER_COUNT as u64));
-    
+
     run_mpsc_benchmark(
         group,
         benchmark_id,
@@ -217,11 +215,7 @@ fn baseline_mpsc_measurement(group: &mut BenchmarkGroup<WallTime>, burst_size: u
 }
 
 /// Benchmark MPSC with BusySpinWaitStrategy
-fn benchmark_mpsc_busy_spin(
-    group: &mut BenchmarkGroup<WallTime>,
-    burst_size: u64,
-    pause_ms: u64,
-) {
+fn benchmark_mpsc_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pause_ms: u64) {
     let factory = DefaultEventFactory::<MPSCEvent>::new();
     let handler = MPSCCountingSink::new(PRODUCER_COUNT);
     let event_counter = handler.get_event_count();
@@ -237,17 +231,17 @@ fn benchmark_mpsc_busy_spin(
     .build();
 
     disruptor.start().unwrap();
-    
+
     let burst_size_atomic = Arc::new(AtomicI64::new(0));
-    
+
     // Store disruptor in Arc for sharing between producer threads
     let disruptor_arc = Arc::new(disruptor);
-    
+
     let mut burst_producers: Vec<BurstProducer> = (0..PRODUCER_COUNT)
         .map(|producer_id| {
             let burst_size_ref = burst_size_atomic.clone();
             let disruptor_ref = disruptor_arc.clone();
-            
+
             BurstProducer::new(move || {
                 let size = burst_size_ref.load(Ordering::Acquire);
                 for i in 1..=size {
@@ -260,7 +254,7 @@ fn benchmark_mpsc_busy_spin(
                                 event.sequence = seq;
                             },
                         ));
-                        
+
                         if success {
                             break;
                         }
@@ -275,7 +269,7 @@ fn benchmark_mpsc_busy_spin(
     let param = format!("burst:{}_pause:{}ms", burst_size, pause_ms);
     let benchmark_id = BenchmarkId::new("BusySpin", param);
     group.throughput(Throughput::Elements(burst_size * PRODUCER_COUNT as u64));
-    
+
     run_mpsc_benchmark(
         group,
         benchmark_id,
@@ -289,7 +283,7 @@ fn benchmark_mpsc_busy_spin(
     for producer in &mut burst_producers {
         producer.stop();
     }
-    
+
     // Extract disruptor from Arc to shutdown
     if let Ok(mut disruptor) = Arc::try_unwrap(disruptor_arc) {
         disruptor.shutdown().unwrap();
@@ -297,11 +291,7 @@ fn benchmark_mpsc_busy_spin(
 }
 
 /// Benchmark MPSC with YieldingWaitStrategy
-fn benchmark_mpsc_yielding(
-    group: &mut BenchmarkGroup<WallTime>,
-    burst_size: u64,
-    pause_ms: u64,
-) {
+fn benchmark_mpsc_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pause_ms: u64) {
     let factory = DefaultEventFactory::<MPSCEvent>::new();
     let handler = MPSCCountingSink::new(PRODUCER_COUNT);
     let event_counter = handler.get_event_count();
@@ -317,17 +307,17 @@ fn benchmark_mpsc_yielding(
     .build();
 
     disruptor.start().unwrap();
-    
+
     let burst_size_atomic = Arc::new(AtomicI64::new(0));
-    
-    // Store disruptor in Arc for sharing between producer threads  
+
+    // Store disruptor in Arc for sharing between producer threads
     let disruptor_arc = Arc::new(disruptor);
-    
+
     let mut burst_producers: Vec<BurstProducer> = (0..PRODUCER_COUNT)
         .map(|producer_id| {
             let burst_size_ref = burst_size_atomic.clone();
             let disruptor_ref = disruptor_arc.clone();
-            
+
             BurstProducer::new(move || {
                 let size = burst_size_ref.load(Ordering::Acquire);
                 for i in 1..=size {
@@ -339,7 +329,7 @@ fn benchmark_mpsc_yielding(
                                 event.sequence = seq;
                             },
                         ));
-                        
+
                         if success {
                             break;
                         }
@@ -353,7 +343,7 @@ fn benchmark_mpsc_yielding(
     let param = format!("burst:{}_pause:{}ms", burst_size, pause_ms);
     let benchmark_id = BenchmarkId::new("Yielding", param);
     group.throughput(Throughput::Elements(burst_size * PRODUCER_COUNT as u64));
-    
+
     run_mpsc_benchmark(
         group,
         benchmark_id,
@@ -367,7 +357,7 @@ fn benchmark_mpsc_yielding(
     for producer in &mut burst_producers {
         producer.stop();
     }
-    
+
     // Extract disruptor from Arc to shutdown
     if let Ok(mut disruptor) = Arc::try_unwrap(disruptor_arc) {
         disruptor.shutdown().unwrap();
@@ -375,11 +365,7 @@ fn benchmark_mpsc_yielding(
 }
 
 /// Benchmark MPSC with BlockingWaitStrategy
-fn benchmark_mpsc_blocking(
-    group: &mut BenchmarkGroup<WallTime>,
-    burst_size: u64,
-    pause_ms: u64,
-) {
+fn benchmark_mpsc_blocking(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pause_ms: u64) {
     let factory = DefaultEventFactory::<MPSCEvent>::new();
     let handler = MPSCCountingSink::new(PRODUCER_COUNT);
     let event_counter = handler.get_event_count();
@@ -395,17 +381,17 @@ fn benchmark_mpsc_blocking(
     .build();
 
     disruptor.start().unwrap();
-    
+
     let burst_size_atomic = Arc::new(AtomicI64::new(0));
-    
-    // Store disruptor in Arc for sharing between producer threads  
+
+    // Store disruptor in Arc for sharing between producer threads
     let disruptor_arc = Arc::new(disruptor);
-    
+
     let mut burst_producers: Vec<BurstProducer> = (0..PRODUCER_COUNT)
         .map(|producer_id| {
             let burst_size_ref = burst_size_atomic.clone();
             let disruptor_ref = disruptor_arc.clone();
-            
+
             BurstProducer::new(move || {
                 let size = burst_size_ref.load(Ordering::Acquire);
                 for i in 1..=size {
@@ -417,7 +403,7 @@ fn benchmark_mpsc_blocking(
                                 event.sequence = seq;
                             },
                         ));
-                        
+
                         if success {
                             break;
                         }
@@ -431,7 +417,7 @@ fn benchmark_mpsc_blocking(
     let param = format!("burst:{}_pause:{}ms", burst_size, pause_ms);
     let benchmark_id = BenchmarkId::new("Blocking", param);
     group.throughput(Throughput::Elements(burst_size * PRODUCER_COUNT as u64));
-    
+
     run_mpsc_benchmark(
         group,
         benchmark_id,
@@ -445,7 +431,7 @@ fn benchmark_mpsc_blocking(
     for producer in &mut burst_producers {
         producer.stop();
     }
-    
+
     // Extract disruptor from Arc to shutdown
     if let Ok(mut disruptor) = Arc::try_unwrap(disruptor_arc) {
         disruptor.shutdown().unwrap();
@@ -455,31 +441,31 @@ fn benchmark_mpsc_blocking(
 /// Main MPSC benchmark function
 pub fn mpsc_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("MPSC");
-    
+
     // Configure benchmark group
     group.measurement_time(Duration::from_secs(15));
     group.warm_up_time(Duration::from_secs(5));
-    
+
     for &burst_size in BURST_SIZES.iter() {
         // Baseline measurement
         baseline_mpsc_measurement(&mut group, burst_size);
-        
+
         for &pause_ms in PAUSE_MS.iter() {
             // Skip heavy combinations
             if burst_size > 100 && pause_ms > 1 {
                 continue;
             }
-            
+
             benchmark_mpsc_busy_spin(&mut group, burst_size, pause_ms);
             benchmark_mpsc_yielding(&mut group, burst_size, pause_ms);
-            
+
             // Only test blocking for smaller burst sizes
             if burst_size <= 100 {
                 benchmark_mpsc_blocking(&mut group, burst_size, pause_ms);
             }
         }
     }
-    
+
     group.finish();
 }
 

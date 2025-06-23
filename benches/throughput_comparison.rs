@@ -1,12 +1,12 @@
 //! Throughput Comparison Benchmarks
-//! 
+//!
 //! This benchmark suite compares the raw throughput performance of different
 //! configurations and compares against other concurrency primitives.
 
+use criterion::measurement::WallTime;
 use criterion::{
     black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
-use criterion::measurement::WallTime;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -79,15 +79,10 @@ fn benchmark_disruptor_throughput(
         _ => Box::new(BusySpinWaitStrategy::new()),
     };
 
-    let mut disruptor = Disruptor::new(
-        factory,
-        buffer_size,
-        producer_type,
-        wait_strategy_impl,
-    )
-    .unwrap()
-    .handle_events_with(handler)
-    .build();
+    let mut disruptor = Disruptor::new(factory, buffer_size, producer_type, wait_strategy_impl)
+        .unwrap()
+        .handle_events_with(handler)
+        .build();
 
     disruptor.start().unwrap();
 
@@ -95,17 +90,17 @@ fn benchmark_disruptor_throughput(
         ProducerType::Single => "SP",
         ProducerType::Multi => "MP",
     };
-    
+
     let param = format!("{}_{}_buf{}", producer_str, wait_strategy, buffer_size);
     let benchmark_id = BenchmarkId::new("Disruptor", param);
-    
+
     group.throughput(Throughput::Elements(THROUGHPUT_EVENTS));
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
                 counter.store(0, Ordering::Release);
-                
+
                 for i in 0..THROUGHPUT_EVENTS {
                     // Use blocking publish for maximum throughput measurement
                     disruptor
@@ -117,7 +112,7 @@ fn benchmark_disruptor_throughput(
                         ))
                         .unwrap();
                 }
-                
+
                 // Wait for all events to be processed
                 while counter.load(Ordering::Acquire) < THROUGHPUT_EVENTS as i64 {
                     std::hint::spin_loop();
@@ -131,20 +126,17 @@ fn benchmark_disruptor_throughput(
 }
 
 /// Benchmark std::sync::mpsc channel throughput
-fn benchmark_mpsc_throughput(
-    group: &mut BenchmarkGroup<WallTime>,
-    buffer_size: usize,
-) {
+fn benchmark_mpsc_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: usize) {
     let (sender, receiver) = mpsc::sync_channel(buffer_size);
     let counter = Arc::new(AtomicI64::new(0));
-    
+
     let counter_clone = counter.clone();
     let receiver_handle = thread::spawn(move || {
         while let Ok(event) = receiver.recv() {
             // Minimal processing to match Disruptor handler
             let _event: ThroughputEvent = event;
             black_box(_event.data[0]);
-            
+
             let count = counter_clone.fetch_add(1, Ordering::Relaxed);
             if count >= THROUGHPUT_EVENTS as i64 - 1 {
                 break;
@@ -154,14 +146,14 @@ fn benchmark_mpsc_throughput(
 
     let param = format!("buf{}", buffer_size);
     let benchmark_id = BenchmarkId::new("MPSC", param);
-    
+
     group.throughput(Throughput::Elements(THROUGHPUT_EVENTS));
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
                 counter.store(0, Ordering::Release);
-                
+
                 for i in 0..THROUGHPUT_EVENTS {
                     let event = ThroughputEvent {
                         id: black_box(i as i64),
@@ -169,7 +161,7 @@ fn benchmark_mpsc_throughput(
                     };
                     sender.send(event).unwrap();
                 }
-                
+
                 // Wait for all events to be processed
                 while counter.load(Ordering::Acquire) < THROUGHPUT_EVENTS as i64 {
                     std::hint::spin_loop();
@@ -183,20 +175,17 @@ fn benchmark_mpsc_throughput(
 }
 
 /// Benchmark crossbeam channel throughput
-fn benchmark_crossbeam_throughput(
-    group: &mut BenchmarkGroup<WallTime>,
-    buffer_size: usize,
-) {
+fn benchmark_crossbeam_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: usize) {
     let (sender, receiver) = crossbeam::channel::bounded(buffer_size);
     let counter = Arc::new(AtomicI64::new(0));
-    
+
     let counter_clone = counter.clone();
     let receiver_handle = thread::spawn(move || {
         while let Ok(event) = receiver.recv() {
             // Minimal processing to match Disruptor handler
             let _event: ThroughputEvent = event;
             black_box(_event.data[0]);
-            
+
             let count = counter_clone.fetch_add(1, Ordering::Relaxed);
             if count >= THROUGHPUT_EVENTS as i64 - 1 {
                 break;
@@ -206,14 +195,14 @@ fn benchmark_crossbeam_throughput(
 
     let param = format!("buf{}", buffer_size);
     let benchmark_id = BenchmarkId::new("Crossbeam", param);
-    
+
     group.throughput(Throughput::Elements(THROUGHPUT_EVENTS));
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
                 counter.store(0, Ordering::Release);
-                
+
                 for i in 0..THROUGHPUT_EVENTS {
                     let event = ThroughputEvent {
                         id: black_box(i as i64),
@@ -221,7 +210,7 @@ fn benchmark_crossbeam_throughput(
                     };
                     sender.send(event).unwrap();
                 }
-                
+
                 // Wait for all events to be processed
                 while counter.load(Ordering::Acquire) < THROUGHPUT_EVENTS as i64 {
                     std::hint::spin_loop();
@@ -235,10 +224,7 @@ fn benchmark_crossbeam_throughput(
 }
 
 /// Benchmark try_publish performance for non-blocking scenarios
-fn benchmark_try_publish_throughput(
-    group: &mut BenchmarkGroup<WallTime>,
-    buffer_size: usize,
-) {
+fn benchmark_try_publish_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: usize) {
     let factory = DefaultEventFactory::<ThroughputEvent>::new();
     let handler = ThroughputHandler::new();
     let counter = handler.get_counter();
@@ -257,14 +243,14 @@ fn benchmark_try_publish_throughput(
 
     let param = format!("try_publish_buf{}", buffer_size);
     let benchmark_id = BenchmarkId::new("Disruptor", param);
-    
+
     group.throughput(Throughput::Elements(THROUGHPUT_EVENTS));
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
                 counter.store(0, Ordering::Release);
-                
+
                 let mut published = 0;
                 while published < THROUGHPUT_EVENTS {
                     let success = disruptor.try_publish_event(ClosureEventTranslator::new(
@@ -273,7 +259,7 @@ fn benchmark_try_publish_throughput(
                             event.data = [published as i64; 4];
                         },
                     ));
-                    
+
                     if success {
                         published += 1;
                     } else {
@@ -281,7 +267,7 @@ fn benchmark_try_publish_throughput(
                         std::hint::spin_loop();
                     }
                 }
-                
+
                 // Wait for all events to be processed
                 while counter.load(Ordering::Acquire) < THROUGHPUT_EVENTS as i64 {
                     std::hint::spin_loop();
@@ -297,40 +283,55 @@ fn benchmark_try_publish_throughput(
 /// Main throughput comparison benchmark function
 pub fn throughput_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("Throughput");
-    
+
     // Configure benchmark group for throughput measurement
     group.measurement_time(Duration::from_secs(15));
     group.warm_up_time(Duration::from_secs(5));
-    
+
     // Test different buffer sizes
     let buffer_sizes = [SMALL_BUFFER, MEDIUM_BUFFER, LARGE_BUFFER];
-    
+
     for &buffer_size in buffer_sizes.iter() {
         // Test Disruptor with different configurations
         benchmark_disruptor_throughput(&mut group, buffer_size, "BusySpin", ProducerType::Single);
         benchmark_disruptor_throughput(&mut group, buffer_size, "Yielding", ProducerType::Single);
-        
+
         // Test multi-producer only for medium buffer size to reduce benchmark time
         if buffer_size == MEDIUM_BUFFER {
-            benchmark_disruptor_throughput(&mut group, buffer_size, "BusySpin", ProducerType::Multi);
-            benchmark_disruptor_throughput(&mut group, buffer_size, "Yielding", ProducerType::Multi);
+            benchmark_disruptor_throughput(
+                &mut group,
+                buffer_size,
+                "BusySpin",
+                ProducerType::Multi,
+            );
+            benchmark_disruptor_throughput(
+                &mut group,
+                buffer_size,
+                "Yielding",
+                ProducerType::Multi,
+            );
         }
-        
+
         // Test blocking strategy only for smaller buffers (it's typically slower)
         if buffer_size <= MEDIUM_BUFFER {
-            benchmark_disruptor_throughput(&mut group, buffer_size, "Blocking", ProducerType::Single);
+            benchmark_disruptor_throughput(
+                &mut group,
+                buffer_size,
+                "Blocking",
+                ProducerType::Single,
+            );
         }
-        
+
         // Test try_publish performance
         if buffer_size == MEDIUM_BUFFER {
             benchmark_try_publish_throughput(&mut group, buffer_size);
         }
-        
+
         // Compare against standard channels
         benchmark_mpsc_throughput(&mut group, buffer_size);
         benchmark_crossbeam_throughput(&mut group, buffer_size);
     }
-    
+
     group.finish();
 }
 
