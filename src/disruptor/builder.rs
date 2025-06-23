@@ -230,10 +230,18 @@ fn set_thread_affinity(core_id: usize) -> Result<(), String> {
 ///
 /// # Examples
 ///
-/// ```rust,ignore
-/// let mut producer = build_single_producer(8, factory, BusySpinWaitStrategy)
-///     .handle_events_with(processor)
+/// ```rust
+/// use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
+/// 
+/// #[derive(Default)]
+/// struct MyEvent { value: i32 }
+/// 
+/// let mut producer = build_single_producer(8, MyEvent::default, BusySpinWaitStrategy)
+///     .handle_events_with(|_event, _sequence, _end_of_batch| {
+///         // Process event
+///     })
 ///     .build();
+/// # drop(producer); // Clean shutdown
 /// ```
 pub fn build_single_producer<E, F, W>(
     size: usize,
@@ -254,12 +262,22 @@ where
 ///
 /// # Examples
 ///
-/// ```rust,ignore
-/// let mut producer1 = build_multi_producer(64, factory, BusySpinWaitStrategy)
-///     .handle_events_with(processor1)
-///     .handle_events_with(processor2)
+/// ```rust
+/// use badbatch::disruptor::{build_multi_producer, BusySpinWaitStrategy};
+/// 
+/// #[derive(Default, Clone)]
+/// struct MyEvent { value: i32 }
+/// 
+/// let mut producer1 = build_multi_producer(64, MyEvent::default, BusySpinWaitStrategy)
+///     .handle_events_with(|_event, _sequence, _end_of_batch| {
+///         // Process event in processor1
+///     })
+///     .handle_events_with(|_event, _sequence, _end_of_batch| {
+///         // Process event in processor2
+///     })
 ///     .build();
-/// let mut producer2 = producer1.clone();
+/// # drop(producer1); // Clean shutdown
+/// // let mut producer2 = producer1.clone(); // After drop, cannot clone
 /// ```
 pub fn build_multi_producer<E, F, W>(
     size: usize,
@@ -738,10 +756,20 @@ where
     ///
     /// # Examples
     ///
-    /// ```rust,ignore
-    /// builder.handle_events_with(|event, sequence, end_of_batch| {
-    ///     // Process the event
-    /// })
+    /// ```rust
+    /// use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
+    /// 
+    /// #[derive(Default)]
+    /// struct MyEvent { value: i32 }
+    /// 
+    /// let mut producer = build_single_producer(8, MyEvent::default, BusySpinWaitStrategy)
+    ///     .handle_events_with(|event, sequence, end_of_batch| {
+    ///         // Process the event
+    ///         event.value += 1;
+    ///         println!("Processed event {} at sequence {}", event.value, sequence);
+    ///     })
+    ///     .build();
+    /// # drop(producer); // Clean shutdown
     /// ```
     pub fn handle_events_with<H>(
         mut self,
@@ -774,20 +802,31 @@ where
     ///
     /// # Examples
     ///
-    /// ```rust,ignore
+    /// ```rust
+    /// use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy, EventHandler, Result};
+    /// 
+    /// #[derive(Default)]
+    /// struct MyEvent {
+    ///     value: i32,
+    ///     processed_count: usize,
+    /// }
+    /// 
     /// struct MyEventHandler {
     ///     counter: usize,
     /// }
     ///
     /// impl EventHandler<MyEvent> for MyEventHandler {
-    ///     fn on_event(&mut self, event: &mut MyEvent, sequence: i64, end_of_batch: bool) -> Result<()> {
+    ///     fn on_event(&mut self, event: &mut MyEvent, sequence: i64, _end_of_batch: bool) -> Result<()> {
     ///         self.counter += 1;
     ///         event.processed_count = self.counter;
     ///         Ok(())
     ///     }
     /// }
     ///
-    /// builder.handle_events_with_handler(MyEventHandler { counter: 0 })
+    /// let mut producer = build_single_producer(8, MyEvent::default, BusySpinWaitStrategy)
+    ///     .handle_events_with_handler(MyEventHandler { counter: 0 })
+    ///     .build();
+    /// # drop(producer); // Clean shutdown
     /// ```
     pub fn handle_events_with_handler<H>(
         mut self,
@@ -871,15 +910,24 @@ where
     ///
     /// # Examples
     ///
-    /// ```rust,ignore
-    /// builder
-    ///     .handle_events_with(|event, sequence, end_of_batch| {
+    /// ```rust
+    /// use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
+    /// 
+    /// #[derive(Default)]
+    /// struct MyEvent { value: i32 }
+    /// 
+    /// let mut producer = build_single_producer(8, MyEvent::default, BusySpinWaitStrategy)
+    ///     .handle_events_with(|event, _sequence, _end_of_batch| {
     ///         // First consumer processes events
+    ///         event.value += 1;
     ///     })
     ///     .and_then()
-    ///     .handle_events_with(|event, sequence, end_of_batch| {
+    ///     .handle_events_with(|event, _sequence, _end_of_batch| {
     ///         // Second consumer waits for first consumer to complete
+    ///         event.value *= 2;
     ///     })
+    ///     .build();
+    /// # drop(producer); // Clean shutdown
     /// ```
     pub fn and_then(self) -> DependentConsumerBuilder<E, F, W> {
         // Mark that the next consumer should depend on only the previous consumer
