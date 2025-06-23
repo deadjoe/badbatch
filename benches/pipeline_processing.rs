@@ -1,19 +1,19 @@
 //! Pipeline Processing Benchmarks
-//! 
+//!
 //! This benchmark suite tests the performance of complex processing pipelines
 //! using the BadBatch Disruptor with multiple dependent event handlers.
 
+use criterion::measurement::WallTime;
 use criterion::{
     black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
-use criterion::measurement::WallTime;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use badbatch::disruptor::{
-    event_translator::ClosureEventTranslator, BusySpinWaitStrategy, DefaultEventFactory,
-    Disruptor, EventHandler, ProducerType, Result as DisruptorResult, YieldingWaitStrategy,
+    event_translator::ClosureEventTranslator, BusySpinWaitStrategy, DefaultEventFactory, Disruptor,
+    EventHandler, ProducerType, Result as DisruptorResult, YieldingWaitStrategy,
 };
 
 // Benchmark configuration constants
@@ -169,7 +169,7 @@ fn benchmark_two_stage_pipeline(
     let factory = DefaultEventFactory::<PipelineEvent>::new();
     let stage1 = Stage1Handler::new();
     let stage2 = Stage2Handler::new();
-    
+
     let stage1_count = stage1.get_processed_count();
     let stage2_count = stage2.get_processed_count();
 
@@ -194,14 +194,14 @@ fn benchmark_two_stage_pipeline(
 
     let benchmark_id = BenchmarkId::new(format!("TwoStage_{}", wait_strategy), burst_size);
     group.throughput(Throughput::Elements(burst_size));
-    
+
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
                 stage1_count.store(0, Ordering::Release);
                 stage2_count.store(0, Ordering::Release);
-                
+
                 for i in 1..=burst_size {
                     disruptor
                         .publish_event(ClosureEventTranslator::new(
@@ -215,7 +215,7 @@ fn benchmark_two_stage_pipeline(
                         ))
                         .unwrap();
                 }
-                
+
                 // Wait for both stages to complete
                 while stage2_count.load(Ordering::Acquire) < burst_size as i64 {
                     std::hint::spin_loop();
@@ -238,7 +238,7 @@ fn benchmark_three_stage_pipeline(
     let stage1 = Stage1Handler::new();
     let stage2 = Stage2Handler::new();
     let stage3 = Stage3Handler::new();
-    
+
     let stage3_count = stage3.get_processed_count();
 
     let wait_strategy_impl: Box<dyn badbatch::disruptor::WaitStrategy> = match wait_strategy {
@@ -263,13 +263,13 @@ fn benchmark_three_stage_pipeline(
 
     let benchmark_id = BenchmarkId::new(format!("ThreeStage_{}", wait_strategy), burst_size);
     group.throughput(Throughput::Elements(burst_size));
-    
+
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
                 stage3_count.store(0, Ordering::Release);
-                
+
                 for i in 1..=burst_size {
                     disruptor
                         .publish_event(ClosureEventTranslator::new(
@@ -283,7 +283,7 @@ fn benchmark_three_stage_pipeline(
                         ))
                         .unwrap();
                 }
-                
+
                 // Wait for all three stages to complete
                 while stage3_count.load(Ordering::Acquire) < burst_size as i64 {
                     std::hint::spin_loop();
@@ -307,7 +307,7 @@ fn benchmark_four_stage_pipeline(
     let stage2 = Stage2Handler::new();
     let stage3 = Stage3Handler::new();
     let final_stage = FinalHandler::new();
-    
+
     let final_count = final_stage.get_processed_count();
     let last_id = final_stage.get_last_id();
 
@@ -334,14 +334,14 @@ fn benchmark_four_stage_pipeline(
 
     let benchmark_id = BenchmarkId::new(format!("FourStage_{}", wait_strategy), burst_size);
     group.throughput(Throughput::Elements(burst_size));
-    
+
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
                 final_count.store(0, Ordering::Release);
                 last_id.store(0, Ordering::Release);
-                
+
                 for i in 1..=burst_size {
                     disruptor
                         .publish_event(ClosureEventTranslator::new(
@@ -355,7 +355,7 @@ fn benchmark_four_stage_pipeline(
                         ))
                         .unwrap();
                 }
-                
+
                 // Wait for final stage to process the last event
                 while last_id.load(Ordering::Acquire) < burst_size as i64 {
                     std::hint::spin_loop();
@@ -371,24 +371,24 @@ fn benchmark_four_stage_pipeline(
 /// Main pipeline processing benchmark function
 pub fn pipeline_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("Pipeline");
-    
+
     // Configure benchmark group
     group.measurement_time(Duration::from_secs(20));
     group.warm_up_time(Duration::from_secs(5));
-    
+
     for &burst_size in BURST_SIZES.iter() {
         // Test different wait strategies
         for wait_strategy in &["BusySpin", "Yielding"] {
             benchmark_two_stage_pipeline(&mut group, burst_size, wait_strategy);
             benchmark_three_stage_pipeline(&mut group, burst_size, wait_strategy);
-            
+
             // Only test four-stage for smaller burst sizes to avoid long run times
             if burst_size <= 200 {
                 benchmark_four_stage_pipeline(&mut group, burst_size, wait_strategy);
             }
         }
     }
-    
+
     group.finish();
 }
 

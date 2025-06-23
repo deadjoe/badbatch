@@ -3,9 +3,13 @@
 //! This test verifies that the documented API patterns work correctly with the current codebase.
 
 use badbatch::disruptor::{
+    BlockingWaitStrategy,
+    DefaultEventFactory,
     // Traditional LMAX API imports from README lines 104-107
-    Disruptor, ProducerType, BlockingWaitStrategy, DefaultEventFactory,
-    EventHandler, EventTranslator,
+    Disruptor,
+    EventHandler,
+    EventTranslator,
+    ProducerType,
 };
 
 // Test 1: Traditional LMAX Disruptor API (README lines 96-161)
@@ -23,9 +27,16 @@ mod traditional_lmax_api_tests {
     struct MyEventHandler;
 
     impl EventHandler<MyEvent> for MyEventHandler {
-        fn on_event(&mut self, event: &mut MyEvent, sequence: i64, end_of_batch: bool) -> badbatch::disruptor::Result<()> {
-            println!("Processing event {} with value {} (end_of_batch: {})",
-                     sequence, event.value, end_of_batch);
+        fn on_event(
+            &mut self,
+            event: &mut MyEvent,
+            sequence: i64,
+            end_of_batch: bool,
+        ) -> badbatch::disruptor::Result<()> {
+            println!(
+                "Processing event {} with value {} (end_of_batch: {})",
+                sequence, event.value, end_of_batch
+            );
             Ok(())
         }
     }
@@ -52,7 +63,8 @@ mod traditional_lmax_api_tests {
             1024, // Buffer size (must be power of 2)
             ProducerType::Single,
             Box::new(BlockingWaitStrategy::new()),
-        ).unwrap()
+        )
+        .unwrap()
         .handle_events_with(MyEventHandler)
         .build();
 
@@ -76,9 +88,12 @@ mod traditional_lmax_api_tests {
 mod modern_disruptor_rs_api_tests {
     use badbatch::disruptor::{
         // Imports from README lines 166-169
-        build_single_producer, ElegantConsumer, RingBuffer,
-        simple_wait_strategy::BusySpin, event_factory::ClosureEventFactory,
+        build_single_producer,
+        event_factory::ClosureEventFactory,
+        simple_wait_strategy::BusySpin,
         BusySpinWaitStrategy,
+        ElegantConsumer,
+        RingBuffer,
     };
     use std::sync::Arc;
 
@@ -123,7 +138,8 @@ mod modern_disruptor_rs_api_tests {
             },
             BusySpin,
             1, // Pin to CPU core 1
-        ).unwrap();
+        )
+        .unwrap();
 
         // Graceful shutdown
         consumer.shutdown().unwrap();
@@ -134,53 +150,48 @@ mod modern_disruptor_rs_api_tests {
 #[cfg(test)]
 mod design_md_verification_tests {
     use badbatch::disruptor::{
-        Sequence, RingBuffer,
-        SingleProducerSequencer, MultiProducerSequencer,
-        event_factory::DefaultEventFactory,
+        event_factory::DefaultEventFactory, MultiProducerSequencer, RingBuffer, Sequence,
+        SingleProducerSequencer,
     };
     use std::sync::Arc;
 
     #[test]
     fn test_design_md_structs_exist() {
         // Verify that the structures mentioned in DESIGN.md actually exist
-        
+
         // Test Sequence struct (DESIGN.md lines 302-306)
         let _sequence = Sequence::new_with_initial_value();
-        
+
         // Test RingBuffer (DESIGN.md lines 50-54)
         let factory = DefaultEventFactory::<i64>::new();
         let _ring_buffer = RingBuffer::new(1024, factory).unwrap();
-        
+
         // Test Sequencer types (DESIGN.md lines 74-82, 94-103)
-        let _single_sequencer = SingleProducerSequencer::new(
-            1024, 
-            Arc::new(badbatch::disruptor::BusySpinWaitStrategy)
-        );
-        let _multi_sequencer = MultiProducerSequencer::new(
-            1024, 
-            Arc::new(badbatch::disruptor::BusySpinWaitStrategy)
-        );
+        let _single_sequencer =
+            SingleProducerSequencer::new(1024, Arc::new(badbatch::disruptor::BusySpinWaitStrategy));
+        let _multi_sequencer =
+            MultiProducerSequencer::new(1024, Arc::new(badbatch::disruptor::BusySpinWaitStrategy));
     }
 
     #[test]
     fn test_design_md_producer_api() {
         // Test Producer API from DESIGN.md lines 117-123
         use badbatch::disruptor::{Producer, SimpleProducer};
-        
+
         let factory = DefaultEventFactory::<i64>::new();
         let ring_buffer = Arc::new(RingBuffer::new(1024, factory).unwrap());
         let sequencer = Arc::new(SingleProducerSequencer::new(
-            1024, 
-            Arc::new(badbatch::disruptor::BusySpinWaitStrategy)
+            1024,
+            Arc::new(badbatch::disruptor::BusySpinWaitStrategy),
         ));
-        
+
         let mut producer = SimpleProducer::new(ring_buffer, sequencer);
-        
+
         // Test the Producer trait methods
         producer.publish(|event| {
             *event = 42;
         });
-        
+
         producer.batch_publish(3, |batch| {
             for (i, event) in batch.enumerate() {
                 *event = i as i64;
@@ -188,14 +199,14 @@ mod design_md_verification_tests {
         });
     }
 
-    #[test] 
+    #[test]
     fn test_design_md_event_interfaces() {
         // Test EventFactory trait (DESIGN.md lines 414-417)
         use badbatch::disruptor::EventFactory;
-        
+
         let factory = DefaultEventFactory::<String>::new();
         let _event = factory.new_instance();
-        
+
         // Test closure-based factory (DESIGN.md lines 423-427)
         use badbatch::disruptor::event_factory::ClosureEventFactory;
         let closure_factory = ClosureEventFactory::new(|| "test".to_string());
@@ -212,7 +223,7 @@ mod error_handling_tests {
     fn test_error_types_exist() {
         // Verify that error types mentioned in documentation exist
         use badbatch::disruptor::{DisruptorError, Result};
-        
+
         // Test various error types
         let _error1 = DisruptorError::BufferFull;
         let _error2 = DisruptorError::InvalidSequence(42);
@@ -221,7 +232,7 @@ mod error_handling_tests {
         let _error5 = DisruptorError::Shutdown;
         let _error6 = DisruptorError::InsufficientCapacity;
         let _error7 = DisruptorError::Alert;
-        
+
         // Test Result type alias
         let _result: Result<()> = Ok(());
     }
@@ -231,7 +242,7 @@ mod error_handling_tests {
         // Test utility function
         assert!(is_power_of_two(1024));
         assert!(!is_power_of_two(1023));
-        
+
         // Test that invalid buffer sizes are rejected
         let factory = DefaultEventFactory::<i32>::new();
         let result = RingBuffer::new(1023, factory); // Not power of 2
@@ -243,9 +254,8 @@ mod error_handling_tests {
 #[cfg(test)]
 mod wait_strategy_tests {
     use badbatch::disruptor::{
-        BlockingWaitStrategy, BusySpinWaitStrategy, 
-        YieldingWaitStrategy, SleepingWaitStrategy,
-        simple_wait_strategy::*,
+        simple_wait_strategy::*, BlockingWaitStrategy, BusySpinWaitStrategy, SleepingWaitStrategy,
+        YieldingWaitStrategy,
     };
 
     #[test]
@@ -264,7 +274,7 @@ mod wait_strategy_tests {
         let _busy_spin_hint = BusySpinWithHint;
         let _yielding = Yielding::default();
         let _sleeping = Sleeping::default();
-        
+
         // Test wait strategy adapters
         let _adapter1 = busy_spin();
         let _adapter2 = busy_spin_with_hint();

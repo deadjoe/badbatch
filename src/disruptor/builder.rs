@@ -232,10 +232,10 @@ fn set_thread_affinity(core_id: usize) -> Result<(), String> {
 ///
 /// ```rust
 /// use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
-/// 
+///
 /// #[derive(Default)]
 /// struct MyEvent { value: i32 }
-/// 
+///
 /// let mut producer = build_single_producer(8, MyEvent::default, BusySpinWaitStrategy)
 ///     .handle_events_with(|_event, _sequence, _end_of_batch| {
 ///         // Process event
@@ -264,10 +264,10 @@ where
 ///
 /// ```rust
 /// use badbatch::disruptor::{build_multi_producer, BusySpinWaitStrategy};
-/// 
+///
 /// #[derive(Default, Clone)]
 /// struct MyEvent { value: i32 }
-/// 
+///
 /// let mut producer1 = build_multi_producer(64, MyEvent::default, BusySpinWaitStrategy)
 ///     .handle_events_with(|_event, _sequence, _end_of_batch| {
 ///         // Process event in processor1
@@ -758,10 +758,10 @@ where
     ///
     /// ```rust
     /// use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
-    /// 
+    ///
     /// #[derive(Default)]
     /// struct MyEvent { value: i32 }
-    /// 
+    ///
     /// let mut producer = build_single_producer(8, MyEvent::default, BusySpinWaitStrategy)
     ///     .handle_events_with(|event, sequence, end_of_batch| {
     ///         // Process the event
@@ -804,13 +804,13 @@ where
     ///
     /// ```rust
     /// use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy, EventHandler, Result};
-    /// 
+    ///
     /// #[derive(Default)]
     /// struct MyEvent {
     ///     value: i32,
     ///     processed_count: usize,
     /// }
-    /// 
+    ///
     /// struct MyEventHandler {
     ///     counter: usize,
     /// }
@@ -912,10 +912,10 @@ where
     ///
     /// ```rust
     /// use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
-    /// 
+    ///
     /// #[derive(Default)]
     /// struct MyEvent { value: i32 }
-    /// 
+    ///
     /// let mut producer = build_single_producer(8, MyEvent::default, BusySpinWaitStrategy)
     ///     .handle_events_with(|event, _sequence, _end_of_batch| {
     ///         // First consumer processes events

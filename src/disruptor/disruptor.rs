@@ -308,7 +308,7 @@ where
 
         // Signal shutdown to all threads atomically
         self.shutdown_flag.store(true, Ordering::Release);
-        
+
         // Ensure memory ordering before halting processors
         std::sync::atomic::fence(Ordering::SeqCst);
 
@@ -341,15 +341,15 @@ where
         }
 
         self.started = false;
-        
+
         // Return error if any threads failed to shutdown cleanly
         if !join_errors.is_empty() {
             return Err(DisruptorError::ShutdownError(format!(
-                "Some threads failed to shutdown cleanly: {:?}", 
+                "Some threads failed to shutdown cleanly: {:?}",
                 join_errors
             )));
         }
-        
+
         Ok(())
     }
 
