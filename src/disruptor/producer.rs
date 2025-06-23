@@ -51,16 +51,16 @@ where
     ///
     /// ```rust
     /// use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
-    /// 
+    ///
     /// #[derive(Default)]
     /// struct MyEvent { price: f64 }
-    /// 
+    ///
     /// let mut producer = build_single_producer(8, MyEvent::default, BusySpinWaitStrategy)
     ///     .handle_events_with(|_event, _sequence, _end_of_batch| {
     ///         // Handle event
     ///     })
     ///     .build();
-    /// 
+    ///
     /// let sequence = producer.try_publish(|e| { e.price = 42.0; }).unwrap();
     /// # drop(producer); // Clean shutdown
     /// ```
@@ -77,16 +77,16 @@ where
     ///
     /// ```rust
     /// use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
-    /// 
+    ///
     /// #[derive(Default)]
     /// struct MyEvent { price: f64 }
-    /// 
+    ///
     /// let mut producer = build_single_producer(8, MyEvent::default, BusySpinWaitStrategy)
     ///     .handle_events_with(|_event, _sequence, _end_of_batch| {
     ///         // Handle event
     ///     })
     ///     .build();
-    /// 
+    ///
     /// let sequence = producer.try_batch_publish(3, |iter| {
     ///     for e in iter {
     ///         e.price = 42.0;
@@ -111,16 +111,16 @@ where
     ///
     /// ```rust
     /// use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
-    /// 
+    ///
     /// #[derive(Default)]
     /// struct MyEvent { price: f64 }
-    /// 
+    ///
     /// let mut producer = build_single_producer(8, MyEvent::default, BusySpinWaitStrategy)
     ///     .handle_events_with(|_event, _sequence, _end_of_batch| {
     ///         // Handle event
     ///     })
     ///     .build();
-    /// 
+    ///
     /// producer.publish(|e| { e.price = 42.0; });
     /// # drop(producer); // Clean shutdown
     /// ```
@@ -136,16 +136,16 @@ where
     ///
     /// ```rust
     /// use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
-    /// 
+    ///
     /// #[derive(Default)]
     /// struct MyEvent { price: f64 }
-    /// 
+    ///
     /// let mut producer = build_single_producer(8, MyEvent::default, BusySpinWaitStrategy)
     ///     .handle_events_with(|_event, _sequence, _end_of_batch| {
     ///         // Handle event
     ///     })
     ///     .build();
-    /// 
+    ///
     /// producer.batch_publish(3, |iter| {
     ///     for e in iter {
     ///         e.price = 42.0;
