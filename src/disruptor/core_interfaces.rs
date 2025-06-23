@@ -62,12 +62,14 @@ pub trait Sequenced {
     /// This is for batch event producing. Using batch producing requires
     /// careful coordination:
     ///
-    /// ```ignore
+    /// ```rust,ignore
+    /// // This example shows the pattern but cannot be run as a standalone doctest
+    /// // since it requires a concrete sequencer implementation
     /// let n = 10;
     /// let hi = sequencer.next_n(n)?;
     /// let lo = hi - (n - 1);
     /// for sequence in lo..=hi {
-    ///     // Do work
+    ///     // Do work with the sequence
     /// }
     /// sequencer.publish_range(lo, hi);
     /// ```
