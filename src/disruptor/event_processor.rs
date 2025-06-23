@@ -275,6 +275,9 @@ where
         let batch_size = (available_sequence - next_sequence + 1) as usize;
 
         // Notify batch start
+        // SAFETY: We have exclusive access to the event handler through UnsafeCell.
+        // The event processor is designed to be used from a single thread, ensuring
+        // no concurrent access to the handler.
         unsafe {
             let handler = &mut *self.event_handler.get();
             let _ = handler.on_batch_start(batch_size as i64, batch_size as i64);
@@ -284,9 +287,13 @@ where
             let end_of_batch = current_sequence == available_sequence;
 
             // Get mutable access to the event for processing
+            // SAFETY: We have exclusive access to this sequence position as guaranteed by
+            // the barrier wait - no other processor can access this sequence until we're done.
             let event = unsafe { self.data_provider.get_mut(current_sequence) };
 
             // Process the event with the handler
+            // SAFETY: Single-threaded access to the event handler through UnsafeCell.
+            // Each event processor runs on its own thread with exclusive handler access.
             unsafe {
                 let handler = &mut *self.event_handler.get();
                 if let Err(e) = handler.on_event(event, current_sequence, end_of_batch) {

@@ -506,6 +506,9 @@ where
         let manual_drop = std::mem::ManuallyDrop::new(self);
 
         // Move the producer out safely
+        // SAFETY: We use ManuallyDrop to prevent the Drop impl from running,
+        // then use ptr::read to move the producer out without calling its destructor.
+        // This is safe because we never use manual_drop again after this point.
         unsafe { std::ptr::read(&manual_drop.producer) }
     }
 

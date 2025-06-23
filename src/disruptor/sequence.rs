@@ -172,6 +172,10 @@ impl Sequence {
 }
 
 // Ensure Sequence is Send and Sync for multi-threading
+// SAFETY: Sequence is Send and Sync because:
+// - It only contains an AtomicI64 which is inherently Send + Sync
+// - All operations use atomic primitives ensuring proper memory ordering
+// - No internal state requires additional synchronization
 unsafe impl Send for Sequence {}
 unsafe impl Sync for Sequence {}
 

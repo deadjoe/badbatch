@@ -5,7 +5,7 @@
 use badbatch::disruptor::{
     // Traditional LMAX API imports from README lines 104-107
     Disruptor, ProducerType, BlockingWaitStrategy, DefaultEventFactory,
-    EventHandler, EventTranslator, Result,
+    EventHandler, EventTranslator,
 };
 
 // Test 1: Traditional LMAX Disruptor API (README lines 96-161)
@@ -23,7 +23,7 @@ mod traditional_lmax_api_tests {
     struct MyEventHandler;
 
     impl EventHandler<MyEvent> for MyEventHandler {
-        fn on_event(&mut self, event: &mut MyEvent, sequence: i64, end_of_batch: bool) -> Result<()> {
+        fn on_event(&mut self, event: &mut MyEvent, sequence: i64, end_of_batch: bool) -> badbatch::disruptor::Result<()> {
             println!("Processing event {} with value {} (end_of_batch: {})",
                      sequence, event.value, end_of_batch);
             Ok(())
@@ -76,8 +76,8 @@ mod traditional_lmax_api_tests {
 mod modern_disruptor_rs_api_tests {
     use badbatch::disruptor::{
         // Imports from README lines 166-169
-        build_single_producer, Producer, ElegantConsumer, RingBuffer,
-        simple_wait_strategy::{BusySpin, busy_spin}, event_factory::ClosureEventFactory,
+        build_single_producer, ElegantConsumer, RingBuffer,
+        simple_wait_strategy::BusySpin, event_factory::ClosureEventFactory,
         BusySpinWaitStrategy,
     };
     use std::sync::Arc;
@@ -91,7 +91,7 @@ mod modern_disruptor_rs_api_tests {
     fn test_modern_api_build_single_producer() {
         // Test build_single_producer function from README line 178
         // The wait strategy needs to implement WaitStrategy, so we use BusySpinWaitStrategy
-        let mut producer = build_single_producer(1024, || MyEvent::default(), BusySpinWaitStrategy)
+        let mut producer = build_single_producer(1024, MyEvent::default, BusySpinWaitStrategy)
             .handle_events_with(|event, _sequence, _end_of_batch| {
                 println!("Processing event with value {}", event.value);
             })
@@ -113,7 +113,7 @@ mod modern_disruptor_rs_api_tests {
     #[test]
     fn test_elegant_consumer_api() {
         // Test ElegantConsumer from README lines 197-211
-        let factory = ClosureEventFactory::new(|| MyEvent::default());
+        let factory = ClosureEventFactory::new(MyEvent::default);
         let ring_buffer = Arc::new(RingBuffer::new(1024, factory).unwrap());
 
         let consumer = ElegantConsumer::with_affinity(
@@ -134,7 +134,7 @@ mod modern_disruptor_rs_api_tests {
 #[cfg(test)]
 mod design_md_verification_tests {
     use badbatch::disruptor::{
-        Sequence, RingBuffer, EventFactory,
+        Sequence, RingBuffer,
         SingleProducerSequencer, MultiProducerSequencer,
         event_factory::DefaultEventFactory,
     };
@@ -206,7 +206,7 @@ mod design_md_verification_tests {
 // Test 4: Error handling and edge cases
 #[cfg(test)]
 mod error_handling_tests {
-    use badbatch::disruptor::{DisruptorError, Result, is_power_of_two, DefaultEventFactory, RingBuffer};
+    use badbatch::disruptor::{is_power_of_two, DefaultEventFactory, RingBuffer};
 
     #[test]
     fn test_error_types_exist() {
