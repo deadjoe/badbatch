@@ -890,4 +890,385 @@ mod tests {
         let seq2 = sequencer.next().unwrap();
         assert_eq!(seq2, 1);
     }
+
+    #[test]
+    fn test_single_producer_sequencer_next_n() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = SingleProducerSequencer::new(8, wait_strategy);
+
+        // Test claiming multiple sequences
+        let seq = sequencer.next_n(3).unwrap();
+        assert_eq!(seq, 2); // Returns highest sequence (0, 1, 2)
+
+        // Test invalid sequence count
+        let result = sequencer.next_n(0);
+        assert!(result.is_err());
+
+        let result = sequencer.next_n(-1);
+        assert!(result.is_err());
+
+        // Test claiming more than buffer size
+        let result = sequencer.next_n(10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_single_producer_sequencer_try_next() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = SingleProducerSequencer::new(8, wait_strategy);
+
+        // Test try_next success
+        let seq = sequencer.try_next().unwrap();
+        assert_eq!(seq, 0);
+
+        // Test try_next_n success
+        let seq = sequencer.try_next_n(2).unwrap();
+        assert_eq!(seq, 2);
+
+        // Test try_next_n with invalid count
+        let result = sequencer.try_next_n(0);
+        assert!(result.is_none());
+
+        let result = sequencer.try_next_n(-1);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_single_producer_sequencer_publish() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = SingleProducerSequencer::new(8, wait_strategy);
+
+        let seq = sequencer.next().unwrap();
+        assert!(!sequencer.is_available(seq));
+
+        sequencer.publish(seq);
+        assert!(sequencer.is_available(seq));
+
+        // Test publish_range
+        let seq2 = sequencer.next_n(3).unwrap();
+        sequencer.publish_range(seq + 1, seq2);
+        assert!(sequencer.is_available(seq2));
+    }
+
+    #[test]
+    fn test_single_producer_sequencer_gating_sequences() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = SingleProducerSequencer::new(8, wait_strategy);
+
+        let gating_seq1 = Arc::new(Sequence::new(5));
+        let gating_seq2 = Arc::new(Sequence::new(3));
+
+        // Add gating sequences
+        sequencer.add_gating_sequences(&[gating_seq1.clone(), gating_seq2.clone()]);
+
+        // Test minimum sequence calculation
+        let min_seq = sequencer.get_minimum_sequence();
+        assert_eq!(min_seq, 3); // Should be minimum of gating sequences
+
+        // Test remove gating sequence
+        let removed = sequencer.remove_gating_sequence(gating_seq2.clone());
+        assert!***REMOVED***;
+
+        let min_seq = sequencer.get_minimum_sequence();
+        assert_eq!(min_seq, 5); // Should be remaining gating sequence
+
+        // Test removing non-existent sequence
+        let removed = sequencer.remove_gating_sequence(Arc::new(Sequence::new(100)));
+        assert!(!removed);
+    }
+
+    #[test]
+    fn test_single_producer_sequencer_capacity() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = SingleProducerSequencer::new(8, wait_strategy);
+
+        // Test remaining capacity with no consumers
+        let capacity = sequencer.remaining_capacity();
+        assert_eq!(capacity, 8);
+
+        // Test has_available_capacity
+        assert!(sequencer.has_available_capacity(4));
+        assert!(sequencer.has_available_capacity(8));
+
+        // Add a consumer sequence
+        let consumer_seq = Arc::new(Sequence::new(-1));
+        sequencer.add_gating_sequences(&[consumer_seq.clone()]);
+
+        // Claim some sequences
+        let _seq1 = sequencer.next_n(4).unwrap();
+
+        // Test remaining capacity with consumer
+        let capacity = sequencer.remaining_capacity();
+        assert!(capacity <= 8);
+
+        // Update consumer sequence and test again
+        consumer_seq.set(2);
+        let capacity = sequencer.remaining_capacity();
+        assert!(capacity > 0);
+    }
+
+    #[test]
+    fn test_single_producer_sequencer_barrier() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = SingleProducerSequencer::new(8, wait_strategy);
+
+        let dep_seq = Arc::new(Sequence::new(0));
+        let barrier = sequencer.new_barrier(vec![dep_seq]);
+
+        assert_eq!(barrier.get_cursor().get(), -1);
+        assert!(!barrier.is_alerted());
+    }
+
+    #[test]
+    fn test_multi_producer_sequencer_next_n() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(8, wait_strategy);
+
+        // Test claiming multiple sequences
+        let seq = sequencer.next_n(3).unwrap();
+        assert_eq!(seq, 2); // Returns highest sequence (0, 1, 2)
+
+        // Test invalid sequence count
+        let result = sequencer.next_n(0);
+        assert!(result.is_err());
+
+        let result = sequencer.next_n(-1);
+        assert!(result.is_err());
+
+        // Test claiming more than buffer size
+        let result = sequencer.next_n(10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_multi_producer_sequencer_try_next() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(8, wait_strategy);
+
+        // Test try_next success
+        let seq = sequencer.try_next().unwrap();
+        assert_eq!(seq, 0);
+
+        // Test try_next_n success
+        let seq = sequencer.try_next_n(2).unwrap();
+        assert_eq!(seq, 2);
+
+        // Test try_next_n with invalid count
+        let result = sequencer.try_next_n(0);
+        assert!(result.is_none());
+
+        let result = sequencer.try_next_n(-1);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_multi_producer_sequencer_publish_range() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(8, wait_strategy);
+
+        // Claim sequences
+        let seq1 = sequencer.next().unwrap();
+        let seq2 = sequencer.next().unwrap();
+        let seq3 = sequencer.next().unwrap();
+
+        // Publish range
+        sequencer.publish_range(seq1, seq3);
+
+        // All sequences in range should be available
+        assert!(sequencer.is_available(seq1));
+        assert!(sequencer.is_available(seq2));
+        assert!(sequencer.is_available(seq3));
+
+        // Test invalid range
+        sequencer.publish_range(10, 5); // high < low should be handled gracefully
+    }
+
+    #[test]
+    fn test_multi_producer_sequencer_gating_sequences() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(8, wait_strategy);
+
+        let gating_seq1 = Arc::new(Sequence::new(5));
+        let gating_seq2 = Arc::new(Sequence::new(3));
+
+        // Add gating sequences
+        sequencer.add_gating_sequences(&[gating_seq1.clone(), gating_seq2.clone()]);
+
+        // Test minimum sequence calculation
+        let min_seq = sequencer.get_minimum_sequence();
+        assert_eq!(min_seq, 3); // Should be minimum of gating sequences
+
+        // Test remove gating sequence
+        let removed = sequencer.remove_gating_sequence(gating_seq2.clone());
+        assert!***REMOVED***;
+
+        let min_seq = sequencer.get_minimum_sequence();
+        assert_eq!(min_seq, 5); // Should be remaining gating sequence
+
+        // Test removing non-existent sequence
+        let removed = sequencer.remove_gating_sequence(Arc::new(Sequence::new(100)));
+        assert!(!removed);
+    }
+
+    #[test]
+    fn test_multi_producer_sequencer_capacity() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(8, wait_strategy);
+
+        // Test remaining capacity with no consumers
+        let capacity = sequencer.remaining_capacity();
+        assert_eq!(capacity, 8);
+
+        // Test has_available_capacity
+        assert!(sequencer.has_available_capacity(4));
+        assert!(sequencer.has_available_capacity(8));
+
+        // Add a consumer sequence
+        let consumer_seq = Arc::new(Sequence::new(-1));
+        sequencer.add_gating_sequences(&[consumer_seq.clone()]);
+
+        // Claim some sequences
+        let _seq1 = sequencer.next_n(4).unwrap();
+
+        // Test remaining capacity with consumer
+        let capacity = sequencer.remaining_capacity();
+        assert!(capacity <= 8);
+
+        // Update consumer sequence and test again
+        consumer_seq.set(2);
+        let capacity = sequencer.remaining_capacity();
+        assert!(capacity > 0);
+    }
+
+    #[test]
+    fn test_multi_producer_sequencer_barrier() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(8, wait_strategy);
+
+        let dep_seq = Arc::new(Sequence::new(0));
+        let barrier = sequencer.new_barrier(vec![dep_seq]);
+
+        assert_eq!(barrier.get_cursor().get(), -1);
+        assert!(!barrier.is_alerted());
+    }
+
+    #[test]
+    fn test_multi_producer_sequencer_highest_published_with_gaps() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(8, wait_strategy);
+
+        // Claim sequences 0, 1, 2, 3
+        let seq0 = sequencer.next().unwrap();
+        let seq1 = sequencer.next().unwrap();
+        let seq2 = sequencer.next().unwrap();
+        let seq3 = sequencer.next().unwrap();
+
+        // Publish 0, 2, 3 but leave gap at 1
+        sequencer.publish(seq0);
+        sequencer.publish(seq2);
+        sequencer.publish(seq3);
+
+        // Should only return 0 due to gap at 1
+        let highest = sequencer.get_highest_published_sequence(0, 3);
+        assert_eq!(highest, 0);
+
+        // Now publish sequence 1
+        sequencer.publish(seq1);
+
+        // Should now return 3 as all sequences are published
+        let highest = sequencer.get_highest_published_sequence(0, 3);
+        assert_eq!(highest, 3);
+    }
+
+    #[test]
+    fn test_multi_producer_bitmap_functionality() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(64, wait_strategy); // Large enough for bitmap
+
+        // Test bitmap functionality
+        let seq = sequencer.next().unwrap();
+        assert!(!sequencer.is_available(seq));
+
+        sequencer.publish(seq);
+        assert!(sequencer.is_available(seq));
+
+        // Test that bitmap is used for large buffers
+        assert!(!sequencer.available_bitmap.is_empty());
+    }
+
+    #[test]
+    fn test_multi_producer_small_buffer_fallback() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(8, wait_strategy); // Small buffer
+
+        // Test that bitmap is empty for small buffers (falls back to legacy method)
+        assert!(sequencer.available_bitmap.is_empty());
+
+        // Test that legacy method still works
+        let seq = sequencer.next().unwrap();
+        assert!(!sequencer.is_available(seq));
+
+        sequencer.publish(seq);
+        assert!(sequencer.is_available(seq));
+    }
+
+    #[test]
+    fn test_sequencer_wrapper_functionality() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+
+        // Test single producer wrapper
+        let wrapper = SequencerWrapper::new_single_producer(8, wait_strategy.clone());
+        assert_eq!(wrapper.get_buffer_size(), 8);
+        assert_eq!(wrapper.get_cursor().get(), -1);
+        assert_eq!(wrapper.next().unwrap(), 0);
+        assert_eq!(wrapper.next_n(3).unwrap(), 2);
+        assert_eq!(wrapper.try_next().unwrap(), 0);
+        assert_eq!(wrapper.try_next_n(2).unwrap(), 1);
+        assert!(wrapper.has_available_capacity(4));
+        assert!(wrapper.is_available(0));
+        assert_eq!(wrapper.get_highest_published_sequence(0, 5), 5);
+        assert_eq!(wrapper.get_minimum_sequence(), -1);
+        assert_eq!(wrapper.remaining_capacity(), 8);
+
+        // Test multi producer wrapper
+        let wrapper = SequencerWrapper::new_multi_producer(16, wait_strategy);
+        assert_eq!(wrapper.get_buffer_size(), 16);
+        assert_eq!(wrapper.get_cursor().get(), -1);
+
+        // Test publish methods (no-ops)
+        wrapper.publish(0);
+        wrapper.publish_range(0, 5);
+        wrapper.add_gating_sequences(&[]);
+        assert!(!wrapper.remove_gating_sequence(Arc::new(Sequence::new(0))));
+
+        // Test barrier creation
+        let barrier = wrapper.new_barrier(vec![]);
+        assert!(!barrier.is_alerted());
+    }
+
+    #[test]
+    fn test_multi_producer_availability_calculations() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(64, wait_strategy);
+
+        // Test index calculation
+        let index = sequencer.calculate_index(65);
+        assert_eq!(index, 1); // 65 & 63 = 1
+
+        // Test availability flag calculation
+        let flag = sequencer.calculate_availability_flag(64);
+        assert_eq!(flag, 1); // 64 >> 6 = 1
+
+        // Test availability indices calculation
+        let (availability_index, bit_index) = sequencer.calculate_availability_indices(70);
+        assert_eq!(availability_index, 0); // 6 >> 6 = 0
+        assert_eq!(bit_index, 6); // 6 - 0 * 64 = 6
+    }
+
+    #[test]
+    #[should_panic(expected = "Buffer size must be a power of 2")]
+    fn test_multi_producer_invalid_buffer_size() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        MultiProducerSequencer::new(7, wait_strategy); // Not a power of 2
+    }
 }
