@@ -464,4 +464,288 @@ mod tests {
         assert_eq!(barrier_cursor.get(), 42);
         assert!(Arc::ptr_eq(&cursor, &barrier_cursor));
     }
+
+    #[test]
+    fn test_processing_sequence_barrier_with_timeout() {
+        use crate::disruptor::SingleProducerSequencer;
+        use std::time::Duration;
+
+        let cursor = Arc::new(Sequence::new(10));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let dependent_sequences = vec![Arc::new(Sequence::new(5))];
+
+        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone()))
+            as Arc<dyn crate::disruptor::Sequencer>;
+
+        let barrier = ProcessingSequenceBarrier::new(
+            cursor.clone(),
+            wait_strategy,
+            dependent_sequences,
+            sequencer,
+        );
+
+        // Test timeout wait for available sequence
+        let result = barrier.wait_for_with_timeout(5, Duration::from_millis(10));
+        assert!(result.is_ok());
+        assert!(result.unwrap() >= 5);
+
+        // Test alert during timeout wait
+        barrier.alert();
+        let result = barrier.wait_for_with_timeout(15, Duration::from_millis(10));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DisruptorError::Alert));
+
+        barrier.clear_alert();
+    }
+
+    #[test]
+    fn test_simple_sequence_barrier_with_timeout() {
+        use std::time::Duration;
+
+        let cursor = Arc::new(Sequence::new(10));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+
+        let barrier = SimpleSequenceBarrier::new(cursor.clone(), wait_strategy);
+
+        // Test timeout wait for available sequence
+        let result = barrier.wait_for_with_timeout(5, Duration::from_millis(10));
+        assert!(result.is_ok());
+        assert!(result.unwrap() >= 5);
+
+        // Test alert during timeout wait
+        barrier.alert();
+        let result = barrier.wait_for_with_timeout(15, Duration::from_millis(10));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DisruptorError::Alert));
+
+        barrier.clear_alert();
+    }
+
+    #[test]
+    fn test_sequence_barrier_with_shutdown() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let cursor = Arc::new(Sequence::new(10));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+
+        let barrier = SimpleSequenceBarrier::new(cursor.clone(), wait_strategy);
+        let shutdown_flag = AtomicBool::new(false);
+
+        // Test normal wait with shutdown flag
+        let result = barrier.wait_for_with_shutdown(5, &shutdown_flag);
+        assert!(result.is_ok());
+        assert!(result.unwrap() >= 5);
+
+        // Test with shutdown flag set
+        shutdown_flag.store(true, Ordering::Release);
+        let result = barrier.wait_for_with_shutdown(5, &shutdown_flag);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DisruptorError::Alert));
+    }
+
+    #[test]
+    fn test_processing_sequence_barrier_with_shutdown() {
+        use crate::disruptor::SingleProducerSequencer;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let cursor = Arc::new(Sequence::new(10));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let dependent_sequences = vec![Arc::new(Sequence::new(5))];
+
+        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone()))
+            as Arc<dyn crate::disruptor::Sequencer>;
+
+        let barrier = ProcessingSequenceBarrier::new(
+            cursor.clone(),
+            wait_strategy,
+            dependent_sequences,
+            sequencer,
+        );
+
+        let shutdown_flag = AtomicBool::new(false);
+
+        // Test normal wait with shutdown flag
+        let result = barrier.wait_for_with_shutdown(5, &shutdown_flag);
+        assert!(result.is_ok());
+        assert!(result.unwrap() >= 5);
+
+        // Test with shutdown flag set
+        shutdown_flag.store(true, Ordering::Release);
+        let result = barrier.wait_for_with_shutdown(5, &shutdown_flag);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DisruptorError::Alert));
+    }
+
+    #[test]
+    fn test_sequence_barrier_alert_methods() {
+        let cursor = Arc::new(Sequence::new(10));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+
+        let barrier = SimpleSequenceBarrier::new(cursor.clone(), wait_strategy);
+
+        // Test initial state
+        assert!(!barrier.is_alerted());
+        assert!(barrier.check_alert().is_ok());
+
+        // Test alert
+        barrier.alert();
+        assert!(barrier.is_alerted());
+        assert!(barrier.check_alert().is_err());
+        assert!(matches!(
+            barrier.check_alert().unwrap_err(),
+            DisruptorError::Alert
+        ));
+
+        // Test clear alert
+        barrier.clear_alert();
+        assert!(!barrier.is_alerted());
+        assert!(barrier.check_alert().is_ok());
+    }
+
+    #[test]
+    fn test_processing_sequence_barrier_alert_methods() {
+        use crate::disruptor::SingleProducerSequencer;
+
+        let cursor = Arc::new(Sequence::new(10));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let dependent_sequences = vec![Arc::new(Sequence::new(5))];
+
+        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone()))
+            as Arc<dyn crate::disruptor::Sequencer>;
+
+        let barrier = ProcessingSequenceBarrier::new(
+            cursor.clone(),
+            wait_strategy,
+            dependent_sequences,
+            sequencer,
+        );
+
+        // Test initial state
+        assert!(!barrier.is_alerted());
+        assert!(barrier.check_alert().is_ok());
+
+        // Test alert
+        barrier.alert();
+        assert!(barrier.is_alerted());
+        assert!(barrier.check_alert().is_err());
+        assert!(matches!(
+            barrier.check_alert().unwrap_err(),
+            DisruptorError::Alert
+        ));
+
+        // Test clear alert
+        barrier.clear_alert();
+        assert!(!barrier.is_alerted());
+        assert!(barrier.check_alert().is_ok());
+    }
+
+    #[test]
+    fn test_sequence_barrier_highest_published_logic() {
+        use crate::disruptor::SingleProducerSequencer;
+
+        let cursor = Arc::new(Sequence::new(20));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let dependent_sequences = vec![Arc::new(Sequence::new(15))];
+
+        let sequencer = Arc::new(SingleProducerSequencer::new(32, wait_strategy.clone()))
+            as Arc<dyn crate::disruptor::Sequencer>;
+
+        let barrier = ProcessingSequenceBarrier::new(
+            cursor.clone(),
+            wait_strategy,
+            dependent_sequences,
+            sequencer,
+        );
+
+        // Test highest published sequence logic
+        let result = barrier.wait_for(10);
+        assert!(result.is_ok());
+        let available = result.unwrap();
+        assert!(available >= 10);
+    }
+
+    #[test]
+    fn test_sequence_barrier_available_sequence_less_than_requested() {
+        use crate::disruptor::SingleProducerSequencer;
+        use std::time::Duration;
+
+        let cursor = Arc::new(Sequence::new(5)); // Lower cursor value
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let dependent_sequences = vec![Arc::new(Sequence::new(3))];
+
+        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone()))
+            as Arc<dyn crate::disruptor::Sequencer>;
+
+        let barrier = ProcessingSequenceBarrier::new(
+            cursor.clone(),
+            wait_strategy,
+            dependent_sequences,
+            sequencer,
+        );
+
+        // Test when available_sequence < sequence in wait_for_with_timeout method (safer)
+        let result = barrier.wait_for_with_timeout(10, Duration::from_millis(10));
+        // Since we're asking for sequence 10 but cursor is only at 5,
+        // this should either timeout or return the available sequence
+        if let Ok(available) = result {
+            assert!(available <= 10);
+        }
+        // Timeout is also acceptable behavior
+    }
+
+    #[test]
+    fn test_sequence_barrier_available_sequence_less_than_requested_with_timeout() {
+        use crate::disruptor::SingleProducerSequencer;
+        use std::time::Duration;
+
+        let cursor = Arc::new(Sequence::new(5)); // Lower cursor value
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let dependent_sequences = vec![Arc::new(Sequence::new(3))];
+
+        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone()))
+            as Arc<dyn crate::disruptor::Sequencer>;
+
+        let barrier = ProcessingSequenceBarrier::new(
+            cursor.clone(),
+            wait_strategy,
+            dependent_sequences,
+            sequencer,
+        );
+
+        // Test timeout behavior when waiting for unavailable sequence
+        let result = barrier.wait_for_with_timeout(20, Duration::from_millis(10));
+        // This should either timeout or return an available sequence
+        if let Ok(available) = result {
+            assert!(available < 20); // Should be less than requested
+        }
+        // Timeout or alert is expected behavior
+    }
+
+    #[test]
+    fn test_sequence_barrier_trait_default_implementation() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let cursor = Arc::new(Sequence::new(10));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+
+        let barrier = SimpleSequenceBarrier::new(cursor.clone(), wait_strategy);
+        let shutdown_flag = AtomicBool::new(false);
+
+        // Test the trait's default implementation of wait_for_with_shutdown
+        let result = SequenceBarrier::wait_for_with_shutdown(&barrier, 5, &shutdown_flag);
+        assert!(result.is_ok());
+
+        // Test with shutdown flag set
+        shutdown_flag.store(true, Ordering::Release);
+        let result = SequenceBarrier::wait_for_with_shutdown(&barrier, 5, &shutdown_flag);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DisruptorError::Alert));
+
+        // Test with alert set but shutdown false
+        shutdown_flag.store(false, Ordering::Release);
+        barrier.alert();
+        let result = SequenceBarrier::wait_for_with_shutdown(&barrier, 5, &shutdown_flag);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DisruptorError::Alert));
+    }
 }
