@@ -469,4 +469,243 @@ mod tests {
         let cloned = shared_buffer.clone();
         assert_eq!(cloned.buffer_size(), 8);
     }
+
+    #[test]
+    fn test_ring_buffer_size_methods() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let buffer = RingBuffer::new(16, factory).unwrap();
+
+        assert_eq!(buffer.buffer_size(), 16);
+        assert_eq!(buffer.size(), 16);
+    }
+
+    #[test]
+    fn test_ring_buffer_capacity_methods() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let buffer = RingBuffer::new(8, factory).unwrap();
+
+        // Test has_available_capacity
+        assert!(buffer.has_available_capacity(4, 8));
+        assert!(buffer.has_available_capacity(8, 8));
+        assert!(!buffer.has_available_capacity(10, 8));
+
+        // Test remaining_capacity
+        let remaining = buffer.remaining_capacity(0, 4);
+        assert_eq!(remaining, 4); // buffer_size(8) - (4 - 0) = 4
+
+        // Test free_slots
+        let free = buffer.free_slots(5, 2);
+        assert_eq!(free, 5); // buffer_size(8) - (5 - 2) = 5
+    }
+
+    #[test]
+    fn test_ring_buffer_unsafe_get_mut() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let buffer = RingBuffer::new(8, factory).unwrap();
+
+        unsafe {
+            let ptr = buffer.get_mut_unchecked(0);
+            (*ptr).value = 123;
+        }
+
+        // Verify the value was set
+        let event = buffer.get(0);
+        assert_eq!(event.value, 123);
+    }
+
+    #[test]
+    fn test_batch_iterator() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let buffer = RingBuffer::new(8, factory).unwrap();
+
+        // Create a batch iterator
+        unsafe {
+            let iter = buffer.batch_iter_mut(0, 3);
+
+            // Test size_hint
+            let (lower, upper) = iter.size_hint();
+            assert_eq!(lower, 4);
+            assert_eq!(upper, Some(4));
+
+            // Test count (consumes the iterator)
+            let count = iter.count();
+            assert_eq!(count, 4);
+        }
+
+        // Test iteration
+        unsafe {
+            let iter = buffer.batch_iter_mut(1, 3);
+            let mut values = Vec::new();
+
+            for event in iter {
+                event.value = values.len() as i64;
+                values.push(event.value);
+            }
+
+            assert_eq!(values, vec![0, 1, 2]);
+        }
+
+        // Test empty iterator
+        unsafe {
+            let mut iter = buffer.batch_iter_mut(5, 3); // start > end
+            assert!(iter.next().is_none());
+        }
+    }
+
+    #[test]
+    fn test_batch_iterator_remaining() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let buffer = RingBuffer::new(8, factory).unwrap();
+
+        unsafe {
+            let iter = buffer.batch_iter_mut(2, 5);
+            assert_eq!(iter.remaining(), 4); // 5 - 2 + 1 = 4
+        }
+    }
+
+    #[test]
+    fn test_ring_buffer_data_provider_trait() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let mut buffer = RingBuffer::new(8, factory).unwrap();
+
+        // Set a value using mutable access
+        {
+            let event = buffer.get_mut(0);
+            event.value = 456;
+        }
+
+        // Test DataProvider trait implementation
+        let provider: &dyn DataProvider<TestEvent> = &buffer;
+        let event = provider.get(0);
+        assert_eq!(event.value, 456);
+    }
+
+    #[test]
+    fn test_ring_buffer_wrapping_access() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let mut buffer = RingBuffer::new(4, factory).unwrap();
+
+        // Test multiple wraps
+        for i in 0..12 {
+            let event = buffer.get_mut(i);
+            event.value = i;
+        }
+
+        // Verify wrapping behavior - each slot should have the last value written to it
+        // Since we wrote values 0-11 to a buffer of size 4, each slot gets overwritten 3 times
+        // Slot 0: gets values 0, 4, 8  -> final value is 8
+        // Slot 1: gets values 1, 5, 9  -> final value is 9
+        // Slot 2: gets values 2, 6, 10 -> final value is 10
+        // Slot 3: gets values 3, 7, 11 -> final value is 11
+        for i in 0..4 {
+            let expected_value = i + 8; // Last value written to each slot
+            let event = buffer.get(i);
+            assert_eq!(event.value, expected_value);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "shared-ring-buffer")]
+    fn test_shared_ring_buffer_capacity_methods() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let shared_buffer = SharedRingBuffer::new(8, factory).unwrap();
+
+        // Test has_available_capacity
+        assert!(shared_buffer.has_available_capacity(4, 8));
+        assert!(!shared_buffer.has_available_capacity(10, 8));
+
+        // Test remaining_capacity
+        let remaining = shared_buffer.remaining_capacity(0, 4);
+        assert_eq!(remaining, 4);
+    }
+
+    #[test]
+    #[cfg(feature = "shared-ring-buffer")]
+    fn test_shared_ring_buffer_invalid_size() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let result = SharedRingBuffer::new(7, factory); // Not a power of 2
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ring_buffer_negative_sequence() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let mut buffer = RingBuffer::new(8, factory).unwrap();
+
+        // Test negative sequence (should still work due to wrapping)
+        let event = buffer.get_mut(-1);
+        event.value = 999;
+
+        // Verify negative sequence access
+        let event = buffer.get(-1);
+        assert_eq!(event.value, 999);
+
+        // Test that -1 wraps to the same position as buffer_size - 1
+        let event2 = buffer.get(7); // 8 - 1 = 7
+        assert_eq!(event2.value, 999);
+    }
+
+    #[test]
+    fn test_ring_buffer_large_sequence() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let mut buffer = RingBuffer::new(4, factory).unwrap();
+
+        // Test very large sequence numbers
+        let large_seq = i64::MAX - 100;
+        let event = buffer.get_mut(large_seq);
+        event.value = 777;
+
+        // Verify large sequence access
+        let event = buffer.get(large_seq);
+        assert_eq!(event.value, 777);
+    }
+
+    #[test]
+    fn test_ring_buffer_edge_cases() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let buffer = RingBuffer::new(1, factory).unwrap(); // Minimum size
+
+        assert_eq!(buffer.buffer_size(), 1);
+        assert_eq!(buffer.size(), 1);
+
+        // Test capacity calculations with size 1
+        assert!(buffer.has_available_capacity(1, 1));
+        assert!(!buffer.has_available_capacity(2, 1));
+
+        let remaining = buffer.remaining_capacity(0, 0);
+        assert_eq!(remaining, 1);
+
+        let _free = buffer.free_slots(0, 0);
+        assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn test_ring_buffer_zero_capacity_scenarios() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let buffer = RingBuffer::new(8, factory).unwrap();
+
+        // Test zero required capacity
+        assert!(buffer.has_available_capacity(0, 5));
+
+        // Test zero available capacity
+        assert!(!buffer.has_available_capacity(1, 0));
+
+        // Test remaining capacity with equal sequences
+        let remaining = buffer.remaining_capacity(5, 5);
+        assert_eq!(remaining, 8);
+    }
+
+    #[test]
+    fn test_ring_buffer_thread_safety_markers() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let buffer = RingBuffer::new(8, factory).unwrap();
+
+        // Test that buffer can be sent between threads
+        let handle = std::thread::spawn(move || {
+            let event = buffer.get(0);
+            event.value
+        });
+
+        assert_eq!(handle.join().unwrap(), 0);
+    }
 }
