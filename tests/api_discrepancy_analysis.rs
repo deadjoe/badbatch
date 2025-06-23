@@ -23,7 +23,7 @@ mod api_discrepancy_tests {
         // let mut producer = build_single_producer(1024, || MyEvent::default(), simple_wait_strategy::BusySpin)
         
         // This is what actually works:
-        let mut producer = build_single_producer(1024, || MyEvent::default(), BusySpinWaitStrategy)
+        let mut producer = build_single_producer(1024, MyEvent::default, BusySpinWaitStrategy)
             .handle_events_with(|event, _sequence, _end_of_batch| {
                 println!("Processing event with value {}", event.value);
             })
@@ -38,7 +38,7 @@ mod api_discrepancy_tests {
         // Using the adapter approach:
         let _producer2 = build_single_producer(
             1024, 
-            || MyEvent::default(), 
+            MyEvent::default, 
             simple_wait_strategy::busy_spin()  // This should work as it returns SimpleWaitStrategyAdapter
         )
         .handle_events_with(|event, _sequence, _end_of_batch| {
@@ -58,7 +58,7 @@ mod api_discrepancy_tests {
         }
 
         // The documented pattern works correctly:
-        let factory = event_factory::ClosureEventFactory::new(|| MyEvent::default());
+        let factory = event_factory::ClosureEventFactory::new(MyEvent::default);
         let ring_buffer = Arc::new(RingBuffer::new(1024, factory).unwrap());
 
         let consumer = ElegantConsumer::with_affinity(
@@ -138,12 +138,11 @@ mod api_discrepancy_tests {
         // README.md lines 104-107 (Traditional LMAX API imports)
         use badbatch::disruptor::{
             Disruptor, ProducerType, BlockingWaitStrategy, DefaultEventFactory,
-            EventHandler, EventTranslator, Result,
         };
 
         // README.md lines 166-169 (Modern disruptor-rs API imports)
         use badbatch::disruptor::{
-            build_single_producer, Producer, ElegantConsumer, RingBuffer,
+            build_single_producer, RingBuffer,
             simple_wait_strategy::BusySpin, event_factory::ClosureEventFactory,
         };
 
@@ -175,14 +174,14 @@ mod api_discrepancy_tests {
         }
 
         // Pattern 1: Traditional WaitStrategy (this works)
-        let _producer1 = build_single_producer(1024, || MyEvent::default(), BusySpinWaitStrategy)
+        let _producer1 = build_single_producer(1024, MyEvent::default, BusySpinWaitStrategy)
             .handle_events_with(|event, _seq, _end| {
                 event.value = 42;
             })
             .build();
 
         // Pattern 2: Simple wait strategy adapter (this also works)
-        let _producer2 = build_single_producer(1024, || MyEvent::default(), simple_wait_strategy::busy_spin())
+        let _producer2 = build_single_producer(1024, MyEvent::default, simple_wait_strategy::busy_spin())
             .handle_events_with(|event, _seq, _end| {
                 event.value = 42;
             })
@@ -203,7 +202,7 @@ mod api_discrepancy_tests {
         }
 
         // Closure pattern (modern API)
-        let _builder_result = build_single_producer(1024, || MyEvent::default(), BusySpinWaitStrategy)
+        let _builder_result = build_single_producer(1024, MyEvent::default, BusySpinWaitStrategy)
             .handle_events_with(|event, _sequence, _end_of_batch| {
                 // Closure receives: &mut E, i64, bool
                 event.value = 42;
@@ -212,7 +211,7 @@ mod api_discrepancy_tests {
         // Trait pattern (traditional API)
         struct MyHandler;
         impl EventHandler<MyEvent> for MyHandler {
-            fn on_event(&mut self, event: &mut MyEvent, sequence: i64, end_of_batch: bool) -> Result<()> {
+            fn on_event(&mut self, event: &mut MyEvent, sequence: i64, _end_of_batch: bool) -> badbatch::disruptor::Result<()> {
                 // Method receives: &mut E, i64, bool -> Result<()>
                 event.value = sequence;
                 Ok(())

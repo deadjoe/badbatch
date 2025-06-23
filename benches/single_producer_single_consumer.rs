@@ -50,6 +50,7 @@ impl CountingSink {
         self.counter.clone()
     }
 
+    #[allow(dead_code)]
     fn reset(&self) {
         self.sink.store(0, Ordering::Release);
         self.counter.store(0, Ordering::Release);

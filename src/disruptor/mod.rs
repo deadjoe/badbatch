@@ -126,6 +126,9 @@ pub enum DisruptorError {
 
     #[error("Alert exception")]
     Alert,
+
+    #[error("Shutdown error: {0}")]
+    ShutdownError(String),
 }
 
 /// Result type for Disruptor operations

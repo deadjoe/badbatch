@@ -254,6 +254,10 @@ where
 }
 
 // Ensure RingBuffer is Send and Sync for multi-threading
+// SAFETY: RingBuffer<T> is Send and Sync when T is Send + Sync because:
+// - The ring buffer uses UnsafeCell internally, but access is coordinated through sequencers
+// - All mutations are protected by sequence ordering and happen-before relationships
+// - The atomic sequence numbers ensure proper synchronization across threads
 unsafe impl<T: Send + Sync> Send for RingBuffer<T> {}
 unsafe impl<T: Send + Sync> Sync for RingBuffer<T> {}
 

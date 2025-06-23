@@ -53,6 +53,7 @@ impl MPSCCountingSink {
         self.event_count.clone()
     }
 
+    #[allow(dead_code)]
     fn reset(&self) {
         self.event_count.store(0, Ordering::Release);
         for last_value in self.last_values.iter() {
@@ -100,12 +101,12 @@ impl BurstProducer {
         let join_handle = thread::spawn(move || {
             while !stop_flag_clone.load(Ordering::Acquire) {
                 // Wait for start signal
-                while !start_barrier_clone.compare_exchange(
+                while start_barrier_clone.compare_exchange(
                     true,
                     false,
                     Ordering::Acquire,
                     Ordering::Relaxed,
-                ).is_ok() {
+                ).is_err() {
                     if stop_flag_clone.load(Ordering::Acquire) {
                         return;
                     }

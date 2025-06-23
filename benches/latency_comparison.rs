@@ -25,6 +25,7 @@ const SAMPLE_COUNT: usize = 1000;
 struct LatencyEvent {
     id: i64,
     send_time: u64,
+    #[allow(dead_code)]
     process_time: u64,
 }
 
@@ -54,6 +55,7 @@ impl LatencyHandler {
         self.counter.clone()
     }
 
+    #[allow(dead_code)]
     fn reset(&self) {
         self.counter.store(0, Ordering::Release);
         for latency in self.latencies.iter() {
