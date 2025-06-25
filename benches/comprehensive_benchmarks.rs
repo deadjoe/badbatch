@@ -57,7 +57,7 @@ mod fixed_benchmarks {
     fn safe_wait(counter: &Arc<AtomicI64>, expected: i64, timeout_ms: u64) -> bool {
         let start = Instant::now();
         let timeout = Duration::from_millis(timeout_ms);
-        
+
         while counter.load(Ordering::Acquire) < expected {
             if start.elapsed() > timeout {
                 return false;
@@ -98,7 +98,7 @@ mod fixed_benchmarks {
         for burst_size in [10, 100].iter() {
             let benchmark_id = BenchmarkId::new("burst", burst_size);
             group.throughput(Throughput::Elements(*burst_size));
-            
+
             group.bench_function(benchmark_id, |b| {
                 b.iter_custom(|iters| {
                     let start = Instant::now();
@@ -141,7 +141,7 @@ mod fixed_benchmarks {
         // Test different buffer sizes
         for buffer_size in [256, 1024].iter() {
             let benchmark_id = BenchmarkId::new("buffer", buffer_size);
-            
+
             group.bench_function(benchmark_id, |b| {
                 let factory = DefaultEventFactory::<SafeEvent>::new();
                 let handler = SafeHandler::new();
@@ -164,7 +164,7 @@ mod fixed_benchmarks {
                 b.iter_custom(|iters| {
                     let events_per_iter = 50;
                     let start = Instant::now();
-                    
+
                     for _ in 0..iters {
                         counter.store(0, Ordering::Release);
 
@@ -185,7 +185,7 @@ mod fixed_benchmarks {
                             break;
                         }
                     }
-                    
+
                     let _ = disruptor.shutdown();
                     start.elapsed()
                 })
@@ -260,19 +260,19 @@ pub fn safe_comprehensive_suite(c: &mut Criterion) {
 pub fn channel_comparison(c: &mut Criterion) {
     use std::sync::mpsc;
     use std::thread;
-    
+
     let mut group = c.benchmark_group("Channel_Baseline");
     group.measurement_time(Duration::from_secs(3));
 
     for burst_size in [10, 100].iter() {
         let benchmark_id = criterion::BenchmarkId::new("std_mpsc", burst_size);
-        
+
         group.bench_function(benchmark_id, |b| {
             b.iter_custom(|iters| {
                 let start = std::time::Instant::now();
                 for _ in 0..iters {
                     let (tx, rx) = mpsc::channel();
-                    
+
                     let producer = thread::spawn(move || {
                         for i in 0..*burst_size {
                             if tx.send(i).is_err() {
@@ -280,7 +280,7 @@ pub fn channel_comparison(c: &mut Criterion) {
                             }
                         }
                     });
-                    
+
                     let consumer = thread::spawn(move || {
                         let mut count = 0;
                         while count < *burst_size {
@@ -291,7 +291,7 @@ pub fn channel_comparison(c: &mut Criterion) {
                             }
                         }
                     });
-                    
+
                     let _ = producer.join();
                     let _ = consumer.join();
                 }
@@ -299,7 +299,7 @@ pub fn channel_comparison(c: &mut Criterion) {
             })
         });
     }
-    
+
     group.finish();
 }
 
