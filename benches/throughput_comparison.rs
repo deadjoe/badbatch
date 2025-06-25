@@ -127,27 +127,6 @@ fn benchmark_disruptor_throughput(
 
 /// Benchmark std::sync::mpsc channel throughput
 fn benchmark_mpsc_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: usize) {
-    let (sender, receiver) = mpsc::sync_channel(buffer_size);
-    let counter = Arc::new(AtomicI64::new(0));
-
-    let counter_clone = counter.clone();
-    let receiver_handle = thread::spawn(move || {
-        let mut processed = 0;
-        while processed < THROUGHPUT_EVENTS {
-            if let Ok(event) = receiver.recv() {
-                // Minimal processing to match Disruptor handler
-                let _event: ThroughputEvent = event;
-                black_box(_event.data[0]);
-
-                processed += 1;
-                counter_clone.store(processed as i64, Ordering::Relaxed);
-            } else {
-                // Channel closed, exit
-                break;
-            }
-        }
-    });
-
     let param = format!("buf{}", buffer_size);
     let benchmark_id = BenchmarkId::new("MPSC", param);
 
@@ -156,7 +135,27 @@ fn benchmark_mpsc_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: 
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Release);
+                // Create fresh channel and thread for each iteration
+                let (sender, receiver) = mpsc::sync_channel(buffer_size);
+                let counter = Arc::new(AtomicI64::new(0));
+
+                let counter_clone = counter.clone();
+                let receiver_handle = thread::spawn(move || {
+                    let mut processed = 0;
+                    while processed < THROUGHPUT_EVENTS {
+                        if let Ok(event) = receiver.recv() {
+                            // Minimal processing to match Disruptor handler
+                            let _event: ThroughputEvent = event;
+                            black_box(_event.data[0]);
+
+                            processed += 1;
+                            counter_clone.store(processed as i64, Ordering::Relaxed);
+                        } else {
+                            // Channel closed, exit
+                            break;
+                        }
+                    }
+                });
 
                 for i in 0..THROUGHPUT_EVENTS {
                     let event = ThroughputEvent {
@@ -173,39 +172,18 @@ fn benchmark_mpsc_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: 
                 while counter.load(Ordering::Acquire) < THROUGHPUT_EVENTS as i64 {
                     std::hint::spin_loop();
                 }
+
+                // Close sender to signal receiver to stop
+                drop(sender);
+                receiver_handle.join().unwrap();
             }
             start.elapsed()
         })
     });
-
-    // Close sender to signal receiver to stop
-    drop(sender);
-    receiver_handle.join().unwrap();
 }
 
 /// Benchmark crossbeam channel throughput
 fn benchmark_crossbeam_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: usize) {
-    let (sender, receiver) = crossbeam::channel::bounded(buffer_size);
-    let counter = Arc::new(AtomicI64::new(0));
-
-    let counter_clone = counter.clone();
-    let receiver_handle = thread::spawn(move || {
-        let mut processed = 0;
-        while processed < THROUGHPUT_EVENTS {
-            if let Ok(event) = receiver.recv() {
-                // Minimal processing to match Disruptor handler
-                let _event: ThroughputEvent = event;
-                black_box(_event.data[0]);
-
-                processed += 1;
-                counter_clone.store(processed as i64, Ordering::Relaxed);
-            } else {
-                // Channel closed, exit
-                break;
-            }
-        }
-    });
-
     let param = format!("buf{}", buffer_size);
     let benchmark_id = BenchmarkId::new("Crossbeam", param);
 
@@ -214,7 +192,27 @@ fn benchmark_crossbeam_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_s
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Release);
+                // Create fresh channel and thread for each iteration
+                let (sender, receiver) = crossbeam::channel::bounded(buffer_size);
+                let counter = Arc::new(AtomicI64::new(0));
+
+                let counter_clone = counter.clone();
+                let receiver_handle = thread::spawn(move || {
+                    let mut processed = 0;
+                    while processed < THROUGHPUT_EVENTS {
+                        if let Ok(event) = receiver.recv() {
+                            // Minimal processing to match Disruptor handler
+                            let _event: ThroughputEvent = event;
+                            black_box(_event.data[0]);
+
+                            processed += 1;
+                            counter_clone.store(processed as i64, Ordering::Relaxed);
+                        } else {
+                            // Channel closed, exit
+                            break;
+                        }
+                    }
+                });
 
                 for i in 0..THROUGHPUT_EVENTS {
                     let event = ThroughputEvent {
@@ -231,14 +229,14 @@ fn benchmark_crossbeam_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_s
                 while counter.load(Ordering::Acquire) < THROUGHPUT_EVENTS as i64 {
                     std::hint::spin_loop();
                 }
+
+                // Close sender to signal receiver to stop
+                drop(sender);
+                receiver_handle.join().unwrap();
             }
             start.elapsed()
         })
     });
-
-    // Close sender to signal receiver to stop
-    drop(sender);
-    receiver_handle.join().unwrap();
 }
 
 /// Benchmark try_publish performance for non-blocking scenarios
