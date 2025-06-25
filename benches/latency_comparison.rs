@@ -19,7 +19,7 @@ use badbatch::disruptor::{
 
 // Benchmark configuration constants
 const BUFFER_SIZE: usize = 1024;
-const SAMPLE_COUNT: usize = 1000;
+const SAMPLE_COUNT: usize = 500;  // Reduced from 1000 to improve speed
 
 #[derive(Debug, Default, Clone, Copy)]
 struct LatencyEvent {
@@ -198,16 +198,20 @@ fn benchmark_mpsc_latency(group: &mut BenchmarkGroup<criterion::measurement::Wal
     let counter_clone = counter.clone();
 
     let receiver_handle = thread::spawn(move || {
-        while let Ok((_id, send_time)) = receiver.recv() {
-            let process_time = get_timestamp_nanos();
-            let latency = process_time - send_time;
+        let mut processed = 0;
+        while processed < SAMPLE_COUNT {
+            if let Ok((_id, send_time)) = receiver.recv() {
+                let process_time = get_timestamp_nanos();
+                let latency = process_time - send_time;
 
-            let index = counter_clone.fetch_add(1, Ordering::Release) as usize;
-            if index < latencies_clone.len() {
-                latencies_clone[index].store(latency as i64, Ordering::Release);
-            }
-
-            if index >= SAMPLE_COUNT - 1 {
+                if processed < latencies_clone.len() {
+                    latencies_clone[processed].store(latency as i64, Ordering::Release);
+                }
+                
+                processed += 1;
+                counter_clone.store(processed as i64, Ordering::Release);
+            } else {
+                // Channel closed, exit
                 break;
             }
         }
@@ -223,7 +227,10 @@ fn benchmark_mpsc_latency(group: &mut BenchmarkGroup<criterion::measurement::Wal
 
             for i in 0..SAMPLE_COUNT {
                 let send_time = get_timestamp_nanos();
-                sender.send((black_box(i), send_time)).unwrap();
+                if let Err(_) = sender.send((black_box(i), send_time)) {
+                    // Channel closed, stop sending
+                    break;
+                }
             }
 
             // Wait for all events to be processed
@@ -235,6 +242,8 @@ fn benchmark_mpsc_latency(group: &mut BenchmarkGroup<criterion::measurement::Wal
         })
     });
 
+    // Close sender to signal receiver to stop
+    drop(sender);
     receiver_handle.join().unwrap();
 
     // Print latency statistics
