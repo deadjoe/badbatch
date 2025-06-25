@@ -19,7 +19,7 @@ use badbatch::disruptor::{
 
 // Benchmark configuration constants
 const BUFFER_SIZE: usize = 1024;
-const SAMPLE_COUNT: usize = 500;  // Reduced from 1000 to improve speed
+const SAMPLE_COUNT: usize = 500; // Reduced from 1000 to improve speed
 
 #[derive(Debug, Default, Clone, Copy)]
 struct LatencyEvent {
@@ -207,7 +207,7 @@ fn benchmark_mpsc_latency(group: &mut BenchmarkGroup<criterion::measurement::Wal
                 if processed < latencies_clone.len() {
                     latencies_clone[processed].store(latency as i64, Ordering::Release);
                 }
-                
+
                 processed += 1;
                 counter_clone.store(processed as i64, Ordering::Release);
             } else {
@@ -227,7 +227,7 @@ fn benchmark_mpsc_latency(group: &mut BenchmarkGroup<criterion::measurement::Wal
 
             for i in 0..SAMPLE_COUNT {
                 let send_time = get_timestamp_nanos();
-                if let Err(_) = sender.send((black_box(i), send_time)) {
+                if sender.send((black_box(i), send_time)).is_err() {
                     // Channel closed, stop sending
                     break;
                 }
