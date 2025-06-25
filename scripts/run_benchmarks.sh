@@ -15,6 +15,8 @@ NC='\033[0m' # No Color
 
 # Configuration
 TIMEOUT_SECONDS=600  # 10 minutes timeout per benchmark (longer for comprehensive tests)
+SPSC_TIMEOUT=900     # 15 minutes for SPSC (longer due to many wait strategies)
+SCALING_TIMEOUT=900  # 15 minutes for buffer scaling (tests multiple sizes)
 LOG_DIR="benchmark_logs"
 
 # Function to print colored output
@@ -55,17 +57,25 @@ check_dependencies() {
 run_benchmark_safe() {
     local bench_name="$1"
     local description="$2"
+    local timeout_override="$3"  # Optional override timeout
     local log_file="$LOG_DIR/${bench_name}.log"
     
     print_status "Running $description..."
     print_status "Benchmark: $bench_name"
     
+    # Determine timeout to use
+    local timeout_value="$TIMEOUT_SECONDS"
+    if [ -n "$timeout_override" ]; then
+        timeout_value="$timeout_override"
+        print_status "Using extended timeout: ${timeout_value}s"
+    fi
+    
     # Use timeout if available (GNU timeout or gtimeout on macOS)
     local timeout_cmd=""
     if command -v timeout >/dev/null 2>&1; then
-        timeout_cmd="timeout ${TIMEOUT_SECONDS}s"
+        timeout_cmd="timeout ${timeout_value}s"
     elif command -v gtimeout >/dev/null 2>&1; then
-        timeout_cmd="gtimeout ${TIMEOUT_SECONDS}s"
+        timeout_cmd="gtimeout ${timeout_value}s"
     else
         print_warning "No timeout command available, running without timeout protection"
     fi
@@ -84,7 +94,7 @@ run_benchmark_safe() {
         else
             local exit_code=$?
             if [ $exit_code -eq 124 ]; then
-                print_error "$bench_name timed out after ${TIMEOUT_SECONDS} seconds"
+                print_error "$bench_name timed out after ${timeout_value} seconds"
             else
                 print_error "$bench_name failed with exit code $exit_code"
             fi
@@ -119,7 +129,7 @@ run_spsc() {
     print_status "Running Single Producer Single Consumer (SPSC) benchmarks..."
     print_status "This tests different wait strategies with single producer/consumer setup."
     
-    run_benchmark_safe "single_producer_single_consumer" "SPSC performance testing"
+    run_benchmark_safe "single_producer_single_consumer" "SPSC performance testing" "$SPSC_TIMEOUT"
 }
 
 # Function to run MPSC benchmarks
@@ -159,7 +169,7 @@ run_scaling() {
     print_status "Running Buffer Size Scaling benchmarks..."
     print_status "This tests how performance scales with different buffer sizes."
     
-    run_benchmark_safe "buffer_size_scaling" "Buffer size scaling analysis"
+    run_benchmark_safe "buffer_size_scaling" "Buffer size scaling analysis" "$SCALING_TIMEOUT"
 }
 
 # Function to run minimal test

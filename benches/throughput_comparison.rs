@@ -22,7 +22,7 @@ use badbatch::disruptor::{
 const SMALL_BUFFER: usize = 256;
 const MEDIUM_BUFFER: usize = 1024;
 const LARGE_BUFFER: usize = 4096;
-const THROUGHPUT_EVENTS: u64 = 10_000;
+const THROUGHPUT_EVENTS: u64 = 5_000;  // Reduced from 10_000 to improve speed
 
 #[derive(Debug, Default, Clone, Copy)]
 struct ThroughputEvent {
@@ -132,13 +132,17 @@ fn benchmark_mpsc_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: 
 
     let counter_clone = counter.clone();
     let receiver_handle = thread::spawn(move || {
-        while let Ok(event) = receiver.recv() {
-            // Minimal processing to match Disruptor handler
-            let _event: ThroughputEvent = event;
-            black_box(_event.data[0]);
+        let mut processed = 0;
+        while processed < THROUGHPUT_EVENTS {
+            if let Ok(event) = receiver.recv() {
+                // Minimal processing to match Disruptor handler
+                let _event: ThroughputEvent = event;
+                black_box(_event.data[0]);
 
-            let count = counter_clone.fetch_add(1, Ordering::Relaxed);
-            if count >= THROUGHPUT_EVENTS as i64 - 1 {
+                processed += 1;
+                counter_clone.store(processed as i64, Ordering::Relaxed);
+            } else {
+                // Channel closed, exit
                 break;
             }
         }
@@ -159,7 +163,10 @@ fn benchmark_mpsc_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: 
                         id: black_box(i as i64),
                         data: [i as i64; 4],
                     };
-                    sender.send(event).unwrap();
+                    if let Err(_) = sender.send(event) {
+                        // Channel closed, stop sending
+                        break;
+                    }
                 }
 
                 // Wait for all events to be processed
@@ -171,6 +178,8 @@ fn benchmark_mpsc_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: 
         })
     });
 
+    // Close sender to signal receiver to stop
+    drop(sender);
     receiver_handle.join().unwrap();
 }
 
@@ -181,13 +190,17 @@ fn benchmark_crossbeam_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_s
 
     let counter_clone = counter.clone();
     let receiver_handle = thread::spawn(move || {
-        while let Ok(event) = receiver.recv() {
-            // Minimal processing to match Disruptor handler
-            let _event: ThroughputEvent = event;
-            black_box(_event.data[0]);
+        let mut processed = 0;
+        while processed < THROUGHPUT_EVENTS {
+            if let Ok(event) = receiver.recv() {
+                // Minimal processing to match Disruptor handler
+                let _event: ThroughputEvent = event;
+                black_box(_event.data[0]);
 
-            let count = counter_clone.fetch_add(1, Ordering::Relaxed);
-            if count >= THROUGHPUT_EVENTS as i64 - 1 {
+                processed += 1;
+                counter_clone.store(processed as i64, Ordering::Relaxed);
+            } else {
+                // Channel closed, exit
                 break;
             }
         }
@@ -208,7 +221,10 @@ fn benchmark_crossbeam_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_s
                         id: black_box(i as i64),
                         data: [i as i64; 4],
                     };
-                    sender.send(event).unwrap();
+                    if let Err(_) = sender.send(event) {
+                        // Channel closed, stop sending
+                        break;
+                    }
                 }
 
                 // Wait for all events to be processed
@@ -220,6 +236,8 @@ fn benchmark_crossbeam_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_s
         })
     });
 
+    // Close sender to signal receiver to stop
+    drop(sender);
     receiver_handle.join().unwrap();
 }
 
