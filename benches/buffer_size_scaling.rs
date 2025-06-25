@@ -17,7 +17,9 @@ use badbatch::disruptor::{
 };
 
 // Buffer size configurations to test
+#[allow(dead_code)]
 const BUFFER_SIZES: [usize; 8] = [64, 128, 256, 512, 1024, 2048, 4096, 8192];
+#[allow(dead_code)]
 const WORKLOAD_SIZES: [u64; 3] = [1_000, 5_000, 20_000];
 
 #[derive(Debug, Default, Clone)]
@@ -361,48 +363,35 @@ fn benchmark_buffer_utilization(
 pub fn buffer_scaling_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("BufferScaling");
 
-    // Configure benchmark group
-    group.measurement_time(Duration::from_secs(20));
-    group.warm_up_time(Duration::from_secs(5));
+    // Configure benchmark group with reduced times to prevent timeout
+    group.measurement_time(Duration::from_secs(10)); // Reduced from 20s
+    group.warm_up_time(Duration::from_secs(3)); // Reduced from 5s
 
-    // Test fast processing scaling across all buffer sizes and workloads
-    for &buffer_size in BUFFER_SIZES.iter() {
-        for &workload_size in WORKLOAD_SIZES.iter() {
-            // Skip large combinations to keep benchmark time reasonable
-            if buffer_size > 2048 && workload_size > 5_000 {
-                continue;
-            }
+    // Drastically reduced test matrix to prevent 900s timeout
+    // Focus on key buffer sizes and smaller workloads
+    let key_buffer_sizes = [64, 128, 256]; // Test only 3 representative sizes
+    let key_workload_sizes = [1_000]; // Test only smallest workload
 
+    // Test fast processing scaling for key configurations only
+    for &buffer_size in key_buffer_sizes.iter() {
+        for &workload_size in key_workload_sizes.iter() {
             benchmark_fast_processing_scaling(&mut group, buffer_size, workload_size);
         }
     }
 
-    // Test medium processing scaling for selected configurations
-    for &buffer_size in [256, 1024, 4096].iter() {
-        for &workload_size in [1_000, 5_000].iter() {
-            benchmark_medium_processing_scaling(&mut group, buffer_size, workload_size);
-        }
-    }
+    // Test one medium processing scaling configuration
+    benchmark_medium_processing_scaling(&mut group, 256, 1_000);
 
-    // Test slow processing scaling for selected configurations
-    for &buffer_size in [512, 2048].iter() {
-        benchmark_slow_processing_scaling(&mut group, buffer_size, 1_000);
-    }
+    // Test one slow processing scaling configuration
+    benchmark_slow_processing_scaling(&mut group, 512, 1_000);
 
-    // Test memory usage for all buffer sizes
-    for &buffer_size in BUFFER_SIZES.iter() {
+    // Test memory usage for representative buffer sizes only
+    for &buffer_size in [64, 256, 1024].iter() {
         benchmark_memory_scaling(&mut group, buffer_size);
     }
 
-    // Test buffer utilization patterns
-    for &buffer_size in [256, 1024, 4096].iter() {
-        for &burst_size in [100, 500].iter() {
-            // Only test combinations where burst is smaller than buffer
-            if burst_size < buffer_size as u64 {
-                benchmark_buffer_utilization(&mut group, buffer_size, burst_size);
-            }
-        }
-    }
+    // Test one buffer utilization pattern
+    benchmark_buffer_utilization(&mut group, 256, 100);
 
     group.finish();
 }

@@ -189,39 +189,38 @@ fn benchmark_disruptor_latency(group: &mut BenchmarkGroup<criterion::measurement
 
 /// Benchmark std::sync::mpsc channel latency
 fn benchmark_mpsc_latency(group: &mut BenchmarkGroup<criterion::measurement::WallTime>) {
-    let (sender, receiver) = mpsc::channel();
-    let latencies: Arc<Vec<AtomicI64>> =
-        Arc::new((0..SAMPLE_COUNT).map(|_| AtomicI64::new(0)).collect());
-    let counter = Arc::new(AtomicI64::new(0));
-
-    let latencies_clone = latencies.clone();
-    let counter_clone = counter.clone();
-
-    let receiver_handle = thread::spawn(move || {
-        let mut processed = 0;
-        while processed < SAMPLE_COUNT {
-            if let Ok((_id, send_time)) = receiver.recv() {
-                let process_time = get_timestamp_nanos();
-                let latency = process_time - send_time;
-
-                if processed < latencies_clone.len() {
-                    latencies_clone[processed].store(latency as i64, Ordering::Release);
-                }
-
-                processed += 1;
-                counter_clone.store(processed as i64, Ordering::Release);
-            } else {
-                // Channel closed, exit
-                break;
-            }
-        }
-    });
-
     let benchmark_id = BenchmarkId::new("MPSC", "Channel");
 
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|_iters| {
-            counter.store(0, Ordering::Release);
+            // Create fresh channel and thread for each measurement
+            let (sender, receiver) = mpsc::channel();
+            let latencies: Arc<Vec<AtomicI64>> =
+                Arc::new((0..SAMPLE_COUNT).map(|_| AtomicI64::new(0)).collect());
+            let counter = Arc::new(AtomicI64::new(0));
+
+            let latencies_clone = latencies.clone();
+            let counter_clone = counter.clone();
+
+            let receiver_handle = thread::spawn(move || {
+                let mut processed = 0;
+                while processed < SAMPLE_COUNT {
+                    if let Ok((_id, send_time)) = receiver.recv() {
+                        let process_time = get_timestamp_nanos();
+                        let latency = process_time - send_time;
+
+                        if processed < latencies_clone.len() {
+                            latencies_clone[processed].store(latency as i64, Ordering::Release);
+                        }
+
+                        processed += 1;
+                        counter_clone.store(processed as i64, Ordering::Release);
+                    } else {
+                        // Channel closed, exit
+                        break;
+                    }
+                }
+            });
 
             let start = Instant::now();
 
@@ -238,68 +237,61 @@ fn benchmark_mpsc_latency(group: &mut BenchmarkGroup<criterion::measurement::Wal
                 std::hint::spin_loop();
             }
 
+            // Close sender to signal receiver to stop
+            drop(sender);
+            receiver_handle.join().unwrap();
+
             start.elapsed()
         })
     });
 
-    // Close sender to signal receiver to stop
-    drop(sender);
-    receiver_handle.join().unwrap();
-
-    // Print latency statistics
-    let collected_latencies: Vec<i64> = latencies
-        .iter()
-        .map(|lat| lat.load(Ordering::Acquire))
-        .filter(|&lat| lat > 0)
-        .collect();
-
-    let (mean, median, p95, p99, max) = calculate_latency_stats(&collected_latencies);
-
-    println!("\nMPSC Channel Latency Statistics (nanoseconds):");
-    println!("  Mean: {:.2}", mean);
-    println!("  Median: {:.2}", median);
-    println!("  95th percentile: {:.2}", p95);
-    println!("  99th percentile: {:.2}", p99);
-    println!("  Max: {:.2}", max);
+    // Note: Individual latency statistics are not printed for MPSC channel
+    // because latencies are measured inside each iteration. The timing
+    // information is captured by Criterion's measurement framework.
 }
 
 /// Benchmark crossbeam channel latency for comparison
 fn benchmark_crossbeam_latency(group: &mut BenchmarkGroup<criterion::measurement::WallTime>) {
-    let (sender, receiver) = crossbeam::channel::bounded(BUFFER_SIZE);
-    let latencies: Arc<Vec<AtomicI64>> =
-        Arc::new((0..SAMPLE_COUNT).map(|_| AtomicI64::new(0)).collect());
-    let counter = Arc::new(AtomicI64::new(0));
-
-    let latencies_clone = latencies.clone();
-    let counter_clone = counter.clone();
-
-    let receiver_handle = thread::spawn(move || {
-        while let Ok((_id, send_time)) = receiver.recv() {
-            let process_time = get_timestamp_nanos();
-            let latency = process_time - send_time;
-
-            let index = counter_clone.fetch_add(1, Ordering::Release) as usize;
-            if index < latencies_clone.len() {
-                latencies_clone[index].store(latency as i64, Ordering::Release);
-            }
-
-            if index >= SAMPLE_COUNT - 1 {
-                break;
-            }
-        }
-    });
-
     let benchmark_id = BenchmarkId::new("Crossbeam", "Channel");
 
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|_iters| {
-            counter.store(0, Ordering::Release);
+            // Create fresh channel and thread for each measurement
+            let (sender, receiver) = crossbeam::channel::bounded(BUFFER_SIZE);
+            let latencies: Arc<Vec<AtomicI64>> =
+                Arc::new((0..SAMPLE_COUNT).map(|_| AtomicI64::new(0)).collect());
+            let counter = Arc::new(AtomicI64::new(0));
+
+            let latencies_clone = latencies.clone();
+            let counter_clone = counter.clone();
+
+            let receiver_handle = thread::spawn(move || {
+                let mut processed = 0;
+                while processed < SAMPLE_COUNT {
+                    if let Ok((_id, send_time)) = receiver.recv() {
+                        let process_time = get_timestamp_nanos();
+                        let latency = process_time - send_time;
+
+                        if processed < latencies_clone.len() {
+                            latencies_clone[processed].store(latency as i64, Ordering::Release);
+                        }
+
+                        processed += 1;
+                        counter_clone.store(processed as i64, Ordering::Release);
+                    } else {
+                        // Channel closed, exit
+                        break;
+                    }
+                }
+            });
 
             let start = Instant::now();
 
             for i in 0..SAMPLE_COUNT {
                 let send_time = get_timestamp_nanos();
-                sender.send((black_box(i), send_time)).unwrap();
+                if sender.send((black_box(i), send_time)).is_err() {
+                    break;
+                }
             }
 
             // Wait for all events to be processed
@@ -307,27 +299,17 @@ fn benchmark_crossbeam_latency(group: &mut BenchmarkGroup<criterion::measurement
                 std::hint::spin_loop();
             }
 
+            // Close sender to signal receiver to stop
+            drop(sender);
+            receiver_handle.join().unwrap();
+
             start.elapsed()
         })
     });
 
-    receiver_handle.join().unwrap();
-
-    // Print latency statistics
-    let collected_latencies: Vec<i64> = latencies
-        .iter()
-        .map(|lat| lat.load(Ordering::Acquire))
-        .filter(|&lat| lat > 0)
-        .collect();
-
-    let (mean, median, p95, p99, max) = calculate_latency_stats(&collected_latencies);
-
-    println!("\nCrossbeam Channel Latency Statistics (nanoseconds):");
-    println!("  Mean: {:.2}", mean);
-    println!("  Median: {:.2}", median);
-    println!("  95th percentile: {:.2}", p95);
-    println!("  99th percentile: {:.2}", p99);
-    println!("  Max: {:.2}", max);
+    // Note: Individual latency statistics are not printed for Crossbeam channel
+    // because latencies are measured inside each iteration. The timing
+    // information is captured by Criterion's measurement framework.
 }
 
 /// Main latency comparison benchmark function
