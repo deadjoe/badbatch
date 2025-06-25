@@ -7,14 +7,14 @@ use criterion::measurement::WallTime;
 use criterion::{
     black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use badbatch::disruptor::{
-    event_translator::ClosureEventTranslator, BusySpinWaitStrategy,
-    DefaultEventFactory, Disruptor, EventHandler, ProducerType, Result as DisruptorResult,
+    event_translator::ClosureEventTranslator, BusySpinWaitStrategy, DefaultEventFactory, Disruptor,
+    EventHandler, ProducerType, Result as DisruptorResult,
 };
 
 // Benchmark configuration constants
@@ -53,6 +53,7 @@ impl MPSCCountingSink {
         self.event_count.clone()
     }
 
+    #[allow(dead_code)]
     fn reset(&self) {
         self.event_count.store(0, Ordering::Release);
         for last_value in self.last_values.iter() {
@@ -86,23 +87,25 @@ struct SyncProducer {
 }
 
 impl SyncProducer {
-    fn new<F>(producer_id: usize, burst_size: u64, mut disruptor: Arc<Disruptor<MPSCEvent>>, 
-              start_barrier: Arc<Barrier>, stop_flag: Arc<AtomicBool>) -> Self
-    where
-        F: 'static + Send + Fn(),
-    {
+    fn new(
+        producer_id: usize,
+        burst_size: u64,
+        disruptor: Arc<Disruptor<MPSCEvent>>,
+        start_barrier: Arc<Barrier>,
+        stop_flag: Arc<AtomicBool>,
+    ) -> Self {
         let stop_flag_clone = stop_flag.clone();
-        
+
         let join_handle = thread::spawn(move || {
             // Wait for all producers to be ready
             start_barrier.wait();
-            
+
             // Produce burst of events
             for i in 1..=burst_size {
                 if stop_flag_clone.load(Ordering::Acquire) {
                     return;
                 }
-                
+
                 let result = disruptor.publish_event(ClosureEventTranslator::new(
                     move |event: &mut MPSCEvent, seq: i64| {
                         event.producer_id = producer_id;
@@ -110,7 +113,7 @@ impl SyncProducer {
                         event.sequence = seq;
                     },
                 ));
-                
+
                 if result.is_err() {
                     eprintln!("Producer {} failed to publish event {}", producer_id, i);
                     return;
@@ -144,21 +147,26 @@ fn wait_for_mpsc_completion(counter: &Arc<AtomicI64>, expected: i64, timeout_ms:
     let timeout = Duration::from_millis(timeout_ms);
     let mut last_count = 0;
     let mut stall_count = 0;
-    
+
     while counter.load(Ordering::Acquire) < expected {
         if start.elapsed() > timeout {
             let current_count = counter.load(Ordering::Acquire);
-            eprintln!("WARNING: MPSC benchmark timed out waiting for {} events, got {}", 
-                     expected, current_count);
+            eprintln!(
+                "WARNING: MPSC benchmark timed out waiting for {} events, got {}",
+                expected, current_count
+            );
             return false;
         }
-        
+
         // Check for progress to detect stalls
         let current_count = counter.load(Ordering::Acquire);
         if current_count == last_count {
             stall_count += 1;
             if stall_count > 1000 {
-                eprintln!("WARNING: MPSC benchmark appears stalled at {} events", current_count);
+                eprintln!(
+                    "WARNING: MPSC benchmark appears stalled at {} events",
+                    current_count
+                );
                 std::thread::sleep(Duration::from_millis(1));
                 stall_count = 0;
             }
@@ -166,7 +174,7 @@ fn wait_for_mpsc_completion(counter: &Arc<AtomicI64>, expected: i64, timeout_ms:
             stall_count = 0;
         }
         last_count = current_count;
-        
+
         std::hint::spin_loop();
     }
     true
@@ -183,7 +191,7 @@ fn baseline_mpsc_measurement(group: &mut BenchmarkGroup<WallTime>, burst_size: u
             let start = Instant::now();
             for _ in 0..iters {
                 event_counter.store(0, Ordering::Release);
-                
+
                 // Simulate multi-producer work
                 let handles: Vec<_> = (0..PRODUCER_COUNT)
                     .map(|_| {
@@ -196,15 +204,17 @@ fn baseline_mpsc_measurement(group: &mut BenchmarkGroup<WallTime>, burst_size: u
                         })
                     })
                     .collect();
-                
+
                 // Wait for all threads to complete
                 for handle in handles {
                     handle.join().unwrap();
                 }
-                
+
                 // Verify completion
-                assert_eq!(event_counter.load(Ordering::Acquire), 
-                          (burst_size * PRODUCER_COUNT as u64) as i64);
+                assert_eq!(
+                    event_counter.load(Ordering::Acquire),
+                    (burst_size * PRODUCER_COUNT as u64) as i64
+                );
             }
             start.elapsed()
         })
@@ -248,7 +258,7 @@ fn benchmark_mpsc_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u6
                 // Create synchronization barrier for all producers
                 let start_barrier = Arc::new(Barrier::new(PRODUCER_COUNT));
                 let stop_flag = Arc::new(AtomicBool::new(false));
-                
+
                 // Create producer threads
                 let mut producers: Vec<SyncProducer> = (0..PRODUCER_COUNT)
                     .map(|producer_id| {
@@ -270,7 +280,7 @@ fn benchmark_mpsc_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u6
                     }
                     panic!("MPSC benchmark failed: events not processed within timeout");
                 }
-                
+
                 // Clean up producers
                 for producer in &mut producers {
                     producer.stop();
