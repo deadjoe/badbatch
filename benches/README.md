@@ -104,19 +104,6 @@ Evaluates how performance scales with buffer size:
 - Memory usage scaling
 - Optimal buffer size identification
 
-### 7. Development Tools
-**File**: `minimal_test.rs`
-
-Quick debugging and hang detection test:
-- Single event publish/consume cycle
-- 100ms timeout for rapid feedback
-- Ideal for troubleshooting hanging issues
-- Minimal resource usage for quick iteration
-
-**Key Metrics**:
-- Basic functionality verification
-- Hang detection and prevention
-- Quick development feedback
 
 ## 🛡️ Safety Features
 
@@ -124,7 +111,6 @@ All benchmarks now include enhanced safety mechanisms:
 
 ### Timeout Protection
 - **SPSC/MPSC Tests**: 5-10 second timeouts prevent infinite waiting
-- **Minimal Test**: 100ms timeout for rapid debugging
 - **Progress Monitoring**: Automatic detection of stalled operations
 - **Graceful Failure**: Clear error messages when timeouts occur
 
@@ -148,7 +134,7 @@ All benchmarks now include enhanced safety mechanisms:
 
 # Manual execution with enhanced safety features
 cargo bench --bench comprehensive_benchmarks  # Main CI suite with safety
-cargo bench --bench minimal_test              # Quick hang detection
+cargo bench --bench comprehensive_benchmarks  # Quick comprehensive test
 
 # Individual benchmark categories
 cargo bench --bench single_producer_single_consumer
@@ -173,7 +159,6 @@ cargo bench --bench throughput_comparison           # Throughput analysis
 ### Debug & Development
 ```bash
 # Quick debugging (fastest execution)
-cargo bench --bench minimal_test
 
 # Test all benchmarks with comprehensive safety
 ./scripts/run_benchmarks.sh all

@@ -19,7 +19,6 @@
 - `throughput_comparison.rs` - Throughput comparison vs other primitives
 
 ### Development Tools
-- `minimal_test.rs` - Quick debugging and hang detection
 
 ## 🔧 Files Removed During Cleanup
 
@@ -48,7 +47,7 @@ The following duplicate files were removed and replaced with improved versions:
 ### Quick Tests (CI/Development)
 ```bash
 cargo bench --bench comprehensive_benchmarks    # Main CI suite
-cargo bench --bench minimal_test               # Quick hang check
+cargo bench --bench comprehensive_benchmarks   # Quick comprehensive test
 ```
 
 ### Complete Performance Analysis

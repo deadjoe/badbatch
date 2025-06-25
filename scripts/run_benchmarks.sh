@@ -172,13 +172,6 @@ run_scaling() {
     run_benchmark_safe "buffer_size_scaling" "Buffer size scaling analysis" "$SCALING_TIMEOUT"
 }
 
-# Function to run minimal test
-run_minimal() {
-    print_status "Running Minimal Test..."
-    print_status "Quick debugging and hang detection test."
-    
-    run_benchmark_safe "minimal_test" "Minimal functionality test"
-}
 
 # Function to run all benchmarks
 run_all() {
@@ -198,7 +191,7 @@ run_all() {
     print_status "Starting comprehensive benchmark run..."
     
     # Run all benchmarks and track results
-    for benchmark in quick spsc mpsc pipeline latency throughput scaling minimal; do
+    for benchmark in quick spsc mpsc pipeline latency throughput scaling; do
         echo ""
         print_status "=== Running $benchmark benchmark ==="
         if run_$benchmark; then
@@ -258,7 +251,6 @@ run_regression() {
     
     # Run a focused set of benchmarks for regression testing
     run_benchmark_safe "comprehensive_benchmarks" "Regression test - comprehensive"
-    run_benchmark_safe "minimal_test" "Regression test - minimal"
 }
 
 # Function to optimize system for benchmarking
@@ -301,7 +293,7 @@ compile_all() {
     local benchmarks=("comprehensive_benchmarks" "single_producer_single_consumer" 
                      "multi_producer_single_consumer" "pipeline_processing" 
                      "latency_comparison" "throughput_comparison" 
-                     "buffer_size_scaling" "minimal_test")
+                     "buffer_size_scaling")
     
     local failed=0
     for benchmark in "${benchmarks[@]}"; do
@@ -337,7 +329,6 @@ show_help() {
     echo "  latency    Run Latency Comparison benchmarks"
     echo "  throughput Run Throughput Comparison benchmarks"
     echo "  scaling    Run Buffer Size Scaling benchmarks"
-    echo "  minimal    Run Minimal Test (quick debugging)"
     echo "  all        Run ALL benchmark suites (30-60 minutes)"
     echo "  report     Generate HTML benchmark reports"
     echo "  regression Run performance regression test"
@@ -353,7 +344,6 @@ show_help() {
     echo ""
     echo "Examples:"
     echo "  $0 quick                    # Quick development test (recommended)"
-    echo "  $0 minimal                  # Fastest debugging test"
     echo "  $0 spsc                     # Test SPSC performance"
     echo "  $0 compile                  # Check if all benchmarks compile"
     echo "  $0 optimize && $0 all       # Optimize system then run all tests"
@@ -400,10 +390,6 @@ main() {
         scaling)
             check_dependencies
             run_scaling
-            ;;
-        minimal)
-            check_dependencies
-            run_minimal
             ;;
         all)
             check_dependencies
