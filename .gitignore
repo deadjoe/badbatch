@@ -1,6 +1,7 @@
 # Rust build artifacts
 /target/
 /target_*/
+**/target/
 **/*.rs.bk
 *.pdb
 
@@ -128,6 +129,7 @@ perf.data*
 # Benchmark results
 benchmark_results/
 bench_*.txt
+benchmark_logs/
 
 # Testing artifacts
 test_results/
