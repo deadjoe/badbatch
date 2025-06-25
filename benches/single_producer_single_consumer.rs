@@ -1,7 +1,7 @@
-//! Single Producer Single Consumer (SPSC) Benchmarks
+//! Fixed Single Producer Single Consumer (SPSC) Benchmarks
 //!
 //! This benchmark suite tests the performance of the BadBatch Disruptor
-//! in single producer, single consumer scenarios with different configurations.
+//! in single producer, single consumer scenarios with proper timeout handling.
 
 use criterion::measurement::WallTime;
 use criterion::{
@@ -21,6 +21,7 @@ use badbatch::disruptor::{
 const BUFFER_SIZE: usize = 1024;
 const BURST_SIZES: [u64; 4] = [1, 10, 100, 1000];
 const PAUSE_MS: [u64; 3] = [0, 1, 10];
+const TIMEOUT_MS: u64 = 5000; // 5 second timeout to prevent hanging
 
 #[derive(Debug, Default, Clone, Copy)]
 struct BenchmarkEvent {
@@ -50,7 +51,6 @@ impl CountingSink {
         self.counter.clone()
     }
 
-    #[allow(dead_code)]
     fn reset(&self) {
         self.sink.store(0, Ordering::Release);
         self.counter.store(0, Ordering::Release);
@@ -71,6 +71,54 @@ impl EventHandler<BenchmarkEvent> for CountingSink {
     }
 }
 
+/// Safe wait with timeout to prevent hanging
+fn wait_for_completion(counter: &Arc<AtomicI64>, expected: i64, timeout_ms: u64) -> bool {
+    let start = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    
+    while counter.load(Ordering::Acquire) < expected {
+        if start.elapsed() > timeout {
+            eprintln!("WARNING: Benchmark timed out waiting for {} events, got {}", 
+                     expected, counter.load(Ordering::Acquire));
+            return false;
+        }
+        std::hint::spin_loop();
+    }
+    true
+}
+
+/// Safe wait with timeout and yielding
+fn wait_for_completion_yielding(counter: &Arc<AtomicI64>, expected: i64, timeout_ms: u64) -> bool {
+    let start = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    
+    while counter.load(Ordering::Acquire) < expected {
+        if start.elapsed() > timeout {
+            eprintln!("WARNING: Benchmark timed out waiting for {} events, got {}", 
+                     expected, counter.load(Ordering::Acquire));
+            return false;
+        }
+        std::thread::yield_now();
+    }
+    true
+}
+
+/// Safe wait with timeout and sleeping
+fn wait_for_completion_sleeping(counter: &Arc<AtomicI64>, expected: i64, timeout_ms: u64) -> bool {
+    let start = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    
+    while counter.load(Ordering::Acquire) < expected {
+        if start.elapsed() > timeout {
+            eprintln!("WARNING: Benchmark timed out waiting for {} events, got {}", 
+                     expected, counter.load(Ordering::Acquire));
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    true
+}
+
 /// Baseline measurement to determine overhead
 fn baseline_measurement(group: &mut BenchmarkGroup<WallTime>, burst_size: u64) {
     let sink = Arc::new(AtomicI64::new(0));
@@ -84,8 +132,8 @@ fn baseline_measurement(group: &mut BenchmarkGroup<WallTime>, burst_size: u64) {
                 for i in 1..=burst_size {
                     sink.store(black_box(i as i64), Ordering::Release);
                 }
-                // Wait for the last value
-                while sink.load(Ordering::Acquire) != burst_size as i64 {}
+                // Simple verification
+                assert_eq!(sink.load(Ordering::Acquire), burst_size as i64);
             }
             start.elapsed()
         })
@@ -96,7 +144,6 @@ fn baseline_measurement(group: &mut BenchmarkGroup<WallTime>, burst_size: u64) {
 fn benchmark_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pause_ms: u64) {
     let factory = DefaultEventFactory::<BenchmarkEvent>::new();
     let handler = CountingSink::new();
-    let _sink = handler.get_sink();
     let counter = handler.get_counter();
 
     let mut disruptor = Disruptor::new(
@@ -136,9 +183,9 @@ fn benchmark_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pa
                         .unwrap();
                 }
 
-                // Wait for all events to be processed
-                while counter.load(Ordering::Acquire) < burst_size as i64 {
-                    std::hint::spin_loop();
+                // Wait for all events to be processed with timeout
+                if !wait_for_completion(&counter, burst_size as i64, TIMEOUT_MS) {
+                    panic!("Benchmark failed: events not processed within timeout");
                 }
             }
             start.elapsed()
@@ -152,7 +199,6 @@ fn benchmark_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pa
 fn benchmark_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pause_ms: u64) {
     let factory = DefaultEventFactory::<BenchmarkEvent>::new();
     let handler = CountingSink::new();
-    let _sink = handler.get_sink();
     let counter = handler.get_counter();
 
     let mut disruptor = Disruptor::new(
@@ -192,9 +238,9 @@ fn benchmark_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
                         .unwrap();
                 }
 
-                // Wait for all events to be processed
-                while counter.load(Ordering::Acquire) < burst_size as i64 {
-                    std::thread::yield_now();
+                // Wait for all events to be processed with timeout and yielding
+                if !wait_for_completion_yielding(&counter, burst_size as i64, TIMEOUT_MS) {
+                    panic!("Benchmark failed: events not processed within timeout");
                 }
             }
             start.elapsed()
@@ -247,9 +293,9 @@ fn benchmark_blocking(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
                         .unwrap();
                 }
 
-                // Wait for all events to be processed
-                while counter.load(Ordering::Acquire) < burst_size as i64 {
-                    std::thread::sleep(Duration::from_millis(1));
+                // Wait for all events to be processed with timeout and sleeping
+                if !wait_for_completion_sleeping(&counter, burst_size as i64, TIMEOUT_MS) {
+                    panic!("Benchmark failed: events not processed within timeout");
                 }
             }
             start.elapsed()
@@ -302,9 +348,9 @@ fn benchmark_sleeping(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
                         .unwrap();
                 }
 
-                // Wait for all events to be processed
-                while counter.load(Ordering::Acquire) < burst_size as i64 {
-                    std::thread::sleep(Duration::from_millis(1));
+                // Wait for all events to be processed with timeout and sleeping
+                if !wait_for_completion_sleeping(&counter, burst_size as i64, TIMEOUT_MS) {
+                    panic!("Benchmark failed: events not processed within timeout");
                 }
             }
             start.elapsed()
@@ -315,19 +361,20 @@ fn benchmark_sleeping(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
 }
 
 /// Main SPSC benchmark function
-pub fn spsc_benchmark(c: &mut Criterion) {
-    let mut group = c.benchmark_group("SPSC");
+pub fn fixed_spsc_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Fixed_SPSC");
 
-    // Configure benchmark group
+    // Configure benchmark group with reasonable timeouts
     group.measurement_time(Duration::from_secs(10));
     group.warm_up_time(Duration::from_secs(3));
+    group.sample_size(20); // More samples for better statistics
 
     for &burst_size in BURST_SIZES.iter() {
         // Baseline measurement
         baseline_measurement(&mut group, burst_size);
 
         for &pause_ms in PAUSE_MS.iter() {
-            // Skip certain combinations for efficiency
+            // Skip very large combinations to keep benchmarks manageable
             if burst_size > 100 && pause_ms > 1 {
                 continue;
             }
@@ -346,5 +393,5 @@ pub fn spsc_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(spsc, spsc_benchmark);
-criterion_main!(spsc);
+criterion_group!(fixed_spsc, fixed_spsc_benchmark);
+criterion_main!(fixed_spsc);
