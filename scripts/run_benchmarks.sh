@@ -37,6 +37,10 @@ print_error() {
 # Create log directory
 mkdir -p "$LOG_DIR"
 
+# Load result formatter functions
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/result_formatter.sh"
+
 # Function to check if criterion is installed
 check_dependencies() {
     print_status "Checking dependencies..."
@@ -74,11 +78,8 @@ run_benchmark_safe() {
             local duration=$((end_time - start_time))
             print_success "$bench_name completed successfully in ${duration}s"
             
-            # Show key results
-            if [ -f "$log_file" ]; then
-                echo "Key results:"
-                grep -E "(time:|thrpt:)" "$log_file" | head -5 | sed 's/^/  /' || true
-            fi
+            # Display friendly results
+            display_single_benchmark_results "$log_file" "$bench_name"
             return 0
         else
             local exit_code=$?
@@ -94,6 +95,9 @@ run_benchmark_safe() {
         # Run without timeout as fallback
         if time cargo bench --bench "$bench_name" 2>&1 | tee "$log_file"; then
             print_success "$bench_name completed successfully"
+            
+            # Display friendly results
+            display_single_benchmark_results "$log_file" "$bench_name"
             return 0
         else
             print_error "$bench_name failed"
@@ -199,24 +203,26 @@ run_all() {
     
     echo ""
     print_status "Benchmark run completed!"
-    print_status "Total time: ${duration} seconds ($((duration / 60)) minutes)"
     
-    # Summary
+    # Display comprehensive results table
     if [ ${#successful_benchmarks[@]} -gt 0 ]; then
-        print_success "Successful benchmarks (${#successful_benchmarks[@]}):"
-        for bench in "${successful_benchmarks[@]}"; do
-            echo "  ✓ $bench"
-        done
+        display_results_table "$LOG_DIR" "${successful_benchmarks[@]}"
     fi
     
+    # Display summary report
+    generate_summary_report "$LOG_DIR" "$duration" "${successful_benchmarks[@]}"
+    
+    # Basic summary
     if [ ${#failed_benchmarks[@]} -gt 0 ]; then
+        echo ""
         print_error "Failed benchmarks (${#failed_benchmarks[@]}):"
         for bench in "${failed_benchmarks[@]}"; do
             echo "  ✗ $bench"
         done
         return 1
     else
-        print_success "All benchmarks completed successfully!"
+        echo ""
+        print_success "🎉 All benchmarks completed successfully!"
         return 0
     fi
 }
