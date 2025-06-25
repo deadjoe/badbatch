@@ -43,6 +43,7 @@ impl CountingSink {
         }
     }
 
+    #[allow(dead_code)]
     fn get_sink(&self) -> Arc<AtomicI64> {
         self.sink.clone()
     }
@@ -51,6 +52,7 @@ impl CountingSink {
         self.counter.clone()
     }
 
+    #[allow(dead_code)]
     fn reset(&self) {
         self.sink.store(0, Ordering::Release);
         self.counter.store(0, Ordering::Release);
@@ -75,11 +77,14 @@ impl EventHandler<BenchmarkEvent> for CountingSink {
 fn wait_for_completion(counter: &Arc<AtomicI64>, expected: i64, timeout_ms: u64) -> bool {
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
-    
+
     while counter.load(Ordering::Acquire) < expected {
         if start.elapsed() > timeout {
-            eprintln!("WARNING: Benchmark timed out waiting for {} events, got {}", 
-                     expected, counter.load(Ordering::Acquire));
+            eprintln!(
+                "WARNING: Benchmark timed out waiting for {} events, got {}",
+                expected,
+                counter.load(Ordering::Acquire)
+            );
             return false;
         }
         std::hint::spin_loop();
@@ -91,11 +96,14 @@ fn wait_for_completion(counter: &Arc<AtomicI64>, expected: i64, timeout_ms: u64)
 fn wait_for_completion_yielding(counter: &Arc<AtomicI64>, expected: i64, timeout_ms: u64) -> bool {
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
-    
+
     while counter.load(Ordering::Acquire) < expected {
         if start.elapsed() > timeout {
-            eprintln!("WARNING: Benchmark timed out waiting for {} events, got {}", 
-                     expected, counter.load(Ordering::Acquire));
+            eprintln!(
+                "WARNING: Benchmark timed out waiting for {} events, got {}",
+                expected,
+                counter.load(Ordering::Acquire)
+            );
             return false;
         }
         std::thread::yield_now();
@@ -107,11 +115,14 @@ fn wait_for_completion_yielding(counter: &Arc<AtomicI64>, expected: i64, timeout
 fn wait_for_completion_sleeping(counter: &Arc<AtomicI64>, expected: i64, timeout_ms: u64) -> bool {
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
-    
+
     while counter.load(Ordering::Acquire) < expected {
         if start.elapsed() > timeout {
-            eprintln!("WARNING: Benchmark timed out waiting for {} events, got {}", 
-                     expected, counter.load(Ordering::Acquire));
+            eprintln!(
+                "WARNING: Benchmark timed out waiting for {} events, got {}",
+                expected,
+                counter.load(Ordering::Acquire)
+            );
             return false;
         }
         std::thread::sleep(Duration::from_millis(1));

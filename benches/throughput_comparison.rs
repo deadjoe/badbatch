@@ -22,7 +22,7 @@ use badbatch::disruptor::{
 const SMALL_BUFFER: usize = 256;
 const MEDIUM_BUFFER: usize = 1024;
 const LARGE_BUFFER: usize = 4096;
-const THROUGHPUT_EVENTS: u64 = 5_000;  // Reduced from 10_000 to improve speed
+const THROUGHPUT_EVENTS: u64 = 5_000; // Reduced from 10_000 to improve speed
 
 #[derive(Debug, Default, Clone, Copy)]
 struct ThroughputEvent {
@@ -163,7 +163,7 @@ fn benchmark_mpsc_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: 
                         id: black_box(i as i64),
                         data: [i as i64; 4],
                     };
-                    if let Err(_) = sender.send(event) {
+                    if sender.send(event).is_err() {
                         // Channel closed, stop sending
                         break;
                     }
@@ -221,7 +221,7 @@ fn benchmark_crossbeam_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_s
                         id: black_box(i as i64),
                         data: [i as i64; 4],
                     };
-                    if let Err(_) = sender.send(event) {
+                    if sender.send(event).is_err() {
                         // Channel closed, stop sending
                         break;
                     }
