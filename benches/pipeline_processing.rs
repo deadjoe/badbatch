@@ -19,6 +19,7 @@ use badbatch::disruptor::{
 // Benchmark configuration constants
 const BUFFER_SIZE: usize = 2048;
 const BURST_SIZES: [u64; 3] = [50, 200, 1000];
+const PIPELINE_TIMEOUT_MS: u64 = 10000; // 10 second timeout for pipeline stages
 
 #[derive(Debug, Default, Clone)]
 struct PipelineEvent {
@@ -160,6 +161,25 @@ impl EventHandler<PipelineEvent> for FinalHandler {
     }
 }
 
+/// Safe wait with timeout to prevent hanging in pipeline stages
+fn wait_for_pipeline_completion(counter: &Arc<AtomicI64>, expected: i64, timeout_ms: u64) -> bool {
+    let start = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+
+    while counter.load(Ordering::Acquire) < expected {
+        if start.elapsed() > timeout {
+            eprintln!(
+                "WARNING: Pipeline stage timed out waiting for {} events, got {}",
+                expected,
+                counter.load(Ordering::Acquire)
+            );
+            return false;
+        }
+        std::hint::spin_loop();
+    }
+    true
+}
+
 /// Benchmark two-stage pipeline (Stage1 -> Stage2)
 fn benchmark_two_stage_pipeline(
     group: &mut BenchmarkGroup<WallTime>,
@@ -216,9 +236,13 @@ fn benchmark_two_stage_pipeline(
                         .unwrap();
                 }
 
-                // Wait for both stages to complete
-                while stage2_count.load(Ordering::Acquire) < burst_size as i64 {
-                    std::hint::spin_loop();
+                // Wait for both stages to complete with timeout protection
+                if !wait_for_pipeline_completion(
+                    &stage2_count,
+                    burst_size as i64,
+                    PIPELINE_TIMEOUT_MS,
+                ) {
+                    panic!("Pipeline benchmark failed: stage2 timeout");
                 }
             }
             start.elapsed()
@@ -284,9 +308,13 @@ fn benchmark_three_stage_pipeline(
                         .unwrap();
                 }
 
-                // Wait for all three stages to complete
-                while stage3_count.load(Ordering::Acquire) < burst_size as i64 {
-                    std::hint::spin_loop();
+                // Wait for all three stages to complete with timeout protection
+                if !wait_for_pipeline_completion(
+                    &stage3_count,
+                    burst_size as i64,
+                    PIPELINE_TIMEOUT_MS,
+                ) {
+                    panic!("Pipeline benchmark failed: stage3 timeout");
                 }
             }
             start.elapsed()
@@ -356,9 +384,9 @@ fn benchmark_four_stage_pipeline(
                         .unwrap();
                 }
 
-                // Wait for final stage to process the last event
-                while last_id.load(Ordering::Acquire) < burst_size as i64 {
-                    std::hint::spin_loop();
+                // Wait for final stage to process the last event with timeout protection
+                if !wait_for_pipeline_completion(&last_id, burst_size as i64, PIPELINE_TIMEOUT_MS) {
+                    panic!("Pipeline benchmark failed: final stage timeout");
                 }
             }
             start.elapsed()
