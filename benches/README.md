@@ -312,6 +312,60 @@ All benchmarks have been validated for:
 - **Safety**: Timeout protection and error recovery
 - **Completeness**: Full test coverage of all major scenarios
 
+## 📊 Current Test Scale Information
+
+### Single Producer Single Consumer (SPSC)
+**Test Matrix:**
+- Buffer Size: 1024 slots
+- Burst Sizes: [1, 100] events
+- Pause Configurations: [0ms]
+- Wait Strategies: [BusySpin, Yielding, Blocking, Sleeping]
+- **Total Test Combinations**: 8 (2 burst × 1 pause × 4 strategies)
+- **Measurement Time**: 10s per test, 3s warmup
+
+### Multi Producer Single Consumer (MPSC)
+**Test Matrix:**
+- Buffer Size: 1024 slots
+- Producer Counts: [2, 3] producers
+- Burst Sizes: [10, 100, 500] events per producer
+- Wait Strategies: [BusySpin, Yielding, Blocking]
+- **Total Test Combinations**: 18 (2 producers × 3 bursts × 3 strategies)
+- **Measurement Time**: 15s per test, 5s warmup
+
+### Pipeline Processing
+**Test Matrix:**
+- Buffer Size: 2048 slots
+- Pipeline Stages: [2-stage, 3-stage, 4-stage]
+- Burst Sizes: [50, 200, 1000] events
+- Wait Strategies: [BusySpin, Yielding]
+- **Total Test Combinations**: 10 (3 stages × 3 bursts × 2 strategies, 4-stage limited to burst ≤200)
+- **Measurement Time**: 20s per test, 5s warmup
+- **Timeout Protection**: 10s per pipeline stage
+
+### Buffer Size Scaling
+**Test Matrix:**
+- Buffer Sizes: [64, 128, 256] slots (reduced from 8 sizes)
+- Workload Sizes: [1000] events (reduced from 3 sizes)
+- Processing Types: [Fast, Medium, Slow] with different delays
+- **Total Test Combinations**: 7 tests
+- **Measurement Time**: 10s per test, 3s warmup
+
+### Latency Comparison
+**Test Matrix:**
+- Buffer Sizes: [256, 1024, 4096] slots
+- Event Counts: [1000, 10000] events
+- Comparison Targets: [BadBatch-BusySpin, std::sync::mpsc, Crossbeam]
+- **Total Test Combinations**: 18 (3 buffers × 2 counts × 3 targets)
+- **Measurement Time**: 15s per test, 5s warmup
+
+### Throughput Comparison
+**Test Matrix:**
+- Buffer Sizes: [256, 1024, 4096] slots
+- Workload Sizes: [1000, 10000] events
+- Comparison Targets: [BadBatch-SPSC, BadBatch-MPSC, std::sync::mpsc, Crossbeam]
+- **Total Test Combinations**: 24 (3 buffers × 2 workloads × 4 targets)
+- **Measurement Time**: 20s per test, 5s warmup
+
 ## 📋 Change History
 
 ### June 2025 - Major Safety & Performance Update
