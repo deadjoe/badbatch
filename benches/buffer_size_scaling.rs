@@ -251,26 +251,27 @@ fn benchmark_slow_processing_scaling(
 
 /// Test memory usage scaling with different buffer sizes
 fn benchmark_memory_scaling(group: &mut BenchmarkGroup<WallTime>, buffer_size: usize) {
-    let factory = DefaultEventFactory::<ScalingEvent>::new();
-    let handler = ScalingHandler::new(0);
-    let counter = handler.get_counter();
-
-    let mut disruptor = Disruptor::new(
-        factory,
-        buffer_size,
-        ProducerType::Single,
-        Box::new(BusySpinWaitStrategy::new()),
-    )
-    .unwrap()
-    .handle_events_with(handler)
-    .build();
-
-    disruptor.start().unwrap();
-
     let benchmark_id = BenchmarkId::new("MemoryUsage", buffer_size);
 
     group.bench_function(benchmark_id, |b| {
         b.iter(|| {
+            // Create fresh Disruptor instance for each iteration
+            let factory = DefaultEventFactory::<ScalingEvent>::new();
+            let handler = ScalingHandler::new(0);
+            let counter = handler.get_counter();
+
+            let mut disruptor = Disruptor::new(
+                factory,
+                buffer_size,
+                ProducerType::Single,
+                Box::new(BusySpinWaitStrategy::new()),
+            )
+            .unwrap()
+            .handle_events_with(handler)
+            .build();
+
+            disruptor.start().unwrap();
+
             // Test memory allocation patterns by creating events with different payload sizes
             for payload_size in [1, 10, 100] {
                 let success = disruptor.try_publish_event(ClosureEventTranslator::new(
@@ -288,10 +289,10 @@ fn benchmark_memory_scaling(group: &mut BenchmarkGroup<WallTime>, buffer_size: u
                     }
                 }
             }
+
+            disruptor.shutdown().unwrap();
         })
     });
-
-    disruptor.shutdown().unwrap();
 }
 
 /// Test buffer utilization patterns
