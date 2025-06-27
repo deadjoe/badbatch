@@ -87,31 +87,28 @@ fn benchmark_fast_processing_scaling(
     let param = format!("fast_buf{}_work{}", buffer_size, workload_size);
     let benchmark_id = BenchmarkId::new("FastProcessing", param);
 
-    // Create Disruptor instance outside of iterations to avoid thread creation overhead
-    let factory = DefaultEventFactory::<ScalingEvent>::new();
-    let handler = ScalingHandler::new(0); // No artificial processing delay
-    let _counter = handler.get_counter();
-    let last_id = handler.get_last_id();
-
-    let mut disruptor = Disruptor::new(
-        factory,
-        buffer_size,
-        ProducerType::Single,
-        Box::new(BusySpinWaitStrategy::new()),
-    )
-    .unwrap()
-    .handle_events_with(handler)
-    .build();
-
-    disruptor.start().unwrap();
-
     group.throughput(Throughput::Elements(workload_size));
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                // Reset last_id for each iteration
-                last_id.store(0, Ordering::Release);
+                // Create fresh Disruptor instance for each iteration to avoid state conflicts
+                let factory = DefaultEventFactory::<ScalingEvent>::new();
+                let handler = ScalingHandler::new(0); // No artificial processing delay
+                let _counter = handler.get_counter();
+                let last_id = handler.get_last_id();
+
+                let mut disruptor = Disruptor::new(
+                    factory,
+                    buffer_size,
+                    ProducerType::Single,
+                    Box::new(BusySpinWaitStrategy::new()),
+                )
+                .unwrap()
+                .handle_events_with(handler)
+                .build();
+
+                disruptor.start().unwrap();
 
                 for i in 1..=workload_size {
                     disruptor
@@ -128,12 +125,12 @@ fn benchmark_fast_processing_scaling(
                 while last_id.load(Ordering::Acquire) < workload_size as i64 {
                     std::hint::spin_loop();
                 }
+
+                disruptor.shutdown().unwrap();
             }
             start.elapsed()
         })
     });
-
-    disruptor.shutdown().unwrap();
 }
 
 /// Test scaling with medium processing (moderate per-event work)
@@ -145,31 +142,28 @@ fn benchmark_medium_processing_scaling(
     let param = format!("medium_buf{}_work{}", buffer_size, workload_size);
     let benchmark_id = BenchmarkId::new("MediumProcessing", param);
 
-    // Create Disruptor instance outside of iterations to avoid thread creation overhead
-    let factory = DefaultEventFactory::<ScalingEvent>::new();
-    let handler = ScalingHandler::new(1_000); // 1 microsecond processing delay
-    let _counter = handler.get_counter();
-    let last_id = handler.get_last_id();
-
-    let mut disruptor = Disruptor::new(
-        factory,
-        buffer_size,
-        ProducerType::Single,
-        Box::new(YieldingWaitStrategy::new()),
-    )
-    .unwrap()
-    .handle_events_with(handler)
-    .build();
-
-    disruptor.start().unwrap();
-
     group.throughput(Throughput::Elements(workload_size));
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                // Reset last_id for each iteration
-                last_id.store(0, Ordering::Release);
+                // Create fresh Disruptor instance for each iteration to avoid state conflicts
+                let factory = DefaultEventFactory::<ScalingEvent>::new();
+                let handler = ScalingHandler::new(1_000); // 1 microsecond processing delay
+                let _counter = handler.get_counter();
+                let last_id = handler.get_last_id();
+
+                let mut disruptor = Disruptor::new(
+                    factory,
+                    buffer_size,
+                    ProducerType::Single,
+                    Box::new(YieldingWaitStrategy::new()),
+                )
+                .unwrap()
+                .handle_events_with(handler)
+                .build();
+
+                disruptor.start().unwrap();
 
                 for i in 1..=workload_size {
                     disruptor
@@ -186,12 +180,12 @@ fn benchmark_medium_processing_scaling(
                 while last_id.load(Ordering::Acquire) < workload_size as i64 {
                     std::thread::yield_now();
                 }
+
+                disruptor.shutdown().unwrap();
             }
             start.elapsed()
         })
     });
-
-    disruptor.shutdown().unwrap();
 }
 
 /// Test scaling with slow processing (significant per-event work)
@@ -203,31 +197,28 @@ fn benchmark_slow_processing_scaling(
     let param = format!("slow_buf{}_work{}", buffer_size, workload_size);
     let benchmark_id = BenchmarkId::new("SlowProcessing", param);
 
-    // Create Disruptor instance outside of iterations to avoid thread creation overhead
-    let factory = DefaultEventFactory::<ScalingEvent>::new();
-    let handler = ScalingHandler::new(10_000); // 10 microseconds processing delay
-    let _counter = handler.get_counter();
-    let last_id = handler.get_last_id();
-
-    let mut disruptor = Disruptor::new(
-        factory,
-        buffer_size,
-        ProducerType::Single,
-        Box::new(YieldingWaitStrategy::new()),
-    )
-    .unwrap()
-    .handle_events_with(handler)
-    .build();
-
-    disruptor.start().unwrap();
-
     group.throughput(Throughput::Elements(workload_size));
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                // Reset last_id for each iteration
-                last_id.store(0, Ordering::Release);
+                // Create fresh Disruptor instance for each iteration to avoid state conflicts
+                let factory = DefaultEventFactory::<ScalingEvent>::new();
+                let handler = ScalingHandler::new(10_000); // 10 microseconds processing delay
+                let _counter = handler.get_counter();
+                let last_id = handler.get_last_id();
+
+                let mut disruptor = Disruptor::new(
+                    factory,
+                    buffer_size,
+                    ProducerType::Single,
+                    Box::new(YieldingWaitStrategy::new()),
+                )
+                .unwrap()
+                .handle_events_with(handler)
+                .build();
+
+                disruptor.start().unwrap();
 
                 for i in 1..=workload_size {
                     disruptor
@@ -244,37 +235,37 @@ fn benchmark_slow_processing_scaling(
                 while last_id.load(Ordering::Acquire) < workload_size as i64 {
                     std::thread::sleep(Duration::from_millis(1));
                 }
+
+                disruptor.shutdown().unwrap();
             }
             start.elapsed()
         })
     });
-
-    disruptor.shutdown().unwrap();
 }
 
 /// Test memory usage scaling with different buffer sizes
 fn benchmark_memory_scaling(group: &mut BenchmarkGroup<WallTime>, buffer_size: usize) {
     let benchmark_id = BenchmarkId::new("MemoryUsage", buffer_size);
 
-    // Create Disruptor instance outside of iterations to avoid thread creation overhead
-    let factory = DefaultEventFactory::<ScalingEvent>::new();
-    let handler = ScalingHandler::new(0);
-    let counter = handler.get_counter();
-
-    let mut disruptor = Disruptor::new(
-        factory,
-        buffer_size,
-        ProducerType::Single,
-        Box::new(BusySpinWaitStrategy::new()),
-    )
-    .unwrap()
-    .handle_events_with(handler)
-    .build();
-
-    disruptor.start().unwrap();
-
     group.bench_function(benchmark_id, |b| {
         b.iter(|| {
+            // Create fresh Disruptor instance for each iteration to avoid state conflicts
+            let factory = DefaultEventFactory::<ScalingEvent>::new();
+            let handler = ScalingHandler::new(0);
+            let counter = handler.get_counter();
+
+            let mut disruptor = Disruptor::new(
+                factory,
+                buffer_size,
+                ProducerType::Single,
+                Box::new(BusySpinWaitStrategy::new()),
+            )
+            .unwrap()
+            .handle_events_with(handler)
+            .build();
+
+            disruptor.start().unwrap();
+
             // Test memory allocation patterns by creating events with different payload sizes
             for payload_size in [1, 10, 100] {
                 let success = disruptor.try_publish_event(ClosureEventTranslator::new(
@@ -292,10 +283,10 @@ fn benchmark_memory_scaling(group: &mut BenchmarkGroup<WallTime>, buffer_size: u
                     }
                 }
             }
+
+            disruptor.shutdown().unwrap();
         })
     });
-
-    disruptor.shutdown().unwrap();
 }
 
 /// Test buffer utilization patterns
@@ -307,31 +298,28 @@ fn benchmark_buffer_utilization(
     let param = format!("util_buf{}_burst{}", buffer_size, burst_size);
     let benchmark_id = BenchmarkId::new("BufferUtil", param);
 
-    // Create Disruptor instance outside of iterations to avoid thread creation overhead
-    let factory = DefaultEventFactory::<ScalingEvent>::new();
-    let handler = ScalingHandler::new(5_000); // 5 microseconds delay to create backpressure
-    let _counter = handler.get_counter();
-    let last_id = handler.get_last_id();
-
-    let mut disruptor = Disruptor::new(
-        factory,
-        buffer_size,
-        ProducerType::Single,
-        Box::new(BusySpinWaitStrategy::new()),
-    )
-    .unwrap()
-    .handle_events_with(handler)
-    .build();
-
-    disruptor.start().unwrap();
-
     group.throughput(Throughput::Elements(burst_size));
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                // Reset last_id for each iteration
-                last_id.store(0, Ordering::Release);
+                // Create fresh Disruptor instance for each iteration to avoid state conflicts
+                let factory = DefaultEventFactory::<ScalingEvent>::new();
+                let handler = ScalingHandler::new(5_000); // 5 microseconds delay to create backpressure
+                let _counter = handler.get_counter();
+                let last_id = handler.get_last_id();
+
+                let mut disruptor = Disruptor::new(
+                    factory,
+                    buffer_size,
+                    ProducerType::Single,
+                    Box::new(BusySpinWaitStrategy::new()),
+                )
+                .unwrap()
+                .handle_events_with(handler)
+                .build();
+
+                disruptor.start().unwrap();
 
                 // Publish a burst of events
                 for i in 1..=burst_size {
@@ -356,12 +344,12 @@ fn benchmark_buffer_utilization(
                 while last_id.load(Ordering::Acquire) < burst_size as i64 {
                     std::hint::spin_loop();
                 }
+
+                disruptor.shutdown().unwrap();
             }
             start.elapsed()
         })
     });
-
-    disruptor.shutdown().unwrap();
 }
 
 /// Main buffer size scaling benchmark function
