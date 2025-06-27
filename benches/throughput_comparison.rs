@@ -91,7 +91,7 @@ fn benchmark_disruptor_throughput(
         ProducerType::Multi => "MP",
     };
 
-    let param = format!("{}_{}_buf{}", producer_str, wait_strategy, buffer_size);
+    let param = format!("{producer_str}_{wait_strategy}_buf{buffer_size}");
     let benchmark_id = BenchmarkId::new("Disruptor", param);
 
     group.throughput(Throughput::Elements(THROUGHPUT_EVENTS));
@@ -127,7 +127,7 @@ fn benchmark_disruptor_throughput(
 
 /// Benchmark std::sync::mpsc channel throughput
 fn benchmark_mpsc_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: usize) {
-    let param = format!("buf{}", buffer_size);
+    let param = format!("buf{buffer_size}");
     let benchmark_id = BenchmarkId::new("MPSC", param);
 
     group.throughput(Throughput::Elements(THROUGHPUT_EVENTS));
@@ -184,7 +184,7 @@ fn benchmark_mpsc_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: 
 
 /// Benchmark crossbeam channel throughput
 fn benchmark_crossbeam_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: usize) {
-    let param = format!("buf{}", buffer_size);
+    let param = format!("buf{buffer_size}");
     let benchmark_id = BenchmarkId::new("Crossbeam", param);
 
     group.throughput(Throughput::Elements(THROUGHPUT_EVENTS));
@@ -257,7 +257,7 @@ fn benchmark_try_publish_throughput(group: &mut BenchmarkGroup<WallTime>, buffer
 
     disruptor.start().unwrap();
 
-    let param = format!("try_publish_buf{}", buffer_size);
+    let param = format!("try_publish_buf{buffer_size}");
     let benchmark_id = BenchmarkId::new("Disruptor", param);
 
     group.throughput(Throughput::Elements(THROUGHPUT_EVENTS));

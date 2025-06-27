@@ -137,8 +137,7 @@ impl std::str::FromStr for ProducerType {
             "single" => Ok(ProducerType::Single),
             "multi" => Ok(ProducerType::Multi),
             _ => Err(format!(
-                "Invalid producer type: '{}'. Valid values are 'single' or 'multi'",
-                s
+                "Invalid producer type: '{s}'. Valid values are 'single' or 'multi'"
             )),
         }
     }

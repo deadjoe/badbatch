@@ -169,8 +169,7 @@ fn wait_for_pipeline_completion(counter: &Arc<AtomicI64>, expected: i64, timeout
     while counter.load(Ordering::Acquire) < expected {
         if start.elapsed() > timeout {
             eprintln!(
-                "WARNING: Pipeline stage timed out waiting for {} events, got {}",
-                expected,
+                "WARNING: Pipeline stage timed out waiting for {expected} events, got {}",
                 counter.load(Ordering::Acquire)
             );
             return false;
@@ -212,7 +211,7 @@ fn benchmark_two_stage_pipeline(
 
     disruptor.start().unwrap();
 
-    let benchmark_id = BenchmarkId::new(format!("TwoStage_{}", wait_strategy), burst_size);
+    let benchmark_id = BenchmarkId::new(format!("TwoStage_{wait_strategy}"), burst_size);
     group.throughput(Throughput::Elements(burst_size));
 
     group.bench_function(benchmark_id, |b| {
@@ -285,7 +284,7 @@ fn benchmark_three_stage_pipeline(
 
     disruptor.start().unwrap();
 
-    let benchmark_id = BenchmarkId::new(format!("ThreeStage_{}", wait_strategy), burst_size);
+    let benchmark_id = BenchmarkId::new(format!("ThreeStage_{wait_strategy}"), burst_size);
     group.throughput(Throughput::Elements(burst_size));
 
     group.bench_function(benchmark_id, |b| {
@@ -360,7 +359,7 @@ fn benchmark_four_stage_pipeline(
 
     disruptor.start().unwrap();
 
-    let benchmark_id = BenchmarkId::new(format!("FourStage_{}", wait_strategy), burst_size);
+    let benchmark_id = BenchmarkId::new(format!("FourStage_{wait_strategy}"), burst_size);
     group.throughput(Throughput::Elements(burst_size));
 
     group.bench_function(benchmark_id, |b| {

@@ -52,7 +52,7 @@ impl ThreadContext {
     pub(crate) fn get_name(&mut self) -> String {
         self.name.take().unwrap_or_else(|| {
             self.id += 1;
-            format!("processor-{}", self.id)
+            format!("processor-{id}", id = self.id)
         })
     }
 
@@ -194,10 +194,7 @@ fn validate_core_id(core_id: usize) {
         .collect();
 
     if !available_cores.contains(&core_id) {
-        panic!(
-            "CPU core {} is not available. Available cores: {:?}",
-            core_id, available_cores
-        );
+        panic!("CPU core {core_id} is not available. Available cores: {available_cores:?}");
     }
 }
 
@@ -211,13 +208,13 @@ fn set_affinity_if_defined(affinity: Option<CoreId>, thread_name: &str) {
         let success = core_affinity::set_for_current(core_id);
         if !success {
             eprintln!(
-                "Warning: Could not pin thread '{}' to CPU core {}",
-                thread_name, core_id.id
+                "Warning: Could not pin thread '{thread_name}' to CPU core {}",
+                core_id.id
             );
         } else {
             println!(
-                "Successfully pinned thread '{}' to CPU core {}",
-                thread_name, core_id.id
+                "Successfully pinned thread '{thread_name}' to CPU core {}",
+                core_id.id
             );
         }
     }
@@ -313,7 +310,7 @@ mod tests {
         let cores = get_available_cores();
         // Should have at least one core on any system
         assert!(!cores.is_empty());
-        println!("Available CPU cores: {:?}", cores);
+        println!("Available CPU cores: {cores:?}");
     }
 
     #[test]

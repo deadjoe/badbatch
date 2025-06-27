@@ -84,12 +84,12 @@ impl EventHandler<TestEvent> for CountingEventHandler {
     }
 
     fn on_start(&mut self) -> Result<()> {
-        println!("Handler '{}' started", self.name);
+        println!("Handler '{name}' started", name = self.name);
         Ok(())
     }
 
     fn on_shutdown(&mut self) -> Result<()> {
-        println!("Handler '{}' shutting down", self.name);
+        println!("Handler '{name}' shutting down", name = self.name);
         Ok(())
     }
 }
@@ -135,10 +135,7 @@ fn test_real_event_processing_single_consumer() {
     let processed_count = count_ref.load(Ordering::Acquire);
     let last_sequence = sequence_ref.load(Ordering::Acquire);
 
-    println!(
-        "Processed {} events, last sequence: {}",
-        processed_count, last_sequence
-    );
+    println!("Processed {processed_count} events, last sequence: {last_sequence}");
 
     // We should have processed some events (exact count depends on timing)
     assert!(processed_count > 0, "No events were processed");
@@ -192,10 +189,7 @@ fn test_real_event_processing_multiple_consumers() {
     let count1 = count1_ref.load(Ordering::Acquire);
     let count2 = count2_ref.load(Ordering::Acquire);
 
-    println!(
-        "Consumer1 processed: {}, Consumer2 processed: {}",
-        count1, count2
-    );
+    println!("Consumer1 processed: {count1}, Consumer2 processed: {count2}");
 
     assert!(count1 > 0, "First consumer didn't process events");
     assert!(count2 > 0, "Second consumer didn't process events");
@@ -240,10 +234,7 @@ fn test_exception_handling_continues_processing() {
 
     let processed_count = count_ref.load(Ordering::Acquire);
 
-    println!(
-        "Processed {} events (should be 7, since sequence 3 failed)",
-        processed_count
-    );
+    println!("Processed {processed_count} events (should be 7, since sequence 3 failed)");
 
     // Should have processed all events except the failing one
     // Note: The exact count depends on implementation details, but should be > 0
@@ -309,7 +300,7 @@ fn test_try_run_once_functionality() {
             println!("try_run_once found no events (this is also valid)");
         }
         Err(e) => {
-            panic!("try_run_once failed: {:?}", e);
+            panic!("try_run_once failed: {e:?}");
         }
     }
 }
@@ -338,7 +329,7 @@ fn test_sequence_barrier_dependency_resolution() {
             println!("Barrier correctly timed out waiting for unavailable sequence");
         }
         Err(e) => {
-            println!("Barrier failed with error: {:?}", e);
+            println!("Barrier failed with error: {e:?}");
         }
     }
 
@@ -349,20 +340,14 @@ fn test_sequence_barrier_dependency_resolution() {
 
     match barrier.wait_for_with_timeout(5, Duration::from_millis(10)) {
         Ok(available) => {
-            println!(
-                "Barrier correctly returned available sequence: {}",
-                available
-            );
+            println!("Barrier correctly returned available sequence: {available}");
             assert!(
                 available >= 5,
                 "Should return at least the requested sequence"
             );
         }
         Err(e) => {
-            println!(
-                "Unexpected error when sequence should be available: {:?}",
-                e
-            );
+            println!("Unexpected error when sequence should be available: {e:?}");
         }
     }
 }
@@ -408,10 +393,7 @@ fn test_complete_event_flow() {
     let final_count = count_ref.load(Ordering::Acquire);
     let final_sequence = sequence_ref.load(Ordering::Acquire);
 
-    println!(
-        "Final count: {}, final sequence: {}",
-        final_count, final_sequence
-    );
+    println!("Final count: {final_count}, final sequence: {final_sequence}");
 
     // Verify we processed events
     assert!(final_count > 0, "Should have processed some events");
