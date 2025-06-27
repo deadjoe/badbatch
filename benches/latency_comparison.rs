@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use badbatch::disruptor::{
     event_translator::ClosureEventTranslator, BusySpinWaitStrategy, DefaultEventFactory, Disruptor,
@@ -142,30 +142,27 @@ fn benchmark_disruptor_latency(group: &mut BenchmarkGroup<criterion::measurement
     let benchmark_id = BenchmarkId::new("Disruptor", "BusySpin");
 
     group.bench_function(benchmark_id, |b| {
-        b.iter_custom(|_iters| {
+        b.iter(|| {
             counter.store(0, Ordering::Release);
 
-            let start = Instant::now();
+            // Measure single event latency
+            let send_time = get_timestamp_nanos();
 
-            for i in 0..SAMPLE_COUNT {
-                let send_time = get_timestamp_nanos();
+            disruptor
+                .publish_event(ClosureEventTranslator::new(
+                    move |event: &mut LatencyEvent, _seq: i64| {
+                        event.id = black_box(1);
+                        event.send_time = send_time;
+                    },
+                ))
+                .unwrap();
 
-                disruptor
-                    .publish_event(ClosureEventTranslator::new(
-                        move |event: &mut LatencyEvent, _seq: i64| {
-                            event.id = black_box(i as i64);
-                            event.send_time = send_time;
-                        },
-                    ))
-                    .unwrap();
-            }
-
-            // Wait for all events to be processed
-            while counter.load(Ordering::Acquire) < SAMPLE_COUNT as i64 {
+            // Wait for the single event to be processed
+            while counter.load(Ordering::Acquire) < 1 {
                 std::hint::spin_loop();
             }
 
-            start.elapsed()
+            black_box(())
         })
     });
 
@@ -193,56 +190,32 @@ fn benchmark_mpsc_latency(group: &mut BenchmarkGroup<criterion::measurement::Wal
     let benchmark_id = BenchmarkId::new("MPSC", "Channel");
 
     group.bench_function(benchmark_id, |b| {
-        b.iter_custom(|_iters| {
-            // Create fresh channel and thread for each measurement
+        b.iter(|| {
+            // Create fresh channel and thread for single measurement
             let (sender, receiver) = mpsc::channel();
-            let latencies: Arc<Vec<AtomicI64>> =
-                Arc::new((0..SAMPLE_COUNT).map(|_| AtomicI64::new(0)).collect());
             let counter = Arc::new(AtomicI64::new(0));
 
-            let latencies_clone = latencies.clone();
             let counter_clone = counter.clone();
-
             let receiver_handle = thread::spawn(move || {
-                let mut processed = 0;
-                while processed < SAMPLE_COUNT {
-                    if let Ok((_id, send_time)) = receiver.recv() {
-                        let process_time = get_timestamp_nanos();
-                        let latency = process_time - send_time;
-
-                        if processed < latencies_clone.len() {
-                            latencies_clone[processed].store(latency as i64, Ordering::Release);
-                        }
-
-                        processed += 1;
-                        counter_clone.store(processed as i64, Ordering::Release);
-                    } else {
-                        // Channel closed, exit
-                        break;
-                    }
+                if let Ok((_id, _send_time)) = receiver.recv() {
+                    counter_clone.store(1, Ordering::Release);
                 }
             });
 
-            let start = Instant::now();
-
-            for i in 0..SAMPLE_COUNT {
-                let send_time = get_timestamp_nanos();
-                if sender.send((black_box(i), send_time)).is_err() {
-                    // Channel closed, stop sending
-                    break;
+            // Measure single event latency
+            let _send_time = get_timestamp_nanos();
+            if sender.send((black_box(1), _send_time)).is_ok() {
+                // Wait for the single event to be processed
+                while counter.load(Ordering::Acquire) < 1 {
+                    std::hint::spin_loop();
                 }
-            }
-
-            // Wait for all events to be processed
-            while counter.load(Ordering::Acquire) < SAMPLE_COUNT as i64 {
-                std::hint::spin_loop();
             }
 
             // Close sender to signal receiver to stop
             drop(sender);
             receiver_handle.join().unwrap();
 
-            start.elapsed()
+            black_box(())
         })
     });
 
@@ -256,55 +229,32 @@ fn benchmark_crossbeam_latency(group: &mut BenchmarkGroup<criterion::measurement
     let benchmark_id = BenchmarkId::new("Crossbeam", "Channel");
 
     group.bench_function(benchmark_id, |b| {
-        b.iter_custom(|_iters| {
-            // Create fresh channel and thread for each measurement
+        b.iter(|| {
+            // Create fresh channel and thread for single measurement
             let (sender, receiver) = crossbeam::channel::bounded(BUFFER_SIZE);
-            let latencies: Arc<Vec<AtomicI64>> =
-                Arc::new((0..SAMPLE_COUNT).map(|_| AtomicI64::new(0)).collect());
             let counter = Arc::new(AtomicI64::new(0));
 
-            let latencies_clone = latencies.clone();
             let counter_clone = counter.clone();
-
             let receiver_handle = thread::spawn(move || {
-                let mut processed = 0;
-                while processed < SAMPLE_COUNT {
-                    if let Ok((_id, send_time)) = receiver.recv() {
-                        let process_time = get_timestamp_nanos();
-                        let latency = process_time - send_time;
-
-                        if processed < latencies_clone.len() {
-                            latencies_clone[processed].store(latency as i64, Ordering::Release);
-                        }
-
-                        processed += 1;
-                        counter_clone.store(processed as i64, Ordering::Release);
-                    } else {
-                        // Channel closed, exit
-                        break;
-                    }
+                if let Ok((_id, _send_time)) = receiver.recv() {
+                    counter_clone.store(1, Ordering::Release);
                 }
             });
 
-            let start = Instant::now();
-
-            for i in 0..SAMPLE_COUNT {
-                let send_time = get_timestamp_nanos();
-                if sender.send((black_box(i), send_time)).is_err() {
-                    break;
+            // Measure single event latency
+            let _send_time = get_timestamp_nanos();
+            if sender.send((black_box(1), _send_time)).is_ok() {
+                // Wait for the single event to be processed
+                while counter.load(Ordering::Acquire) < 1 {
+                    std::hint::spin_loop();
                 }
-            }
-
-            // Wait for all events to be processed
-            while counter.load(Ordering::Acquire) < SAMPLE_COUNT as i64 {
-                std::hint::spin_loop();
             }
 
             // Close sender to signal receiver to stop
             drop(sender);
             receiver_handle.join().unwrap();
 
-            start.elapsed()
+            black_box(())
         })
     });
 
