@@ -267,7 +267,7 @@ mod tests {
     fn test_closure_event_translator() {
         let translator = ClosureEventTranslator::new(|event: &mut TestEvent, sequence| {
             event.value = sequence;
-            event.name = format!("event_{}", sequence);
+            event.name = format!("event_{sequence}");
         });
 
         let mut event = TestEvent::default();

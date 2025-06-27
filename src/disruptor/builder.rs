@@ -68,8 +68,8 @@ where
             if let Some(handle) = consumer.join_handle.take() {
                 if let Err(e) = handle.join() {
                     eprintln!(
-                        "Error joining consumer thread '{}': {:?}",
-                        consumer.thread_name, e
+                        "Error joining consumer thread '{thread_name}': {e:?}",
+                        thread_name = consumer.thread_name
                     );
                 }
             }
@@ -209,8 +209,7 @@ fn set_thread_affinity(core_id: usize) -> Result<(), String> {
     // Check if the requested core ID is valid
     if core_id >= core_ids.len() {
         return Err(format!(
-            "Invalid core ID: {}. Available cores: 0-{}",
-            core_id,
+            "Invalid core ID: {core_id}. Available cores: 0-{}",
             core_ids.len() - 1
         ));
     }
@@ -220,7 +219,7 @@ fn set_thread_affinity(core_id: usize) -> Result<(), String> {
     if core_affinity::set_for_current(target_core) {
         Ok(())
     } else {
-        Err(format!("Failed to set CPU affinity to core {}", core_id))
+        Err(format!("Failed to set CPU affinity to core {core_id}"))
     }
 }
 
@@ -393,8 +392,7 @@ where
             if let Some(core_id) = cpu_affinity {
                 if let Err(e) = set_thread_affinity(core_id) {
                     eprintln!(
-                        "Warning: Failed to set CPU affinity for thread '{}' to core {}: {}",
-                        thread_name, core_id, e
+                        "Warning: Failed to set CPU affinity for thread '{thread_name}' to core {core_id}: {e}"
                     );
                 }
             }
@@ -430,8 +428,7 @@ where
                                 // Log the error but continue processing
                                 // This follows LMAX Disruptor's approach of not stopping on individual event errors
                                 eprintln!(
-                                    "Event processing error in thread '{}' at sequence {}: {:?}",
-                                    thread_name, next_sequence, e
+                                    "Event processing error in thread '{thread_name}' at sequence {next_sequence}: {e:?}"
                                 );
 
                                 // You could also use an exception handler here if available:
@@ -1283,7 +1280,7 @@ mod tests {
         };
 
         let handler2 = move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
-            event.data = format!("seq_{}", sequence);
+            event.data = format!("seq_{sequence}");
             let _ = tx2.send(sequence);
         };
 
@@ -1306,7 +1303,7 @@ mod tests {
         };
 
         let handler2 = move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
-            event.data = format!("seq_{}", sequence);
+            event.data = format!("seq_{sequence}");
             let _ = tx2.send(sequence);
         };
 
@@ -1562,7 +1559,7 @@ mod tests {
         disruptor_handle.batch_publish(3, |batch| {
             for (i, event) in batch.enumerate() {
                 event.value = i as i64;
-                event.data = format!("batch_{}", i);
+                event.data = format!("batch_{i}");
             }
         });
 
@@ -1590,7 +1587,7 @@ mod tests {
         for i in 0..3 {
             disruptor_handle.publish(|event| {
                 event.value = i;
-                event.data = format!("event_{}", i);
+                event.data = format!("event_{i}");
             });
         }
 
@@ -1682,7 +1679,7 @@ mod tests {
             "Single producer builder: {} consumers",
             builder.shared.consumers.len()
         );
-        println!("Multi producer builder: {} consumers", multi_consumer_count);
+        println!("Multi producer builder: {multi_consumer_count} consumers");
     }
 
     /// Comparison test showing the differences between BadBatch and disruptor-rs APIs
@@ -1753,11 +1750,10 @@ mod tests {
         // Shutdown should complete within a reasonable time (much less than before)
         assert!(
             elapsed < Duration::from_secs(2),
-            "Shutdown took too long: {:?}",
-            elapsed
+            "Shutdown took too long: {elapsed:?}"
         );
 
-        println!("Shutdown completed successfully in {:?}", elapsed);
+        println!("Shutdown completed successfully in {elapsed:?}");
     }
 
     #[test]
@@ -1782,11 +1778,10 @@ mod tests {
 
         assert!(
             elapsed < Duration::from_secs(2),
-            "YieldingWaitStrategy shutdown took too long: {:?}",
-            elapsed
+            "YieldingWaitStrategy shutdown took too long: {elapsed:?}"
         );
 
-        println!("YieldingWaitStrategy shutdown completed in {:?}", elapsed);
+        println!("YieldingWaitStrategy shutdown completed in {elapsed:?}");
     }
 
     #[test]
@@ -2087,7 +2082,7 @@ mod tests {
                 event.value = i;
                 event.data = String::new();
             });
-            println!("Published event {}", i);
+            println!("Published event {i}");
         }
 
         // Give time for processing
@@ -2101,18 +2096,14 @@ mod tests {
         // Verify shutdown was fast
         assert!(
             shutdown_duration < Duration::from_secs(3),
-            "Shutdown took too long: {:?}",
-            shutdown_duration
+            "Shutdown took too long: {shutdown_duration:?}"
         );
 
         // Verify both stages processed all events
         let stage1_processed = stage1_count.load(Ordering::SeqCst);
         let stage2_processed = stage2_count.load(Ordering::SeqCst);
 
-        println!(
-            "Stage 1 processed: {}, Stage 2 processed: {}",
-            stage1_processed, stage2_processed
-        );
+        println!("Stage 1 processed: {stage1_processed}, Stage 2 processed: {stage2_processed}");
 
         assert_eq!(stage1_processed, 1, "Stage 1 should process 1 event");
         assert_eq!(stage2_processed, 1, "Stage 2 should process 1 event");
@@ -2137,7 +2128,7 @@ mod tests {
         let mut disruptor_handle = build_single_producer(4, test_event_factory, BusySpinWaitStrategy)
             .thread_name("debug-stage1")
             .handle_events_with(move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
-                println!("🔵 Stage 1 START: sequence={}, initial_value={}", sequence, event.value);
+                println!("🔵 Stage 1 START: sequence={sequence}, initial_value={}", event.value);
 
                 // Modify the event
                 let original_value = event.value;
@@ -2147,23 +2138,23 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(5));
 
                 stage1_count_clone.fetch_add(1, Ordering::SeqCst);
-                println!("🔵 Stage 1 END: sequence={}, final_value={} (was {})", sequence, event.value, original_value);
+                println!("🔵 Stage 1 END: sequence={sequence}, final_value={} (was {original_value})", event.value);
             })
             .and_then()
             .thread_name("debug-stage2")
             .handle_events_with(move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
-                println!("🟢 Stage 2 START: sequence={}, value={}", sequence, event.value);
+                println!("🟢 Stage 2 START: sequence={sequence}, value={}", event.value);
 
                 // Check if we see the modification from Stage 1
                 if event.value < 1000 {
-                    println!("❌ Stage 2 ERROR: sequence={}, saw original value {} instead of modified value", sequence, event.value);
+                    println!("❌ Stage 2 ERROR: sequence={sequence}, saw original value {} instead of modified value", event.value);
                     panic!("Stage 2 saw unmodified value: {}", event.value);
                 } else {
-                    println!("✅ Stage 2 SUCCESS: sequence={}, saw modified value {}", sequence, event.value);
+                    println!("✅ Stage 2 SUCCESS: sequence={sequence}, saw modified value {}", event.value);
                 }
 
                 stage2_count_clone.fetch_add(1, Ordering::SeqCst);
-                println!("🟢 Stage 2 END: sequence={}", sequence);
+                println!("🟢 Stage 2 END: sequence={sequence}");
             })
             .build();
 
@@ -2188,10 +2179,7 @@ mod tests {
         let stage1_processed = stage1_count.load(Ordering::SeqCst);
         let stage2_processed = stage2_count.load(Ordering::SeqCst);
 
-        println!(
-            "📊 Final counts: Stage 1={}, Stage 2={}",
-            stage1_processed, stage2_processed
-        );
+        println!("📊 Final counts: Stage 1={stage1_processed}, Stage 2={stage2_processed}");
 
         assert_eq!(stage1_processed, 1, "Stage 1 should process 1 event");
         assert_eq!(stage2_processed, 1, "Stage 2 should process 1 event");
@@ -2231,7 +2219,7 @@ mod tests {
                         );
                         event.data = "|validated".to_string();
                         validation_count.fetch_add(1, Ordering::SeqCst);
-                        println!("🔵 Validation DONE: sequence={}", sequence);
+                        println!("🔵 Validation DONE: sequence={sequence}");
                     },
                 )
                 .and_then()
@@ -2251,7 +2239,7 @@ mod tests {
                         event.data.push_str("|transformed");
                         event.value *= 2;
                         transformation_count.fetch_add(1, Ordering::SeqCst);
-                        println!("🟡 Transformation DONE: sequence={}", sequence);
+                        println!("🟡 Transformation DONE: sequence={sequence}");
                     },
                 )
                 .and_then()
@@ -2268,7 +2256,7 @@ mod tests {
                         event.data.push_str("|enriched");
                         event.value += 1000;
                         enrichment_count.fetch_add(1, Ordering::SeqCst);
-                        println!("🟠 Enrichment DONE: sequence={}", sequence);
+                        println!("🟠 Enrichment DONE: sequence={sequence}");
                     },
                 )
                 .and_then()
@@ -2280,7 +2268,7 @@ mod tests {
                             panic!("Final stage should see enriched data, got: {}", event.data);
                         }
                         final_count.fetch_add(1, Ordering::SeqCst);
-                        println!("🟢 Final DONE: sequence={}", sequence);
+                        println!("🟢 Final DONE: sequence={sequence}");
                     },
                 )
                 .build();
@@ -2290,14 +2278,14 @@ mod tests {
 
         // Publish a few events with delays
         let num_events = 3;
-        println!("📤 Publishing {} events...", num_events);
+        println!("📤 Publishing {num_events} events...");
 
         for i in 0..num_events {
             disruptor_handle.publish(|event| {
                 event.value = i;
                 event.data = String::new();
             });
-            println!("📤 Published event {}", i);
+            println!("📤 Published event {i}");
 
             // Small delay between publications
             std::thread::sleep(Duration::from_millis(10));
@@ -2313,11 +2301,10 @@ mod tests {
         // Verify all stages processed all events
         for (stage_idx, count) in stage_counts.iter().enumerate() {
             let processed = count.load(Ordering::SeqCst);
-            println!("📊 Stage {} processed: {}", stage_idx, processed);
+            println!("📊 Stage {stage_idx} processed: {processed}");
             assert_eq!(
                 processed, num_events as usize,
-                "Stage {} should process all {} events",
-                stage_idx, num_events
+                "Stage {stage_idx} should process all {num_events} events"
             );
         }
 
@@ -2349,7 +2336,7 @@ mod tests {
                         println!("🔵 Stage1: seq={}, value={}", sequence, event.value);
                         event.data = "|stage1".to_string();
                         stage1_count_clone.fetch_add(1, Ordering::SeqCst);
-                        println!("🔵 Stage1 DONE: seq={}", sequence);
+                        println!("🔵 Stage1 DONE: seq={sequence}");
                     },
                 )
                 .and_then()
@@ -2363,7 +2350,7 @@ mod tests {
                         }
                         event.data.push_str("|stage2");
                         stage2_count_clone.fetch_add(1, Ordering::SeqCst);
-                        println!("🟡 Stage2 DONE: seq={}", sequence);
+                        println!("🟡 Stage2 DONE: seq={sequence}");
                     },
                 )
                 .and_then()
@@ -2380,7 +2367,7 @@ mod tests {
                         }
                         event.data.push_str("|stage3");
                         stage3_count_clone.fetch_add(1, Ordering::SeqCst);
-                        println!("🟢 Stage3 DONE: seq={}", sequence);
+                        println!("🟢 Stage3 DONE: seq={sequence}");
                     },
                 )
                 .build();
@@ -2390,14 +2377,14 @@ mod tests {
 
         // Publish events one by one with delays
         let num_events = 5;
-        println!("📤 Publishing {} events...", num_events);
+        println!("📤 Publishing {num_events} events...");
 
         for i in 0..num_events {
             disruptor_handle.publish(|event| {
                 event.value = i;
                 event.data = String::new();
             });
-            println!("📤 Published event {}", i);
+            println!("📤 Published event {i}");
 
             // Small delay between publications to reduce contention
             std::thread::sleep(Duration::from_millis(20));
@@ -2416,24 +2403,20 @@ mod tests {
         let stage3_processed = stage3_count.load(Ordering::SeqCst);
 
         println!(
-            "📊 Final counts: Stage1={}, Stage2={}, Stage3={}",
-            stage1_processed, stage2_processed, stage3_processed
+            "📊 Final counts: Stage1={stage1_processed}, Stage2={stage2_processed}, Stage3={stage3_processed}"
         );
 
         assert_eq!(
             stage1_processed, num_events as usize,
-            "Stage1 should process all {} events",
-            num_events
+            "Stage1 should process all {num_events} events"
         );
         assert_eq!(
             stage2_processed, num_events as usize,
-            "Stage2 should process all {} events",
-            num_events
+            "Stage2 should process all {num_events} events"
         );
         assert_eq!(
             stage3_processed, num_events as usize,
-            "Stage3 should process all {} events",
-            num_events
+            "Stage3 should process all {num_events} events"
         );
 
         println!("✅ Dependency chain validation test completed successfully!");
@@ -2496,7 +2479,7 @@ mod tests {
                         }
 
                         stage2_count_clone.fetch_add(1, Ordering::SeqCst);
-                        println!("🟢 Stage 2 DONE: sequence={}", sequence);
+                        println!("🟢 Stage 2 DONE: sequence={sequence}");
                     },
                 )
                 .build();
@@ -2506,14 +2489,14 @@ mod tests {
 
         // Publish multiple events with delays between them
         let num_events = 3;
-        println!("📤 Publishing {} events with delays...", num_events);
+        println!("📤 Publishing {num_events} events with delays...");
 
         for i in 0..num_events {
             disruptor_handle.publish(|event| {
                 event.value = i;
-                event.data = format!("event_{}", i);
+                event.data = format!("event_{i}");
             });
-            println!("📤 Published event {}", i);
+            println!("📤 Published event {i}");
 
             // Small delay between publications to reduce race conditions
             std::thread::sleep(Duration::from_millis(5));
@@ -2530,27 +2513,19 @@ mod tests {
         let stage1_processed = stage1_count.load(Ordering::SeqCst);
         let stage2_processed = stage2_count.load(Ordering::SeqCst);
 
-        println!(
-            "📊 Final counts: Stage 1={}, Stage 2={}",
-            stage1_processed, stage2_processed
-        );
+        println!("📊 Final counts: Stage 1={stage1_processed}, Stage 2={stage2_processed}");
 
         assert_eq!(
             stage1_processed, num_events as usize,
-            "Stage 1 should process all {} events",
-            num_events
+            "Stage 1 should process all {num_events} events"
         );
         assert_eq!(
             stage2_processed, num_events as usize,
-            "Stage 2 should process all {} events",
-            num_events
+            "Stage 2 should process all {num_events} events"
         );
 
         println!("✅ Robust dependency chain test completed successfully!");
-        println!(
-            "   All {} events processed correctly through dependency chain",
-            num_events
-        );
+        println!("   All {num_events} events processed correctly through dependency chain");
     }
 
     #[test]
@@ -2579,7 +2554,7 @@ mod tests {
             shutdown_duration < Duration::from_secs(2),
             "Shutdown should be fast"
         );
-        println!("✅ Shutdown test passed: {:?}", shutdown_duration);
+        println!("✅ Shutdown test passed: {shutdown_duration:?}");
 
         // 2. Test stateful handlers
         struct CountingHandler {
@@ -2669,19 +2644,13 @@ mod tests {
         assert!(stage1_processed > 0, "Stage 1 should process events");
         assert!(stage2_processed > 0, "Stage 2 should process events");
         println!(
-            "✅ and_then() structure test passed: stage1={}, stage2={}",
-            stage1_processed, stage2_processed
+            "✅ and_then() structure test passed: stage1={stage1_processed}, stage2={stage2_processed}"
         );
 
         println!("🎉 All comprehensive validation tests passed!");
-        println!(
-            "   ✅ Shutdown fix: Fast shutdown in {:?}",
-            shutdown_duration
-        );
-        println!(
-            "   ✅ Stateful handlers: Processed {} events",
-            total_processed.load(Ordering::SeqCst)
-        );
+        println!("   ✅ Shutdown fix: Fast shutdown in {shutdown_duration:?}");
+        let processed_count = total_processed.load(Ordering::SeqCst);
+        println!("   ✅ Stateful handlers: Processed {processed_count} events");
         println!("   ✅ and_then() structure: 2-stage pipeline created");
     }
 
@@ -2715,7 +2684,7 @@ mod tests {
         for i in 0..5 {
             builder_disruptor.publish(|event| {
                 event.value = i;
-                event.data = format!("event_{}", i);
+                event.data = format!("event_{i}");
             });
         }
 
@@ -2835,7 +2804,7 @@ mod tests {
         for i in 0..100 {
             disruptor.publish(|event| {
                 event.value = i;
-                event.data = format!("batch_event_{}", i);
+                event.data = format!("batch_event_{i}");
             });
         }
 
@@ -2852,10 +2821,7 @@ mod tests {
         assert_eq!(stage2_processed.load(Ordering::SeqCst), 101);
         assert_eq!(stage3_processed.load(Ordering::SeqCst), 101);
 
-        println!(
-            "   ✅ 100 events processed through all 3 stages in {:?}",
-            batch_duration
-        );
+        println!("   ✅ 100 events processed through all 3 stages in {batch_duration:?}");
         println!(
             "   📊 Throughput: {:.2} events/ms",
             100.0 / batch_duration.as_millis() as f64
@@ -2868,7 +2834,7 @@ mod tests {
         for i in 0..1000 {
             disruptor.publish(|event| {
                 event.value = i + 1000;
-                event.data = format!("hf_event_{}", i);
+                event.data = format!("hf_event_{i}");
             });
         }
 
@@ -2885,10 +2851,7 @@ mod tests {
         assert_eq!(stage2_processed.load(Ordering::SeqCst), 1101);
         assert_eq!(stage3_processed.load(Ordering::SeqCst), 1101);
 
-        println!(
-            "   ✅ 1000 events processed through all 3 stages in {:?}",
-            hf_duration
-        );
+        println!("   ✅ 1000 events processed through all 3 stages in {hf_duration:?}");
         println!(
             "   📊 Throughput: {:.2} events/ms",
             1000.0 / hf_duration.as_millis() as f64
@@ -2902,10 +2865,7 @@ mod tests {
 
         let shutdown_duration = shutdown_start.elapsed();
 
-        println!(
-            "   ✅ Graceful shutdown completed in {:?}",
-            shutdown_duration
-        );
+        println!("   ✅ Graceful shutdown completed in {shutdown_duration:?}");
         assert!(
             shutdown_duration < Duration::from_millis(500),
             "Shutdown should be fast"
@@ -2917,10 +2877,8 @@ mod tests {
         println!("   ✅ Batch processing (100 events): ✅");
         println!("   ✅ High-frequency processing (1000 events): ✅");
         println!("   ✅ Graceful shutdown: ✅");
-        println!(
-            "   📊 Total events processed: {}",
-            stage3_processed.load(Ordering::SeqCst)
-        );
+        let total_processed = stage3_processed.load(Ordering::SeqCst);
+        println!("   📊 Total events processed: {total_processed}");
     }
 
     #[test]
@@ -2937,7 +2895,7 @@ mod tests {
         }
 
         let available_cores = core_ids.unwrap().len();
-        println!("Available CPU cores: {}", available_cores);
+        println!("Available CPU cores: {available_cores}");
 
         // Test CPU affinity setting
         let processed_count = Arc::new(AtomicUsize::new(0));
@@ -2978,8 +2936,7 @@ mod tests {
         assert_eq!(processed_count.load(Ordering::SeqCst), 5);
 
         println!(
-            "✅ CPU affinity test passed: Consumer pinned to core {} processed 5 events",
-            target_core
+            "✅ CPU affinity test passed: Consumer pinned to core {target_core} processed 5 events"
         );
     }
 
@@ -2997,7 +2954,7 @@ mod tests {
         }
 
         let available_cores = core_ids.unwrap().len();
-        println!("Testing with {} available CPU cores", available_cores);
+        println!("Testing with {available_cores} available CPU cores");
 
         let consumer1_count = Arc::new(AtomicUsize::new(0));
         let consumer2_count = Arc::new(AtomicUsize::new(0));
@@ -3057,14 +3014,8 @@ mod tests {
         );
 
         println!("✅ Multi-core CPU affinity test passed:");
-        println!(
-            "   Consumer on core 0 processed: {} events",
-            consumer1_processed
-        );
-        println!(
-            "   Consumer on core 1 processed: {} events",
-            consumer2_processed
-        );
+        println!("   Consumer on core 0 processed: {consumer1_processed} events");
+        println!("   Consumer on core 1 processed: {consumer2_processed} events");
         println!(
             "   Both consumers processed all events in parallel (correct LMAX Disruptor behavior)"
         );
@@ -3258,8 +3209,7 @@ mod tests {
         let shutdown_duration = shutdown_start.elapsed();
         assert!(
             shutdown_duration < Duration::from_secs(3),
-            "Shutdown took too long: {:?}",
-            shutdown_duration
+            "Shutdown took too long: {shutdown_duration:?}"
         );
 
         // Verify all stages processed all events
@@ -3285,7 +3235,7 @@ mod tests {
         );
 
         println!("✅ Comprehensive test completed successfully!");
-        println!("   - Shutdown fix: ✅ Completed in {:?}", shutdown_duration);
+        println!("   - Shutdown fix: ✅ Completed in {shutdown_duration:?}");
         println!("   - Dependency chain: ✅ 4-stage pipeline worked correctly");
         println!("   - Stateful handlers: ✅ All stages maintained state");
         println!("   - Mixed handler types: ✅ Stateful + closure handlers worked together");

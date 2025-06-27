@@ -176,11 +176,11 @@ fn benchmark_disruptor_latency(group: &mut BenchmarkGroup<criterion::measurement
     let (mean, median, p95, p99, max) = calculate_latency_stats(&collected_latencies);
 
     println!("\nDisruptor Latency Statistics (nanoseconds):");
-    println!("  Mean: {:.2}", mean);
-    println!("  Median: {:.2}", median);
-    println!("  95th percentile: {:.2}", p95);
-    println!("  99th percentile: {:.2}", p99);
-    println!("  Max: {:.2}", max);
+    println!("  Mean: {mean:.2}");
+    println!("  Median: {median:.2}");
+    println!("  95th percentile: {p95:.2}");
+    println!("  99th percentile: {p99:.2}");
+    println!("  Max: {max:.2}");
 
     disruptor.shutdown().unwrap();
 }
