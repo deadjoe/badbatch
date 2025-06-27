@@ -9,26 +9,54 @@ extract_performance_data() {
     local benchmark_name="$2"
     
     if [ ! -f "$log_file" ]; then
-        echo "❌ No log file found"
+        echo "❌ No log file found for $benchmark_name"
         return 1
     fi
     
-    # Extract key metrics
-    local throughput=$(grep -E "thrpt:" "$log_file" | head -1 | sed -E 's/.*\[([0-9.]+) [A-Za-z]+elem\/s.*/\1/' | head -1)
-    local latency=$(grep -E "time:" "$log_file" | head -1 | sed -E 's/.*\[([0-9.]+) [a-z]+s.*/\1/' | head -1)
-    local samples=$(grep -E "samples in estimated" "$log_file" | head -1 | sed -E 's/.*Collecting ([0-9]+) samples.*/\1/')
-    local iterations=$(grep -E "samples in estimated" "$log_file" | head -1 | sed -E 's/.*\(([0-9.]+[KMG]?) iterations\).*/\1/')
+    # Extract key metrics with better regex patterns
+    local throughput=$(grep -E "thrpt:" "$log_file" | head -1 | sed -E 's/.*\[([0-9.]+) [A-Za-z]*elem\/s.*/\1/')
+    local latency_line=$(grep -E "time:" "$log_file" | head -1)
+    local latency=""
+    local latency_unit=""
     
-    # Format and display results
-    printf "│ %-25s │ %-12s │ %-10s │ %-8s │ %-12s │\n" \
-        "$benchmark_name" \
-        "${throughput:-N/A} Melem/s" \
-        "${latency:-N/A}" \
-        "${samples:-N/A}" \
-        "${iterations:-N/A}"
+    # Extract latency value and unit more precisely
+    if echo "$latency_line" | grep -q "ns"; then
+        latency=$(echo "$latency_line" | sed -E 's/.*\[([0-9.]+) ns.*/\1/')
+        latency_unit="ns"
+    elif echo "$latency_line" | grep -q "µs"; then
+        latency=$(echo "$latency_line" | sed -E 's/.*\[([0-9.]+) µs.*/\1/')
+        latency_unit="µs"
+    elif echo "$latency_line" | grep -q "ms"; then
+        latency=$(echo "$latency_line" | sed -E 's/.*\[([0-9.]+) ms.*/\1/')
+        latency_unit="ms"
+    elif echo "$latency_line" | grep -q "ps"; then
+        # Handle picosecond case (typically 0.0000 ps)
+        latency="~0"
+        latency_unit="ns"
+    fi
+    
+    local samples=$(grep -E "Collecting [0-9]+ samples" "$log_file" | head -1 | sed -E 's/.*Collecting ([0-9]+) samples.*/\1/')
+    local iterations_line=$(grep -E "samples in estimated.*iterations" "$log_file" | head -1)
+    local iterations=$(echo "$iterations_line" | sed -E 's/.*\(([0-9.]+[KMGT]?) iterations\).*/\1/')
+    
+    # Clean up benchmark name for display
+    local display_name=""
+    case "$benchmark_name" in
+        "comprehensive_benchmarks") display_name="Quick Test Suite" ;;
+        "single_producer_single_consumer") display_name="SPSC" ;;
+        "multi_producer_single_consumer") display_name="MPSC" ;;
+        "pipeline_processing") display_name="Pipeline" ;;
+        "latency_comparison") display_name="Latency" ;;
+        "throughput_comparison") display_name="Throughput" ;;
+        "buffer_size_scaling") display_name="Buffer Scaling" ;;
+        *) display_name="$benchmark_name" ;;
+    esac
+    
+    # Return structured data
+    echo "$display_name|${throughput:-N/A}|${latency:-N/A}|${latency_unit:-}|${samples:-N/A}|${iterations:-N/A}"
 }
 
-# Function to display benchmark results table
+# Function to display benchmark results in clean list format
 display_results_table() {
     local log_dir="$1"
     shift
@@ -37,16 +65,42 @@ display_results_table() {
     echo ""
     echo "📊 Benchmark Results Summary"
     echo "═══════════════════════════════════════════════════════════════════════════════"
-    printf "│ %-25s │ %-12s │ %-10s │ %-8s │ %-12s │\n" \
-        "Benchmark" "Throughput" "Latency" "Samples" "Iterations"
-    echo "├─────────────────────────────┼──────────────┼────────────┼──────────┼──────────────┤"
     
+    local results_found=false
     for benchmark in "${benchmark_names[@]}"; do
         local log_file="$log_dir/${benchmark}.log"
-        extract_performance_data "$log_file" "$benchmark"
+        if [ -f "$log_file" ]; then
+            results_found=true
+            local result_data=$(extract_performance_data "$log_file" "$benchmark")
+            if [ $? -eq 0 ]; then
+                # Parse the structured data
+                local display_name=$(echo "$result_data" | cut -d'|' -f1)
+                local throughput=$(echo "$result_data" | cut -d'|' -f2)
+                local latency=$(echo "$result_data" | cut -d'|' -f3)
+                local latency_unit=$(echo "$result_data" | cut -d'|' -f4)
+                local samples=$(echo "$result_data" | cut -d'|' -f5)
+                local iterations=$(echo "$result_data" | cut -d'|' -f6)
+                
+                echo ""
+                echo "🎯 $display_name"
+                echo "   📈 Throughput: ${throughput} Melem/s"
+                if [ "$latency" != "N/A" ] && [ -n "$latency_unit" ]; then
+                    echo "   ⏱️  Latency: ${latency} ${latency_unit}"
+                fi
+                echo "   🔬 Samples: ${samples}"
+                echo "   🔄 Iterations: ${iterations}"
+            fi
+        fi
     done
     
-    echo "└─────────────────────────────┴──────────────┴────────────┴──────────┴──────────────┘"
+    if [ "$results_found" = false ]; then
+        echo ""
+        echo "❌ No benchmark results found in $log_dir/"
+        echo "   Make sure benchmarks have been run successfully."
+    fi
+    
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════════════════"
 }
 
 # Function to display detailed results for single benchmark
