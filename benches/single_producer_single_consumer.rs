@@ -66,8 +66,7 @@ fn wait_for_completion(counter: &Arc<AtomicI64>, expected: i64, timeout_ms: u64)
     while counter.load(Ordering::Acquire) < expected {
         if start.elapsed() > timeout {
             eprintln!(
-                "WARNING: Benchmark timed out waiting for {} events, got {}",
-                expected,
+                "WARNING: Benchmark timed out waiting for {expected} events, got {}",
                 counter.load(Ordering::Acquire)
             );
             return false;
@@ -85,8 +84,7 @@ fn wait_for_completion_yielding(counter: &Arc<AtomicI64>, expected: i64, timeout
     while counter.load(Ordering::Acquire) < expected {
         if start.elapsed() > timeout {
             eprintln!(
-                "WARNING: Benchmark timed out waiting for {} events, got {}",
-                expected,
+                "WARNING: Benchmark timed out waiting for {expected} events, got {}",
                 counter.load(Ordering::Acquire)
             );
             return false;
@@ -104,8 +102,7 @@ fn wait_for_completion_sleeping(counter: &Arc<AtomicI64>, expected: i64, timeout
     while counter.load(Ordering::Acquire) < expected {
         if start.elapsed() > timeout {
             eprintln!(
-                "WARNING: Benchmark timed out waiting for {} events, got {}",
-                expected,
+                "WARNING: Benchmark timed out waiting for {expected} events, got {}",
                 counter.load(Ordering::Acquire)
             );
             return false;
@@ -139,7 +136,7 @@ fn baseline_measurement(group: &mut BenchmarkGroup<WallTime>, burst_size: u64) {
 
 /// Benchmark with BusySpinWaitStrategy
 fn benchmark_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pause_ms: u64) {
-    let param = format!("burst:{}_pause:{}ms", burst_size, pause_ms);
+    let param = format!("burst:{burst_size}_pause:{pause_ms}ms");
     let benchmark_id = BenchmarkId::new("BusySpin", param);
 
     // Create Disruptor OUTSIDE the benchmark iteration - this is the key fix
@@ -191,13 +188,13 @@ fn benchmark_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pa
     });
 
     if let Err(e) = disruptor.shutdown() {
-        eprintln!("WARNING: BusySpin shutdown failed: {:?}", e);
+        eprintln!("WARNING: BusySpin shutdown failed: {e:?}");
     }
 }
 
 /// Benchmark with YieldingWaitStrategy
 fn benchmark_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pause_ms: u64) {
-    let param = format!("burst:{}_pause:{}ms", burst_size, pause_ms);
+    let param = format!("burst:{burst_size}_pause:{pause_ms}ms");
     let benchmark_id = BenchmarkId::new("Yielding", param);
 
     // Create Disruptor OUTSIDE the benchmark iteration
@@ -249,13 +246,13 @@ fn benchmark_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
     });
 
     if let Err(e) = disruptor.shutdown() {
-        eprintln!("WARNING: Yielding shutdown failed: {:?}", e);
+        eprintln!("WARNING: Yielding shutdown failed: {e:?}");
     }
 }
 
 /// Benchmark with BlockingWaitStrategy
 fn benchmark_blocking(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pause_ms: u64) {
-    let param = format!("burst:{}_pause:{}ms", burst_size, pause_ms);
+    let param = format!("burst:{burst_size}_pause:{pause_ms}ms");
     let benchmark_id = BenchmarkId::new("Blocking", param);
 
     // Create Disruptor OUTSIDE the benchmark iteration
@@ -307,13 +304,13 @@ fn benchmark_blocking(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
     });
 
     if let Err(e) = disruptor.shutdown() {
-        eprintln!("WARNING: Blocking shutdown failed: {:?}", e);
+        eprintln!("WARNING: Blocking shutdown failed: {e:?}");
     }
 }
 
 /// Benchmark with SleepingWaitStrategy
 fn benchmark_sleeping(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pause_ms: u64) {
-    let param = format!("burst:{}_pause:{}ms", burst_size, pause_ms);
+    let param = format!("burst:{burst_size}_pause:{pause_ms}ms");
     let benchmark_id = BenchmarkId::new("Sleeping", param);
 
     // Create Disruptor OUTSIDE the benchmark iteration

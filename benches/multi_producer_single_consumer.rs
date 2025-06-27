@@ -115,7 +115,7 @@ impl SyncProducer {
                 ));
 
                 if result.is_err() {
-                    eprintln!("Producer {} failed to publish event {}", producer_id, i);
+                    eprintln!("Producer {producer_id} failed to publish event {i}");
                     return;
                 }
             }
@@ -152,8 +152,7 @@ fn wait_for_mpsc_completion(counter: &Arc<AtomicI64>, expected: i64, timeout_ms:
         if start.elapsed() > timeout {
             let current_count = counter.load(Ordering::Acquire);
             eprintln!(
-                "WARNING: MPSC benchmark timed out waiting for {} events, got {}",
-                expected, current_count
+                "WARNING: MPSC benchmark timed out waiting for {expected} events, got {current_count}"
             );
             return false;
         }
@@ -163,10 +162,7 @@ fn wait_for_mpsc_completion(counter: &Arc<AtomicI64>, expected: i64, timeout_ms:
         if current_count == last_count {
             stall_count += 1;
             if stall_count > 1000 {
-                eprintln!(
-                    "WARNING: MPSC benchmark appears stalled at {} events",
-                    current_count
-                );
+                eprintln!("WARNING: MPSC benchmark appears stalled at {current_count} events");
                 std::thread::sleep(Duration::from_millis(1));
                 stall_count = 0;
             }
@@ -240,7 +236,7 @@ fn benchmark_mpsc_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u6
     disruptor.start().unwrap();
     let disruptor_arc = Arc::new(disruptor);
 
-    let param = format!("burst:{}_pause:{}ms", burst_size, pause_ms);
+    let param = format!("burst:{burst_size}_pause:{pause_ms}ms");
     let benchmark_id = BenchmarkId::new("MPSC_BusySpin", param);
     let expected_total = burst_size * PRODUCER_COUNT as u64;
 
