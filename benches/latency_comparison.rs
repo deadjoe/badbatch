@@ -81,12 +81,13 @@ impl EventHandler<LatencyEvent> for LatencyHandler {
     }
 }
 
-/// Get current timestamp in nanoseconds
+/// Get current timestamp in nanoseconds using high-resolution timer
 fn get_timestamp_nanos() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64
+    // Use Instant for high-resolution monotonic timing instead of SystemTime
+    // Convert to nanoseconds from a fixed reference point
+    static START_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let start = START_TIME.get_or_init(std::time::Instant::now);
+    start.elapsed().as_nanos() as u64
 }
 
 /// Calculate latency statistics
