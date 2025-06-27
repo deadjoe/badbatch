@@ -158,7 +158,7 @@ where
 
         let thread = ThreadBuilder::new()
             .pin_at_core(core_id)
-            .thread_name(format!("elegant-consumer-core-{}", core_id))
+            .thread_name(format!("elegant-consumer-core-{core_id}"))
             .spawn(move || {
                 Self::consumer_loop(
                     ring_buffer,
@@ -363,11 +363,7 @@ mod tests {
         // Consumer sequence might have advanced if it's already processing events
         // In release mode, the consumer thread can start very quickly
         let seq = consumer.current_sequence();
-        assert!(
-            seq >= -1,
-            "Sequence should be -1 or higher, but was {}",
-            seq
-        );
+        assert!(seq >= -1, "Sequence should be -1 or higher, but was {seq}");
         assert!(consumer.is_running());
 
         // Shutdown gracefully

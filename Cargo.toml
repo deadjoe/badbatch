@@ -62,6 +62,11 @@ lto = true
 codegen-units = 1
 debug = true
 
+[lints.clippy]
+# Match GitHub Actions clippy strictness - all warnings as errors
+all = { level = "warn", priority = -1 }
+uninlined_format_args = "deny"
+
 # Benchmark configurations
 [[bench]]
 name = "single_producer_single_consumer"

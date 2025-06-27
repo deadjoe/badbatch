@@ -191,7 +191,7 @@ where
                 }
                 Err(e) => {
                     // Other errors, log and continue
-                    eprintln!("Event processor error: {:?}", e);
+                    eprintln!("Event processor error: {e:?}");
                     thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
@@ -562,7 +562,7 @@ mod tests {
             exception_handler,
         );
 
-        let debug_str = format!("{:?}", processor);
+        let debug_str = format!("{processor:?}");
         assert!(debug_str.contains("BatchEventProcessor"));
         assert!(debug_str.contains("sequence"));
         assert!(debug_str.contains("running"));
