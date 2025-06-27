@@ -19,10 +19,6 @@ use badbatch::disruptor::{
 
 // Benchmark configuration constants
 const BUFFER_SIZE: usize = 1024;
-#[allow(dead_code)]
-const BURST_SIZES: [u64; 4] = [1, 10, 100, 1000];
-#[allow(dead_code)]
-const PAUSE_MS: [u64; 3] = [0, 1, 10];
 const TIMEOUT_MS: u64 = 5000; // 5 second timeout to prevent hanging
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -33,31 +29,18 @@ struct BenchmarkEvent {
 
 /// Event handler that stores the last processed value in an atomic sink
 struct CountingSink {
-    sink: Arc<AtomicI64>,
     counter: Arc<AtomicI64>,
 }
 
 impl CountingSink {
     fn new() -> Self {
         Self {
-            sink: Arc::new(AtomicI64::new(0)),
             counter: Arc::new(AtomicI64::new(0)),
         }
     }
 
-    #[allow(dead_code)]
-    fn get_sink(&self) -> Arc<AtomicI64> {
-        self.sink.clone()
-    }
-
     fn get_counter(&self) -> Arc<AtomicI64> {
         self.counter.clone()
-    }
-
-    #[allow(dead_code)]
-    fn reset(&self) {
-        self.sink.store(0, Ordering::Release);
-        self.counter.store(0, Ordering::Release);
     }
 }
 
@@ -68,8 +51,8 @@ impl EventHandler<BenchmarkEvent> for CountingSink {
         _sequence: i64,
         _end_of_batch: bool,
     ) -> DisruptorResult<()> {
-        // Store the value and increment counter
-        self.sink.store(event.value, Ordering::Release);
+        // Minimal processing - just increment counter
+        black_box(event.value);
         self.counter.fetch_add(1, Ordering::Release);
         Ok(())
     }
@@ -134,17 +117,22 @@ fn wait_for_completion_sleeping(counter: &Arc<AtomicI64>, expected: i64, timeout
 
 /// Baseline measurement to determine overhead
 fn baseline_measurement(group: &mut BenchmarkGroup<WallTime>, burst_size: u64) {
-    let sink = Arc::new(AtomicI64::new(0));
+    let counter = Arc::new(AtomicI64::new(0));
     let benchmark_id = BenchmarkId::new("baseline", burst_size);
 
     group.throughput(Throughput::Elements(burst_size));
     group.bench_function(benchmark_id, |b| {
-        b.iter(|| {
-            for i in 1..=burst_size {
-                sink.store(black_box(i as i64), Ordering::Release);
+        b.iter_custom(|iters| {
+            let start = Instant::now();
+            for _ in 0..iters {
+                counter.store(0, Ordering::Release);
+                for i in 1..=burst_size {
+                    counter.store(black_box(i as i64), Ordering::Release);
+                }
+                // Simple verification
+                assert_eq!(counter.load(Ordering::Acquire), burst_size as i64);
             }
-            // Simple verification
-            assert_eq!(sink.load(Ordering::Acquire), burst_size as i64);
+            start.elapsed()
         })
     });
 }
@@ -154,49 +142,55 @@ fn benchmark_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pa
     let param = format!("burst:{}_pause:{}ms", burst_size, pause_ms);
     let benchmark_id = BenchmarkId::new("BusySpin", param);
 
+    // Create Disruptor OUTSIDE the benchmark iteration - this is the key fix
+    let factory = DefaultEventFactory::<BenchmarkEvent>::new();
+    let handler = CountingSink::new();
+    let counter = handler.get_counter();
+
+    let mut disruptor = Disruptor::new(
+        factory,
+        BUFFER_SIZE,
+        ProducerType::Single,
+        Box::new(BusySpinWaitStrategy::new()),
+    )
+    .unwrap()
+    .handle_events_with(handler)
+    .build();
+
+    disruptor.start().unwrap();
+
     group.throughput(Throughput::Elements(burst_size));
     group.bench_function(benchmark_id, |b| {
-        b.iter(|| {
+        b.iter_custom(|iters| {
             if pause_ms > 0 {
                 std::thread::sleep(Duration::from_millis(pause_ms));
             }
 
-            // Create fresh Disruptor instance for each benchmark run
-            let factory = DefaultEventFactory::<BenchmarkEvent>::new();
-            let handler = CountingSink::new();
-            let counter = handler.get_counter();
+            let start = Instant::now();
+            for _ in 0..iters {
+                counter.store(0, Ordering::Release); // Reset counter for each iteration
 
-            let mut disruptor = Disruptor::new(
-                factory,
-                BUFFER_SIZE,
-                ProducerType::Single,
-                Box::new(BusySpinWaitStrategy::new()),
-            )
-            .unwrap()
-            .handle_events_with(handler)
-            .build();
+                for i in 1..=burst_size {
+                    disruptor
+                        .publish_event(ClosureEventTranslator::new(
+                            move |event: &mut BenchmarkEvent, seq: i64| {
+                                event.value = black_box(i as i64);
+                                event.sequence = seq;
+                            },
+                        ))
+                        .unwrap();
+                }
 
-            disruptor.start().unwrap();
-
-            for i in 1..=burst_size {
-                disruptor
-                    .publish_event(ClosureEventTranslator::new(
-                        move |event: &mut BenchmarkEvent, seq: i64| {
-                            event.value = black_box(i as i64);
-                            event.sequence = seq;
-                        },
-                    ))
-                    .unwrap();
+                // Wait for all events to be processed with timeout
+                if !wait_for_completion(&counter, burst_size as i64, TIMEOUT_MS) {
+                    panic!("BusySpin benchmark failed: events not processed within timeout");
+                }
             }
-
-            // Wait for all events to be processed with timeout
-            if !wait_for_completion(&counter, burst_size as i64, TIMEOUT_MS) {
-                panic!("Benchmark failed: events not processed within timeout");
-            }
-
-            disruptor.shutdown().unwrap();
+            start.elapsed()
         })
     });
+
+    disruptor.shutdown().unwrap();
 }
 
 /// Benchmark with YieldingWaitStrategy
@@ -204,49 +198,55 @@ fn benchmark_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
     let param = format!("burst:{}_pause:{}ms", burst_size, pause_ms);
     let benchmark_id = BenchmarkId::new("Yielding", param);
 
+    // Create Disruptor OUTSIDE the benchmark iteration
+    let factory = DefaultEventFactory::<BenchmarkEvent>::new();
+    let handler = CountingSink::new();
+    let counter = handler.get_counter();
+
+    let mut disruptor = Disruptor::new(
+        factory,
+        BUFFER_SIZE,
+        ProducerType::Single,
+        Box::new(YieldingWaitStrategy::new()),
+    )
+    .unwrap()
+    .handle_events_with(handler)
+    .build();
+
+    disruptor.start().unwrap();
+
     group.throughput(Throughput::Elements(burst_size));
     group.bench_function(benchmark_id, |b| {
-        b.iter(|| {
+        b.iter_custom(|iters| {
             if pause_ms > 0 {
                 std::thread::sleep(Duration::from_millis(pause_ms));
             }
 
-            // Create fresh Disruptor instance for each benchmark run
-            let factory = DefaultEventFactory::<BenchmarkEvent>::new();
-            let handler = CountingSink::new();
-            let counter = handler.get_counter();
+            let start = Instant::now();
+            for _ in 0..iters {
+                counter.store(0, Ordering::Release); // Reset counter for each iteration
 
-            let mut disruptor = Disruptor::new(
-                factory,
-                BUFFER_SIZE,
-                ProducerType::Single,
-                Box::new(YieldingWaitStrategy::new()),
-            )
-            .unwrap()
-            .handle_events_with(handler)
-            .build();
+                for i in 1..=burst_size {
+                    disruptor
+                        .publish_event(ClosureEventTranslator::new(
+                            move |event: &mut BenchmarkEvent, seq: i64| {
+                                event.value = black_box(i as i64);
+                                event.sequence = seq;
+                            },
+                        ))
+                        .unwrap();
+                }
 
-            disruptor.start().unwrap();
-
-            for i in 1..=burst_size {
-                disruptor
-                    .publish_event(ClosureEventTranslator::new(
-                        move |event: &mut BenchmarkEvent, seq: i64| {
-                            event.value = black_box(i as i64);
-                            event.sequence = seq;
-                        },
-                    ))
-                    .unwrap();
+                // Wait for all events to be processed with timeout and yielding
+                if !wait_for_completion_yielding(&counter, burst_size as i64, TIMEOUT_MS) {
+                    panic!("Yielding benchmark failed: events not processed within timeout");
+                }
             }
-
-            // Wait for all events to be processed with timeout and yielding
-            if !wait_for_completion_yielding(&counter, burst_size as i64, TIMEOUT_MS) {
-                panic!("Benchmark failed: events not processed within timeout");
-            }
-
-            disruptor.shutdown().unwrap();
+            start.elapsed()
         })
     });
+
+    disruptor.shutdown().unwrap();
 }
 
 /// Benchmark with BlockingWaitStrategy
@@ -254,49 +254,55 @@ fn benchmark_blocking(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
     let param = format!("burst:{}_pause:{}ms", burst_size, pause_ms);
     let benchmark_id = BenchmarkId::new("Blocking", param);
 
+    // Create Disruptor OUTSIDE the benchmark iteration
+    let factory = DefaultEventFactory::<BenchmarkEvent>::new();
+    let handler = CountingSink::new();
+    let counter = handler.get_counter();
+
+    let mut disruptor = Disruptor::new(
+        factory,
+        BUFFER_SIZE,
+        ProducerType::Single,
+        Box::new(BlockingWaitStrategy::new()),
+    )
+    .unwrap()
+    .handle_events_with(handler)
+    .build();
+
+    disruptor.start().unwrap();
+
     group.throughput(Throughput::Elements(burst_size));
     group.bench_function(benchmark_id, |b| {
-        b.iter(|| {
+        b.iter_custom(|iters| {
             if pause_ms > 0 {
                 std::thread::sleep(Duration::from_millis(pause_ms));
             }
 
-            // Create fresh Disruptor instance for each benchmark run
-            let factory = DefaultEventFactory::<BenchmarkEvent>::new();
-            let handler = CountingSink::new();
-            let counter = handler.get_counter();
+            let start = Instant::now();
+            for _ in 0..iters {
+                counter.store(0, Ordering::Release); // Reset counter for each iteration
 
-            let mut disruptor = Disruptor::new(
-                factory,
-                BUFFER_SIZE,
-                ProducerType::Single,
-                Box::new(BlockingWaitStrategy::new()),
-            )
-            .unwrap()
-            .handle_events_with(handler)
-            .build();
+                for i in 1..=burst_size {
+                    disruptor
+                        .publish_event(ClosureEventTranslator::new(
+                            move |event: &mut BenchmarkEvent, seq: i64| {
+                                event.value = black_box(i as i64);
+                                event.sequence = seq;
+                            },
+                        ))
+                        .unwrap();
+                }
 
-            disruptor.start().unwrap();
-
-            for i in 1..=burst_size {
-                disruptor
-                    .publish_event(ClosureEventTranslator::new(
-                        move |event: &mut BenchmarkEvent, seq: i64| {
-                            event.value = black_box(i as i64);
-                            event.sequence = seq;
-                        },
-                    ))
-                    .unwrap();
+                // Wait for all events to be processed with timeout and sleeping
+                if !wait_for_completion_sleeping(&counter, burst_size as i64, TIMEOUT_MS) {
+                    panic!("Blocking benchmark failed: events not processed within timeout");
+                }
             }
-
-            // Wait for all events to be processed with timeout and sleeping
-            if !wait_for_completion_sleeping(&counter, burst_size as i64, TIMEOUT_MS) {
-                panic!("Benchmark failed: events not processed within timeout");
-            }
-
-            disruptor.shutdown().unwrap();
+            start.elapsed()
         })
     });
+
+    disruptor.shutdown().unwrap();
 }
 
 /// Benchmark with SleepingWaitStrategy
@@ -304,49 +310,55 @@ fn benchmark_sleeping(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
     let param = format!("burst:{}_pause:{}ms", burst_size, pause_ms);
     let benchmark_id = BenchmarkId::new("Sleeping", param);
 
+    // Create Disruptor OUTSIDE the benchmark iteration
+    let factory = DefaultEventFactory::<BenchmarkEvent>::new();
+    let handler = CountingSink::new();
+    let counter = handler.get_counter();
+
+    let mut disruptor = Disruptor::new(
+        factory,
+        BUFFER_SIZE,
+        ProducerType::Single,
+        Box::new(SleepingWaitStrategy::new()),
+    )
+    .unwrap()
+    .handle_events_with(handler)
+    .build();
+
+    disruptor.start().unwrap();
+
     group.throughput(Throughput::Elements(burst_size));
     group.bench_function(benchmark_id, |b| {
-        b.iter(|| {
+        b.iter_custom(|iters| {
             if pause_ms > 0 {
                 std::thread::sleep(Duration::from_millis(pause_ms));
             }
 
-            // Create fresh Disruptor instance for each benchmark run
-            let factory = DefaultEventFactory::<BenchmarkEvent>::new();
-            let handler = CountingSink::new();
-            let counter = handler.get_counter();
+            let start = Instant::now();
+            for _ in 0..iters {
+                counter.store(0, Ordering::Release); // Reset counter for each iteration
 
-            let mut disruptor = Disruptor::new(
-                factory,
-                BUFFER_SIZE,
-                ProducerType::Single,
-                Box::new(SleepingWaitStrategy::new()),
-            )
-            .unwrap()
-            .handle_events_with(handler)
-            .build();
+                for i in 1..=burst_size {
+                    disruptor
+                        .publish_event(ClosureEventTranslator::new(
+                            move |event: &mut BenchmarkEvent, seq: i64| {
+                                event.value = black_box(i as i64);
+                                event.sequence = seq;
+                            },
+                        ))
+                        .unwrap();
+                }
 
-            disruptor.start().unwrap();
-
-            for i in 1..=burst_size {
-                disruptor
-                    .publish_event(ClosureEventTranslator::new(
-                        move |event: &mut BenchmarkEvent, seq: i64| {
-                            event.value = black_box(i as i64);
-                            event.sequence = seq;
-                        },
-                    ))
-                    .unwrap();
+                // Wait for all events to be processed with timeout and sleeping
+                if !wait_for_completion_sleeping(&counter, burst_size as i64, TIMEOUT_MS) {
+                    panic!("Sleeping benchmark failed: events not processed within timeout");
+                }
             }
-
-            // Wait for all events to be processed with timeout and sleeping
-            if !wait_for_completion_sleeping(&counter, burst_size as i64, TIMEOUT_MS) {
-                panic!("Benchmark failed: events not processed within timeout");
-            }
-
-            disruptor.shutdown().unwrap();
+            start.elapsed()
         })
     });
+
+    disruptor.shutdown().unwrap();
 }
 
 /// Main SPSC benchmark function
