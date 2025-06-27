@@ -191,24 +191,27 @@ run_all() {
     print_status "Starting comprehensive benchmark run..."
     
     # Run all benchmarks and track results
-    # Map function names to actual benchmark file names for proper log file lookup
-    declare -A benchmark_map=(
-        ["quick"]="comprehensive_benchmarks"
-        ["spsc"]="single_producer_single_consumer"
-        ["mpsc"]="multi_producer_single_consumer"
-        ["pipeline"]="pipeline_processing"
-        ["latency"]="latency_comparison"
-        ["throughput"]="throughput_comparison"
-        ["scaling"]="buffer_size_scaling"
-    )
+    # Use function to map benchmark names for compatibility with all shells
+    get_benchmark_name() {
+        case "$1" in
+            "quick") echo "comprehensive_benchmarks" ;;
+            "spsc") echo "single_producer_single_consumer" ;;
+            "mpsc") echo "multi_producer_single_consumer" ;;
+            "pipeline") echo "pipeline_processing" ;;
+            "latency") echo "latency_comparison" ;;
+            "throughput") echo "throughput_comparison" ;;
+            "scaling") echo "buffer_size_scaling" ;;
+            *) echo "$1" ;;
+        esac
+    }
     
     for benchmark in quick spsc mpsc pipeline latency throughput scaling; do
         echo ""
         print_status "=== Running $benchmark benchmark ==="
         if run_$benchmark; then
-            successful_benchmarks+=("${benchmark_map[$benchmark]}")
+            successful_benchmarks+=("$(get_benchmark_name "$benchmark")")
         else
-            failed_benchmarks+=("${benchmark_map[$benchmark]}")
+            failed_benchmarks+=("$(get_benchmark_name "$benchmark")")
         fi
     done
     
