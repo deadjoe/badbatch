@@ -85,7 +85,7 @@ mod fixed_benchmarks {
         ) {
             Ok(d) => d.handle_events_with(handler).build(),
             Err(e) => {
-                eprintln!("Failed to create disruptor: {:?}", e);
+                eprintln!("Failed to create disruptor: {e:?}");
                 return;
             }
         };
@@ -114,13 +114,13 @@ mod fixed_benchmarks {
                                 ))
                                 .is_err()
                             {
-                                eprintln!("Failed to publish event {}", i);
+                                eprintln!("Failed to publish event {i}");
                                 break;
                             }
                         }
 
                         if !safe_wait(&counter, *burst_size as i64, TIMEOUT_MS) {
-                            eprintln!("Timeout waiting for {} events", burst_size);
+                            eprintln!("Timeout waiting for {burst_size} events");
                             break;
                         }
                     }

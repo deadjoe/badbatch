@@ -74,18 +74,15 @@ where
     T: Debug + Send + Sync,
 {
     fn handle_event_exception(&self, error: DisruptorError, sequence: i64, event: &T) {
-        eprintln!(
-            "Exception processing event at sequence {}: {:?}. Event: {:?}",
-            sequence, error, event
-        );
+        eprintln!("Exception processing event at sequence {sequence}: {error:?}. Event: {event:?}");
     }
 
     fn handle_on_start_exception(&self, error: DisruptorError) {
-        eprintln!("Exception during event processor startup: {:?}", error);
+        eprintln!("Exception during event processor startup: {error:?}");
     }
 
     fn handle_on_shutdown_exception(&self, error: DisruptorError) {
-        eprintln!("Exception during event processor shutdown: {:?}", error);
+        eprintln!("Exception during event processor shutdown: {error:?}");
     }
 }
 
@@ -155,18 +152,15 @@ where
     T: Debug + Send + Sync,
 {
     fn handle_event_exception(&self, error: DisruptorError, sequence: i64, event: &T) {
-        panic!(
-            "Exception processing event at sequence {}: {:?}. Event: {:?}",
-            sequence, error, event
-        );
+        panic!("Exception processing event at sequence {sequence}: {error:?}. Event: {event:?}");
     }
 
     fn handle_on_start_exception(&self, error: DisruptorError) {
-        panic!("Exception during event processor startup: {:?}", error);
+        panic!("Exception during event processor startup: {error:?}");
     }
 
     fn handle_on_shutdown_exception(&self, error: DisruptorError) {
-        panic!("Exception during event processor shutdown: {:?}", error);
+        panic!("Exception during event processor shutdown: {error:?}");
     }
 }
 

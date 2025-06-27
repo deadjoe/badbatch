@@ -87,8 +87,7 @@ fn wait_for_completion(last_id: &Arc<AtomicI64>, expected: i64, timeout_ms: u64)
     while last_id.load(Ordering::Acquire) < expected {
         if start.elapsed() > timeout {
             eprintln!(
-                "WARNING: Benchmark timed out waiting for {} events, got {}",
-                expected,
+                "WARNING: Benchmark timed out waiting for {expected} events, got {}",
                 last_id.load(Ordering::Acquire)
             );
             return false;
@@ -106,8 +105,7 @@ fn wait_for_completion_yielding(last_id: &Arc<AtomicI64>, expected: i64, timeout
     while last_id.load(Ordering::Acquire) < expected {
         if start.elapsed() > timeout {
             eprintln!(
-                "WARNING: Benchmark timed out waiting for {} events, got {}",
-                expected,
+                "WARNING: Benchmark timed out waiting for {expected} events, got {}",
                 last_id.load(Ordering::Acquire)
             );
             return false;
@@ -125,8 +123,7 @@ fn wait_for_completion_sleeping(last_id: &Arc<AtomicI64>, expected: i64, timeout
     while last_id.load(Ordering::Acquire) < expected {
         if start.elapsed() > timeout {
             eprintln!(
-                "WARNING: Benchmark timed out waiting for {} events, got {}",
-                expected,
+                "WARNING: Benchmark timed out waiting for {expected} events, got {}",
                 last_id.load(Ordering::Acquire)
             );
             return false;
@@ -165,7 +162,7 @@ fn benchmark_fast_processing_scaling(
     buffer_size: usize,
     workload_size: u64,
 ) {
-    let param = format!("fast_buf{}_work{}", buffer_size, workload_size);
+    let param = format!("fast_buf{buffer_size}_work{workload_size}");
     let benchmark_id = BenchmarkId::new("FastProcessing", param);
 
     group.throughput(Throughput::Elements(workload_size));
@@ -216,7 +213,7 @@ fn benchmark_medium_processing_scaling(
     buffer_size: usize,
     workload_size: u64,
 ) {
-    let param = format!("medium_buf{}_work{}", buffer_size, workload_size);
+    let param = format!("medium_buf{buffer_size}_work{workload_size}");
     let benchmark_id = BenchmarkId::new("MediumProcessing", param);
 
     group.throughput(Throughput::Elements(workload_size));
@@ -267,7 +264,7 @@ fn benchmark_slow_processing_scaling(
     buffer_size: usize,
     workload_size: u64,
 ) {
-    let param = format!("slow_buf{}_work{}", buffer_size, workload_size);
+    let param = format!("slow_buf{buffer_size}_work{workload_size}");
     let benchmark_id = BenchmarkId::new("SlowProcessing", param);
 
     group.throughput(Throughput::Elements(workload_size));
@@ -349,8 +346,7 @@ fn benchmark_memory_scaling(group: &mut BenchmarkGroup<WallTime>, buffer_size: u
                     let initial_count = counter.load(Ordering::Acquire);
                     if !wait_for_counter_increase(&counter, initial_count, TIMEOUT_MS) {
                         eprintln!(
-                            "WARNING: Memory scaling timeout for payload_size {}",
-                            payload_size
+                            "WARNING: Memory scaling timeout for payload_size {payload_size}"
                         );
                         break; // Continue with next payload size
                     }
@@ -368,7 +364,7 @@ fn benchmark_buffer_utilization(
     buffer_size: usize,
     burst_size: u64,
 ) {
-    let param = format!("util_buf{}_burst{}", buffer_size, burst_size);
+    let param = format!("util_buf{buffer_size}_burst{burst_size}");
     let benchmark_id = BenchmarkId::new("BufferUtil", param);
 
     group.throughput(Throughput::Elements(burst_size));

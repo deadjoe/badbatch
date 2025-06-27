@@ -372,7 +372,7 @@ mod tests {
         for i in 0..5 {
             let result = producer.try_publish(|event| {
                 event.value = i;
-                event.data = format!("event_{}", i);
+                event.data = format!("event_{i}");
             });
 
             assert!(result.is_ok());
@@ -402,7 +402,7 @@ mod tests {
         let result = producer.try_batch_publish(3, |iter| {
             for (i, event) in iter.enumerate() {
                 event.value = i as i64;
-                event.data = format!("batch_{}", i);
+                event.data = format!("batch_{i}");
             }
         });
 
@@ -439,7 +439,7 @@ mod tests {
         producer.batch_publish(2, |iter| {
             for (i, event) in iter.enumerate() {
                 event.value = (i + 10) as i64;
-                event.data = format!("blocking_batch_{}", i);
+                event.data = format!("blocking_batch_{i}");
             }
         });
 
@@ -556,7 +556,7 @@ mod tests {
         let result = producer.try_batch_publish(batch_size, |iter| {
             for (i, event) in iter.enumerate() {
                 event.value = i as i64;
-                event.data = format!("large_batch_{}", i);
+                event.data = format!("large_batch_{i}");
             }
         });
 

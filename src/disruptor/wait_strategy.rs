@@ -1182,10 +1182,10 @@ mod tests {
         let sleeping = SleepingWaitStrategy::new();
 
         // Test that all strategies implement Debug properly
-        let blocking_debug = format!("{:?}", blocking);
-        let yielding_debug = format!("{:?}", yielding);
-        let busy_spin_debug = format!("{:?}", busy_spin);
-        let sleeping_debug = format!("{:?}", sleeping);
+        let blocking_debug = format!("{blocking:?}");
+        let yielding_debug = format!("{yielding:?}");
+        let busy_spin_debug = format!("{busy_spin:?}");
+        let sleeping_debug = format!("{sleeping:?}");
 
         assert!(blocking_debug.contains("BlockingWaitStrategy"));
         assert!(yielding_debug.contains("YieldingWaitStrategy"));
