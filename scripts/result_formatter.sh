@@ -37,7 +37,12 @@ extract_performance_data() {
     
     local samples=$(grep -E "Collecting [0-9]+ samples" "$log_file" | head -1 | sed -E 's/.*Collecting ([0-9]+) samples.*/\1/')
     local iterations_line=$(grep -E "samples in estimated.*iterations" "$log_file" | head -1)
-    local iterations=$(echo "$iterations_line" | sed -E 's/.*\(([0-9.]+[KMGT]?) iterations\).*/\1/')
+    local iterations=$(echo "$iterations_line" | sed -E 's/.*\(([0-9.]+[KMGTB]?) iterations\).*/\1/')
+    
+    # If regex didn't match, try a more flexible approach
+    if [ "$iterations" = "$iterations_line" ] || [ -z "$iterations" ]; then
+        iterations=$(echo "$iterations_line" | sed -E 's/.*\(([^)]+) iterations\).*/\1/' | sed -E 's/^([0-9.]+[KMGTB]?).*$/\1/')
+    fi
     
     # Clean up benchmark name for display
     local display_name=""
