@@ -302,7 +302,7 @@ Our comprehensive benchmark suite covers multiple scenarios:
 - **Throughput Analysis**: Raw event processing rates across different configurations
 - **Buffer Scaling**: Performance characteristics with buffer sizes from 64 to 8192 slots
 
-Run `./scripts/run_benchmarks.sh` to execute the full performance evaluation suite. Use `./scripts/run_benchmarks.sh flamegraph` for detailed flame graph profiling to identify performance bottlenecks.
+Run `./scripts/run_benchmarks.sh all` to execute the full performance evaluation suite. Use `./scripts/run_benchmarks.sh flamegraph` (select 'a' for all benchmarks) for comprehensive CPU profiling with interactive analysis to identify performance bottlenecks.
 
 ## 🤝 Contributing
 
