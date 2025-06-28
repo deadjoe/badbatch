@@ -19,8 +19,8 @@ use badbatch::disruptor::{
 
 // Benchmark configuration constants
 const PRODUCER_COUNT: usize = 3;
-const BUFFER_SIZE: usize = 2048; // Larger buffer for multi-producer
-const BURST_SIZES: [u64; 2] = [10, 50]; // Reduced for faster testing
+const BUFFER_SIZE: usize = 1024; // Standard buffer size per README.md
+const BURST_SIZES: [u64; 3] = [10, 100, 500];
 const PAUSE_MS: [u64; 2] = [0, 1]; // Reduced pause times
 const TIMEOUT_MS: u64 = 10000; // 10 second timeout
 
@@ -304,10 +304,10 @@ fn benchmark_mpsc_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u6
 pub fn fixed_mpsc_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("Fixed_MPSC");
 
-    // Configure benchmark group with minimal times for testing
-    group.measurement_time(Duration::from_secs(8));
-    group.warm_up_time(Duration::from_secs(2));
-    group.sample_size(10); // Minimum required by Criterion
+    // Configure benchmark group with proper timing for comprehensive testing
+    group.measurement_time(Duration::from_secs(15));
+    group.warm_up_time(Duration::from_secs(5));
+    group.sample_size(10); // Fewer samples for complex multi-threaded benchmarks
 
     for &burst_size in BURST_SIZES.iter() {
         // Baseline measurement
