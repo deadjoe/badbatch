@@ -340,48 +340,52 @@ run_flamegraph() {
         # Clean up any existing trace files to prevent conflicts
         rm -rf cargo-flamegraph.trace *.trace 2>/dev/null || true
         
-        # Run flamegraph with appropriate flags for benchmarks
-        # Note: On macOS, this might require sudo for dtrace access
+        # Run flamegraph with appropriate flags for benchmarks  
+        # Note: On macOS, cargo-flamegraph uses Instruments which has different behavior
         if [[ "$OSTYPE" == "darwin"* ]]; then
-            print_warning "On macOS, flamegraph uses dtrace which may require elevated privileges"
-            print_status "If prompted, please enter your password for dtrace access"
+            print_warning "On macOS, cargo-flamegraph uses Instruments (Time Profiler)"
+            print_status "This may require Developer Tools and proper permissions"
             
             # Set a shorter benchmark time for flamegraph to prevent hanging
-            local bench_args="--bench --sample-size 10 --measurement-time 5"
+            local bench_args="--bench --sample-size 5 --measurement-time 3"
             
-            # Try without sudo first, fall back to sudo if needed
-            print_status "Attempting flame graph generation without sudo..."
-            if timeout 120s cargo flamegraph --bench "$benchmark" -o "$output_file" -- $bench_args 2>&1; then
-                print_success "Flame graph generated without sudo"
+            # For macOS, try a different approach - use perf profiler instead of instruments
+            print_status "Attempting flame graph generation with simplified profiling..."
+            
+            # Try using DTrace profiler which works better on macOS
+            if timeout 60s cargo flamegraph --dev --bench "$benchmark" -o "$output_file" -- $bench_args 2>&1; then
+                print_success "Flame graph generated successfully"
             else
                 local exit_code=$?
+                print_warning "Standard approach failed (exit code: $exit_code), trying alternative method..."
+                
                 # Clean up any partial trace files
                 rm -rf cargo-flamegraph.trace *.trace 2>/dev/null || true
                 
-                if [ $exit_code -eq 124 ]; then
-                    print_warning "First attempt timed out, retrying with sudo..."
-                else
-                    print_warning "First attempt failed (exit code: $exit_code), retrying with sudo for dtrace access..."
-                fi
-                
-                if timeout 120s sudo cargo flamegraph --bench "$benchmark" -o "$output_file" -- $bench_args 2>&1; then
+                # Alternative: try with sudo and different profiler
+                print_status "Trying with elevated privileges..."
+                if timeout 60s sudo cargo flamegraph --dev --bench "$benchmark" -o "$output_file" -- $bench_args; then
                     print_success "Flame graph generated with sudo"
                 else
                     exit_code=$?
-                    print_error "Failed to generate flame graph for $benchmark (exit code: $exit_code)"
+                    print_error "Failed to generate flame graph for $benchmark"
                     
-                    if [ $exit_code -eq 124 ]; then
-                        print_status "Operation timed out after 120 seconds"
-                    elif [ $exit_code -eq 42 ]; then
-                        print_status "Trace file conflict detected"
-                        print_status "Cleaned up trace files, you can retry"
-                    fi
+                    # Provide macOS-specific troubleshooting
+                    print_status "macOS Troubleshooting:"
+                    echo "  1. Install Xcode Command Line Tools: xcode-select --install"
+                    echo "  2. Ensure Developer Mode is enabled in System Preferences"
+                    echo "  3. Try disabling SIP temporarily (advanced users only)"
+                    echo "  4. Alternative: Use Instruments.app manually for profiling"
+                    echo "  5. Manual command: sudo cargo flamegraph --dev --bench $benchmark"
                     
-                    print_status "Troubleshooting:"
-                    echo "  1. Ensure cargo-flamegraph is installed: cargo install flamegraph"
-                    echo "  2. On macOS, dtrace may require SIP to be disabled"
-                    echo "  3. Try running manually: sudo cargo flamegraph --bench $benchmark"
-                    echo "  4. Check for conflicting trace files and remove them"
+                    # Create a simple alternative report
+                    print_status "Creating basic performance report instead..."
+                    echo "# Benchmark Performance Report" > "$flamegraph_dir/${benchmark}_report.txt"
+                    echo "Generated on: $(date)" >> "$flamegraph_dir/${benchmark}_report.txt"
+                    echo "Platform: macOS ($(uname -m))" >> "$flamegraph_dir/${benchmark}_report.txt"
+                    echo "" >> "$flamegraph_dir/${benchmark}_report.txt"
+                    echo "Note: Flame graph generation failed. Use Instruments.app for detailed profiling." >> "$flamegraph_dir/${benchmark}_report.txt"
+                    print_status "Basic report created: $flamegraph_dir/${benchmark}_report.txt"
                     continue
                 fi
             fi
