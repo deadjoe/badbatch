@@ -343,17 +343,29 @@ run_flamegraph() {
             print_warning "On macOS, flamegraph uses dtrace which may require elevated privileges"
             print_status "If prompted, please enter your password for dtrace access"
             
+            # Set a shorter benchmark time for flamegraph to prevent hanging
+            local bench_args="--bench --sample-size 10 --measurement-time 5"
+            
             # Try without sudo first, fall back to sudo if needed
-            if ! cargo flamegraph --bench "$benchmark" -o "$output_file" -- --bench 2>/dev/null; then
+            print_status "Attempting flame graph generation without sudo..."
+            if timeout 120s cargo flamegraph --bench "$benchmark" -o "$output_file" -- $bench_args 2>/dev/null; then
+                print_success "Flame graph generated without sudo"
+            else
                 print_warning "Retrying with sudo for dtrace access..."
-                if ! sudo cargo flamegraph --bench "$benchmark" -o "$output_file" -- --bench; then
-                    print_error "Failed to generate flame graph for $benchmark"
+                if timeout 120s sudo cargo flamegraph --bench "$benchmark" -o "$output_file" -- $bench_args; then
+                    print_success "Flame graph generated with sudo"
+                else
+                    print_error "Failed to generate flame graph for $benchmark (timeout or permission issue)"
+                    print_status "You may need to:"
+                    echo "  1. Install cargo-flamegraph: cargo install flamegraph"
+                    echo "  2. Grant dtrace permissions or disable SIP temporarily"
+                    echo "  3. Try running the command manually with sudo"
                     continue
                 fi
             fi
         else
             # Linux or other platforms
-            if ! cargo flamegraph --bench "$benchmark" -o "$output_file" -- --bench; then
+            if ! timeout 120s cargo flamegraph --bench "$benchmark" -o "$output_file" -- --bench --sample-size 10; then
                 print_error "Failed to generate flame graph for $benchmark"
                 continue
             fi
