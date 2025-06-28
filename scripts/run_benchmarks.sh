@@ -267,6 +267,132 @@ run_regression() {
     run_benchmark_safe "comprehensive_benchmarks" "Regression test - comprehensive"
 }
 
+# Function to generate flame graphs for performance profiling
+run_flamegraph() {
+    print_status "Generating flame graph profiles..."
+    print_warning "This requires cargo-flamegraph and appropriate profiling tools."
+    
+    # Check if cargo-flamegraph is installed
+    if ! command -v cargo-flamegraph &> /dev/null; then
+        print_error "cargo-flamegraph not found!"
+        echo ""
+        echo "Please install it with:"
+        echo "  cargo install flamegraph"
+        echo ""
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            echo "On macOS, you may also need to install dtrace if not available:"
+            echo "  # dtrace should be available by default on macOS"
+            echo "  # If you encounter permission issues, you may need to:"
+            echo "  # 1. Disable SIP (System Integrity Protection) temporarily, or"
+            echo "  # 2. Use 'sudo' with cargo-flamegraph commands"
+        fi
+        return 1
+    fi
+    
+    # Create flamegraph output directory
+    local flamegraph_dir="flamegraphs"
+    mkdir -p "$flamegraph_dir"
+    
+    # List of benchmarks suitable for flame graph analysis
+    local flame_benchmarks=("comprehensive_benchmarks" "throughput_comparison" "latency_comparison")
+    
+    print_status "Available benchmarks for flame graph analysis:"
+    for i in "${!flame_benchmarks[@]}"; do
+        echo "  $((i+1)). ${flame_benchmarks[i]}"
+    done
+    echo "  a. All benchmarks"
+    echo ""
+    
+    read -p "Select benchmark(s) to profile (number, 'a' for all, or Enter for comprehensive): " choice
+    
+    local selected_benchmarks=()
+    case "$choice" in
+        ""|"1")
+            selected_benchmarks=("comprehensive_benchmarks")
+            ;;
+        "2")
+            selected_benchmarks=("throughput_comparison")
+            ;;
+        "3")
+            selected_benchmarks=("latency_comparison")
+            ;;
+        "a"|"A")
+            selected_benchmarks=("${flame_benchmarks[@]}")
+            ;;
+        *)
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -le "${#flame_benchmarks[@]}" ] && [ "$choice" -gt 0 ]; then
+                selected_benchmarks=("${flame_benchmarks[$((choice-1))]}")
+            else
+                print_error "Invalid selection. Using default (comprehensive_benchmarks)"
+                selected_benchmarks=("comprehensive_benchmarks")
+            fi
+            ;;
+    esac
+    
+    print_status "Profiling selected benchmarks with flame graph generation..."
+    
+    for benchmark in "${selected_benchmarks[@]}"; do
+        print_status "Generating flame graph for: $benchmark"
+        
+        local output_file="$flamegraph_dir/${benchmark}_flamegraph.svg"
+        local start_time=$(date +%s)
+        
+        # Run flamegraph with appropriate flags for benchmarks
+        # Note: On macOS, this might require sudo for dtrace access
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            print_warning "On macOS, flamegraph uses dtrace which may require elevated privileges"
+            print_status "If prompted, please enter your password for dtrace access"
+            
+            # Try without sudo first, fall back to sudo if needed
+            if ! cargo flamegraph --bench "$benchmark" -o "$output_file" -- --bench 2>/dev/null; then
+                print_warning "Retrying with sudo for dtrace access..."
+                if ! sudo cargo flamegraph --bench "$benchmark" -o "$output_file" -- --bench; then
+                    print_error "Failed to generate flame graph for $benchmark"
+                    continue
+                fi
+            fi
+        else
+            # Linux or other platforms
+            if ! cargo flamegraph --bench "$benchmark" -o "$output_file" -- --bench; then
+                print_error "Failed to generate flame graph for $benchmark"
+                continue
+            fi
+        fi
+        
+        local end_time=$(date +%s)
+        local duration=$((end_time - start_time))
+        
+        if [ -f "$output_file" ]; then
+            print_success "Flame graph generated: $output_file (took ${duration}s)"
+            
+            # Try to open the flame graph automatically
+            if command -v open &> /dev/null; then
+                print_status "Opening flame graph in default browser..."
+                open "$output_file"
+            elif command -v xdg-open &> /dev/null; then
+                print_status "Opening flame graph in default browser..."
+                xdg-open "$output_file"
+            else
+                print_status "Flame graph saved. Open manually: $output_file"
+            fi
+        else
+            print_error "Flame graph file not created for $benchmark"
+        fi
+        
+        echo ""
+    done
+    
+    print_success "Flame graph generation completed!"
+    print_status "Flame graphs saved in: $flamegraph_dir/"
+    echo ""
+    echo "🔥 Flame Graph Analysis Tips:"
+    echo "  • Wider bars = more CPU time spent"
+    echo "  • Click on functions to zoom in"
+    echo "  • Look for unexpected wide bars (hot spots)"
+    echo "  • Search function names using Ctrl+F"
+    echo "  • Colors are random and don't indicate performance"
+}
+
 # Function to optimize system for benchmarking
 optimize_system() {
     print_status "Applying system optimizations for benchmarking..."
@@ -346,6 +472,7 @@ show_help() {
     echo "  all        Run ALL benchmark suites (30-60 minutes)"
     echo "  report     Generate HTML benchmark reports"
     echo "  regression Run performance regression test"
+    echo "  flamegraph Generate flame graphs for performance profiling"
     echo "  compile    Compile all benchmarks without running"
     echo "  optimize   Optimize system for benchmarking (requires sudo)"
     echo "  help       Show this help message"
@@ -359,6 +486,7 @@ show_help() {
     echo "Examples:"
     echo "  $0 quick                    # Quick development test (recommended)"
     echo "  $0 spsc                     # Test SPSC performance"
+    echo "  $0 flamegraph               # Generate flame graphs for profiling"
     echo "  $0 compile                  # Check if all benchmarks compile"
     echo "  $0 optimize && $0 all       # Optimize system then run all tests"
     echo ""
@@ -416,6 +544,9 @@ main() {
         regression)
             check_dependencies
             run_regression
+            ;;
+        flamegraph)
+            run_flamegraph
             ;;
         compile)
             compile_all

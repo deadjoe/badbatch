@@ -376,7 +376,7 @@ pub fn fixed_spsc_benchmark(c: &mut Criterion) {
     group.sample_size(20);
 
     // Reduced test matrix to prevent timeouts while maintaining coverage
-    let test_burst_sizes = [1, 100]; // Only test smallest and medium burst sizes
+    let test_burst_sizes = [100, 1000]; // Standardized burst sizes for consistency
     let test_pause_ms = [0]; // Only test without pause to minimize combinations
 
     for &burst_size in test_burst_sizes.iter() {

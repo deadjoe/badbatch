@@ -14,7 +14,20 @@ extract_performance_data() {
     fi
     
     # Extract key metrics with better regex patterns
-    local throughput=$(grep -E "thrpt:" "$log_file" | head -1 | sed -E 's/.*\[([0-9.]+) [A-Za-z]*elem\/s.*/\1/')
+    local throughput_line=$(grep -E "thrpt:" "$log_file" | head -1)
+    local throughput=""
+    local throughput_unit=""
+    
+    # Extract throughput value and unit separately
+    if [ -n "$throughput_line" ]; then
+        throughput=$(echo "$throughput_line" | sed -E 's/.*\[([0-9.]+) [A-Za-z]*elem\/s.*/\1/')
+        throughput_unit=$(echo "$throughput_line" | sed -E 's/.*\[([0-9.]+) ([A-Za-z]*)elem\/s.*/\2elem\/s/')
+        # Handle case where no unit prefix is present
+        if [ "$throughput_unit" = "elem/s" ]; then
+            throughput_unit="elem/s"
+        fi
+    fi
+    
     local latency_line=$(grep -E "time:" "$log_file" | head -1)
     local latency=""
     local latency_unit=""
@@ -30,18 +43,36 @@ extract_performance_data() {
         latency=$(echo "$latency_line" | sed -E 's/.*\[([0-9.]+) ms.*/\1/')
         latency_unit="ms"
     elif echo "$latency_line" | grep -q "ps"; then
-        # Handle picosecond case (typically 0.0000 ps)
-        latency="~0"
-        latency_unit="ns"
+        # Handle picosecond case - preserve precision
+        latency=$(echo "$latency_line" | sed -E 's/.*\[([0-9.]+) ps.*/\1/')
+        latency_unit="ps"
     fi
     
     local samples=$(grep -E "Collecting [0-9]+ samples" "$log_file" | head -1 | sed -E 's/.*Collecting ([0-9]+) samples.*/\1/')
     local iterations_line=$(grep -E "samples in estimated.*iterations" "$log_file" | head -1)
-    local iterations=$(echo "$iterations_line" | sed -E 's/.*\(([0-9.]+[KMGTB]?) iterations\).*/\1/')
+    local iterations=""
     
-    # If regex didn't match, try a more flexible approach
-    if [ "$iterations" = "$iterations_line" ] || [ -z "$iterations" ]; then
-        iterations=$(echo "$iterations_line" | sed -E 's/.*\(([^)]+) iterations\).*/\1/' | sed -E 's/^([0-9.]+[KMGTB]?).*$/\1/')
+    # Improved iterations parsing with better error handling
+    if [ -n "$iterations_line" ]; then
+        # Try multiple patterns to extract iterations
+        iterations=$(echo "$iterations_line" | sed -E 's/.*\(([0-9.]+[KMGTB]?) iterations\).*/\1/' 2>/dev/null)
+        
+        # If first pattern failed, try more flexible patterns
+        if [ "$iterations" = "$iterations_line" ] || [ -z "$iterations" ]; then
+            iterations=$(echo "$iterations_line" | sed -E 's/.*\(([0-9.]+[KMGTBkmgtb]*) iterations\).*/\1/' 2>/dev/null)
+        fi
+        
+        # If still no match, try extracting just the number part
+        if [ "$iterations" = "$iterations_line" ] || [ -z "$iterations" ]; then
+            iterations=$(echo "$iterations_line" | grep -oE '[0-9.]+[KMGTBkmgtb]*' | head -1)
+        fi
+        
+        # If all else fails, mark as unknown
+        if [ -z "$iterations" ] || [ "$iterations" = "$iterations_line" ]; then
+            iterations="Unknown"
+        fi
+    else
+        iterations="N/A"
     fi
     
     # Clean up benchmark name for display
@@ -58,7 +89,7 @@ extract_performance_data() {
     esac
     
     # Return structured data
-    echo "$display_name|${throughput:-N/A}|${latency:-N/A}|${latency_unit:-}|${samples:-N/A}|${iterations:-N/A}"
+    echo "$display_name|${throughput:-N/A}|${throughput_unit:-elem/s}|${latency:-N/A}|${latency_unit:-}|${samples:-N/A}|${iterations:-N/A}"
 }
 
 # Function to display benchmark results in clean list format
@@ -81,14 +112,15 @@ display_results_table() {
                 # Parse the structured data
                 local display_name=$(echo "$result_data" | cut -d'|' -f1)
                 local throughput=$(echo "$result_data" | cut -d'|' -f2)
-                local latency=$(echo "$result_data" | cut -d'|' -f3)
-                local latency_unit=$(echo "$result_data" | cut -d'|' -f4)
-                local samples=$(echo "$result_data" | cut -d'|' -f5)
-                local iterations=$(echo "$result_data" | cut -d'|' -f6)
+                local throughput_unit=$(echo "$result_data" | cut -d'|' -f3)
+                local latency=$(echo "$result_data" | cut -d'|' -f4)
+                local latency_unit=$(echo "$result_data" | cut -d'|' -f5)
+                local samples=$(echo "$result_data" | cut -d'|' -f6)
+                local iterations=$(echo "$result_data" | cut -d'|' -f7)
                 
                 echo ""
                 echo "🎯 $display_name"
-                echo "   📈 Throughput: ${throughput} Melem/s"
+                echo "   📈 Throughput: ${throughput} ${throughput_unit}"
                 if [ "$latency" != "N/A" ] && [ -n "$latency_unit" ]; then
                     echo "   ⏱️  Latency: ${latency} ${latency_unit}"
                 fi
@@ -145,17 +177,32 @@ display_single_benchmark_results() {
     # Performance assessment
     echo ""
     echo "🔍 Performance Assessment:"
-    local throughput=$(grep -E "thrpt:" "$log_file" | head -1 | sed -E 's/.*\[([0-9.]+) [A-Za-z]+elem\/s.*/\1/' | head -1)
-    if [ -n "$throughput" ]; then
+    local throughput_line=$(grep -E "thrpt:" "$log_file" | head -1)
+    if [ -n "$throughput_line" ]; then
+        local throughput=$(echo "$throughput_line" | sed -E 's/.*\[([0-9.]+) [A-Za-z]*elem\/s.*/\1/')
+        local throughput_unit=$(echo "$throughput_line" | sed -E 's/.*\[([0-9.]+) ([A-Za-z]*)elem\/s.*/\2elem\/s/')
+        if [ "$throughput_unit" = "elem/s" ]; then
+            throughput_unit="elem/s"
+        fi
+        
         local throughput_int=$(echo "$throughput" | cut -d. -f1)
-        if [ "$throughput_int" -gt 10 ]; then
-            echo "  🟢 Excellent throughput (${throughput} Melem/s)"
-        elif [ "$throughput_int" -gt 5 ]; then
-            echo "  🟡 Good throughput (${throughput} Melem/s)"
-        elif [ "$throughput_int" -gt 1 ]; then
-            echo "  🟠 Moderate throughput (${throughput} Melem/s)"
+        # Adjust thresholds based on unit
+        local threshold_multiplier=1
+        case "$throughput_unit" in
+            "Melem/s") threshold_multiplier=1 ;;
+            "Kelem/s") threshold_multiplier=1000 ;;
+            "elem/s") threshold_multiplier=1000000 ;;
+        esac
+        
+        local effective_throughput=$((throughput_int * threshold_multiplier))
+        if [ "$effective_throughput" -gt 10000000 ]; then
+            echo "  🟢 Excellent throughput (${throughput} ${throughput_unit})"
+        elif [ "$effective_throughput" -gt 5000000 ]; then
+            echo "  🟡 Good throughput (${throughput} ${throughput_unit})"
+        elif [ "$effective_throughput" -gt 1000000 ]; then
+            echo "  🟠 Moderate throughput (${throughput} ${throughput_unit})"
         else
-            echo "  🔴 Low throughput (${throughput} Melem/s)"
+            echo "  🔴 Low throughput (${throughput} ${throughput_unit})"
         fi
     fi
     
@@ -185,19 +232,33 @@ generate_summary_report() {
     for benchmark in "${successful_benchmarks[@]}"; do
         local log_file="$log_dir/${benchmark}.log"
         if [ -f "$log_file" ]; then
-            local throughput=$(grep -E "thrpt:" "$log_file" | head -1 | sed -E 's/.*\[([0-9.]+) [A-Za-z]+elem\/s.*/\1/' | head -1)
-            if [ -n "$throughput" ]; then
+            local throughput_line=$(grep -E "thrpt:" "$log_file" | head -1)
+            if [ -n "$throughput_line" ]; then
+                local throughput=$(echo "$throughput_line" | sed -E 's/.*\[([0-9.]+) [A-Za-z]*elem\/s.*/\1/')
+                local throughput_unit=$(echo "$throughput_line" | sed -E 's/.*\[([0-9.]+) ([A-Za-z]*)elem\/s.*/\2elem\/s/')
+                if [ "$throughput_unit" = "elem/s" ]; then
+                    throughput_unit="elem/s"
+                fi
+                
                 local throughput_int=$(echo "$throughput" | cut -d. -f1)
-                if [ "$throughput_int" -gt "$best_throughput" ]; then
-                    best_throughput=$throughput_int
-                    best_benchmark=$benchmark
+                # Convert to common base unit for comparison
+                local normalized_throughput=$throughput_int
+                case "$throughput_unit" in
+                    "Melem/s") normalized_throughput=$((throughput_int * 1000000)) ;;
+                    "Kelem/s") normalized_throughput=$((throughput_int * 1000)) ;;
+                    "elem/s") normalized_throughput=$throughput_int ;;
+                esac
+                
+                if [ "$normalized_throughput" -gt "$best_throughput" ]; then
+                    best_throughput=$normalized_throughput
+                    best_benchmark="$benchmark (${throughput} ${throughput_unit})"
                 fi
             fi
         fi
     done
     
     if [ -n "$best_benchmark" ]; then
-        echo "  🥇 Best Performance: $best_benchmark (${best_throughput}+ Melem/s)"
+        echo "  🥇 Best Performance: $best_benchmark"
     fi
     
     # System info

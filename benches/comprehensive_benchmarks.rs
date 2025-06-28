@@ -95,7 +95,7 @@ mod fixed_benchmarks {
             return;
         }
 
-        for burst_size in [10, 100].iter() {
+        for burst_size in [100, 1000].iter() {
             let benchmark_id = BenchmarkId::new("burst", burst_size);
             group.throughput(Throughput::Elements(*burst_size));
 
@@ -162,7 +162,7 @@ mod fixed_benchmarks {
                 }
 
                 b.iter_custom(|iters| {
-                    let events_per_iter = 50;
+                    let events_per_iter = 100;
                     let start = Instant::now();
 
                     for _ in 0..iters {
@@ -264,7 +264,7 @@ pub fn channel_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("Channel_Baseline");
     group.measurement_time(Duration::from_secs(3));
 
-    for burst_size in [10, 100].iter() {
+    for burst_size in [100, 1000].iter() {
         let benchmark_id = criterion::BenchmarkId::new("std_mpsc", burst_size);
 
         group.bench_function(benchmark_id, |b| {
