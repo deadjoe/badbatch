@@ -340,54 +340,61 @@ run_flamegraph() {
         # Clean up any existing trace files to prevent conflicts
         rm -rf cargo-flamegraph.trace *.trace 2>/dev/null || true
         
-        # Run flamegraph with appropriate flags for benchmarks  
-        # Note: On macOS, cargo-flamegraph uses Instruments which has different behavior
+        # Run flamegraph with appropriate tools for each platform
         if [[ "$OSTYPE" == "darwin"* ]]; then
-            print_warning "On macOS, cargo-flamegraph uses Instruments (Time Profiler)"
-            print_status "This may require Developer Tools and proper permissions"
+            print_status "Detected macOS - using samply for flame graph generation"
             
-            # Set a shorter benchmark time for flamegraph to prevent hanging
-            local bench_args="--bench --sample-size 5 --measurement-time 3"
+            # Check if samply is installed
+            if ! command -v samply &> /dev/null; then
+                print_error "samply not found! Please install it with:"
+                echo "  cargo install samply"
+                echo ""
+                print_status "samply is the recommended profiler for macOS (no SIP issues)"
+                continue
+            fi
             
-            # For macOS, try a different approach - use perf profiler instead of instruments
-            print_status "Attempting flame graph generation with simplified profiling..."
+            # Set a shorter benchmark time for profiling
+            local bench_args="--bench --sample-size 10 --measurement-time 5"
             
-            # Try using DTrace profiler which works better on macOS
-            if timeout 60s cargo flamegraph --dev --bench "$benchmark" -o "$output_file" -- $bench_args 2>&1; then
-                print_success "Flame graph generated successfully"
+            print_status "Using samply to generate flame graph (SIP-compatible)..."
+            
+            # Use samply record with flame graph output
+            local samply_output="${output_file%.svg}"
+            if timeout 90s samply record --rate 997 --output "$samply_output.json" cargo bench --bench "$benchmark" -- $bench_args; then
+                
+                # Convert samply output to flame graph SVG
+                if samply flamegraph "$samply_output.json" --output "$output_file"; then
+                    print_success "Flame graph generated with samply: $output_file"
+                    
+                    # Clean up intermediate files
+                    rm -f "$samply_output.json" 2>/dev/null || true
+                else
+                    print_warning "samply flamegraph conversion failed, trying alternative..."
+                    
+                    # Alternative: use samply's built-in viewer
+                    local html_output="${output_file%.svg}.html"
+                    if samply load "$samply_output.json" --output "$html_output"; then
+                        print_success "Performance profile generated: $html_output"
+                        output_file="$html_output"
+                    else
+                        print_error "Failed to convert samply output"
+                        continue
+                    fi
+                fi
             else
                 local exit_code=$?
-                print_warning "Standard approach failed (exit code: $exit_code), trying alternative method..."
-                
-                # Clean up any partial trace files
-                rm -rf cargo-flamegraph.trace *.trace 2>/dev/null || true
-                
-                # Alternative: try with sudo and different profiler
-                print_status "Trying with elevated privileges..."
-                if timeout 60s sudo cargo flamegraph --dev --bench "$benchmark" -o "$output_file" -- $bench_args; then
-                    print_success "Flame graph generated with sudo"
+                if [ $exit_code -eq 124 ]; then
+                    print_error "samply profiling timed out after 90 seconds"
                 else
-                    exit_code=$?
-                    print_error "Failed to generate flame graph for $benchmark"
-                    
-                    # Provide macOS-specific troubleshooting
-                    print_status "macOS Troubleshooting:"
-                    echo "  1. Install Xcode Command Line Tools: xcode-select --install"
-                    echo "  2. Ensure Developer Mode is enabled in System Preferences"
-                    echo "  3. Try disabling SIP temporarily (advanced users only)"
-                    echo "  4. Alternative: Use Instruments.app manually for profiling"
-                    echo "  5. Manual command: sudo cargo flamegraph --dev --bench $benchmark"
-                    
-                    # Create a simple alternative report
-                    print_status "Creating basic performance report instead..."
-                    echo "# Benchmark Performance Report" > "$flamegraph_dir/${benchmark}_report.txt"
-                    echo "Generated on: $(date)" >> "$flamegraph_dir/${benchmark}_report.txt"
-                    echo "Platform: macOS ($(uname -m))" >> "$flamegraph_dir/${benchmark}_report.txt"
-                    echo "" >> "$flamegraph_dir/${benchmark}_report.txt"
-                    echo "Note: Flame graph generation failed. Use Instruments.app for detailed profiling." >> "$flamegraph_dir/${benchmark}_report.txt"
-                    print_status "Basic report created: $flamegraph_dir/${benchmark}_report.txt"
-                    continue
+                    print_error "samply profiling failed (exit code: $exit_code)"
                 fi
+                
+                print_status "Troubleshooting samply issues:"
+                echo "  1. Ensure samply is up to date: cargo install --force samply"
+                echo "  2. Try with smaller benchmark: --sample-size 5 --measurement-time 3"
+                echo "  3. Manual command: samply record cargo bench --bench $benchmark"
+                echo "  4. Check samply documentation: https://github.com/mstange/samply"
+                continue
             fi
         else
             # Linux or other platforms
@@ -510,7 +517,7 @@ show_help() {
     echo "  all        Run ALL benchmark suites (30-60 minutes)"
     echo "  report     Generate HTML benchmark reports"
     echo "  regression Run performance regression test"
-    echo "  flamegraph Generate flame graphs for performance profiling"
+    echo "  flamegraph Generate flame graphs for performance profiling (uses samply on macOS)"
     echo "  compile    Compile all benchmarks without running"
     echo "  optimize   Optimize system for benchmarking (requires sudo)"
     echo "  help       Show this help message"

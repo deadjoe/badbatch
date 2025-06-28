@@ -187,12 +187,25 @@ cargo bench --bench buffer_size_scaling
 Flame graphs provide detailed CPU profiling visualization to identify performance bottlenecks and hot paths in the code. The integrated flame graph functionality helps pinpoint exactly where CPU time is being spent.
 
 ### Prerequisites
-```bash
-# Install cargo-flamegraph (required)
-cargo install flamegraph
 
-# macOS: dtrace is included by default
-# May require sudo permissions for dtrace access
+#### For macOS (Recommended)
+```bash
+# Install samply - modern profiler that works with SIP enabled
+cargo install samply
+# No additional setup required - works out of the box!
+```
+
+#### For Linux/Other Platforms
+```bash
+# Install cargo-flamegraph (traditional approach)
+cargo install flamegraph
+```
+
+#### Legacy macOS Setup (if samply doesn't work)
+```bash
+# Install cargo-flamegraph
+cargo install flamegraph
+# Note: May require disabling SIP or special dtrace permissions
 ```
 
 ### Usage
@@ -227,9 +240,10 @@ cargo install flamegraph
 4. **Regression Analysis**: Compare flame graphs before/after changes
 
 ### macOS Considerations
-- Requires dtrace access (may prompt for password)
-- Script automatically handles permission escalation
-- No additional system optimization needed on macOS
+- **Uses samply by default** - no SIP or dtrace issues
+- **No special permissions required** - works out of the box
+- **Fallback options** available if samply fails
+- **Multiple output formats** - SVG flame graphs or interactive HTML profiles
 
 ## Benchmark Configuration
 
