@@ -267,155 +267,6 @@ run_regression() {
     run_benchmark_safe "comprehensive_benchmarks" "Regression test - comprehensive"
 }
 
-# Function to generate flame graphs for performance profiling
-run_flamegraph() {
-    print_status "Generating flame graph profiles..."
-    
-    # Check platform and provide initial guidance
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        print_status "macOS detected - using samply (SIP-compatible profiler)"
-    else
-        print_status "Linux/Other platform detected - using cargo-flamegraph"
-    fi
-    
-    # Create flamegraph output directory
-    local flamegraph_dir="flamegraphs"
-    mkdir -p "$flamegraph_dir"
-    
-    # List of benchmarks suitable for flame graph analysis
-    local flame_benchmarks=("comprehensive_benchmarks" "single_producer_single_consumer" "multi_producer_single_consumer" "pipeline_processing" "latency_comparison" "throughput_comparison" "buffer_size_scaling")
-    
-    print_status "Available benchmarks for flame graph analysis:"
-    for i in "${!flame_benchmarks[@]}"; do
-        echo "  $((i+1)). ${flame_benchmarks[i]}"
-    done
-    echo "  a. All benchmarks"
-    echo ""
-    
-    read -p "Select benchmark(s) to profile (number, 'a' for all, or Enter for comprehensive): " choice
-    
-    local selected_benchmarks=()
-    case "$choice" in
-        ""|"1")
-            selected_benchmarks=("comprehensive_benchmarks")
-            ;;
-        "2")
-            selected_benchmarks=("throughput_comparison")
-            ;;
-        "3")
-            selected_benchmarks=("latency_comparison")
-            ;;
-        "a"|"A")
-            selected_benchmarks=("${flame_benchmarks[@]}")
-            ;;
-        *)
-            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -le "${#flame_benchmarks[@]}" ] && [ "$choice" -gt 0 ]; then
-                selected_benchmarks=("${flame_benchmarks[$((choice-1))]}")
-            else
-                print_error "Invalid selection. Using default (comprehensive_benchmarks)"
-                selected_benchmarks=("comprehensive_benchmarks")
-            fi
-            ;;
-    esac
-    
-    print_status "Profiling selected benchmarks with flame graph generation..."
-    
-    for benchmark in "${selected_benchmarks[@]}"; do
-        print_status "Generating flame graph for: $benchmark"
-        
-        local output_file="$flamegraph_dir/${benchmark}_flamegraph.svg"
-        local start_time=$(date +%s)
-        
-        # Clean up any existing trace files to prevent conflicts (cargo-flamegraph specific)
-        if [[ "$OSTYPE" != "darwin"* ]]; then
-            rm -rf cargo-flamegraph.trace *.trace 2>/dev/null || true
-        fi
-        
-        # Run flamegraph with appropriate tools for each platform
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            # Set full benchmark parameters (same as 'all' command for consistency)
-            local bench_args=""
-            
-            # Use samply record with flame graph output
-            local samply_output="${output_file%.svg}"
-            if timeout 120s samply record --rate 997 --output "$samply_output.json" cargo bench --bench "$benchmark" -- $bench_args; then
-                
-                # Use samply load to view the profile (opens in browser)
-                print_success "Profiling data recorded: $samply_output.json"
-                print_status "Opening samply profile viewer..."
-                
-                # samply load opens the profile in a web browser
-                print_status "Starting samply profile viewer..."
-                samply load "$samply_output.json" &
-                local samply_pid=$!
-                print_success "Samply profile viewer opened in browser (PID: $samply_pid)"
-                print_status "Samply server running at http://127.0.0.1:3000"
-                print_status "Profile data saved: $samply_output.json"
-                print_status "Press Ctrl+C to stop samply server when finished analyzing"
-                
-                # Set up signal handler for clean shutdown
-                trap "echo ''; print_status 'Stopping samply server...'; kill $samply_pid 2>/dev/null; exit 0" INT
-                
-                # Wait for user to press Ctrl+C
-                wait $samply_pid 2>/dev/null
-                output_file="$samply_output.json"
-            else
-                local exit_code=$?
-                if [ $exit_code -eq 124 ]; then
-                    print_error "samply profiling timed out after 120 seconds"
-                else
-                    print_error "samply profiling failed (exit code: $exit_code)"
-                fi
-                
-                print_status "Troubleshooting samply issues:"
-                echo "  1. Ensure samply is up to date: cargo install --force samply"
-                echo "  2. Try with smaller benchmark: --sample-size 5 --measurement-time 3"
-                echo "  3. Manual command: samply record cargo bench --bench $benchmark"
-                echo "  4. Check samply documentation: https://github.com/mstange/samply"
-                continue
-            fi
-        else
-            # Linux or other platforms - use cargo-flamegraph
-            print_status "Using cargo-flamegraph for Linux platform"
-            if ! timeout 120s cargo flamegraph --bench "$benchmark" -o "$output_file"; then
-                print_error "Failed to generate flame graph for $benchmark"
-                continue
-            fi
-        fi
-        
-        local end_time=$(date +%s)
-        local duration=$((end_time - start_time))
-        
-        if [ -f "$output_file" ]; then
-            print_success "Flame graph generated: $output_file (took ${duration}s)"
-            
-            # Try to open the flame graph automatically
-            if command -v open &> /dev/null; then
-                print_status "Opening flame graph in default browser..."
-                open "$output_file"
-            elif command -v xdg-open &> /dev/null; then
-                print_status "Opening flame graph in default browser..."
-                xdg-open "$output_file"
-            else
-                print_status "Flame graph saved. Open manually: $output_file"
-            fi
-        else
-            print_error "Flame graph file not created for $benchmark"
-        fi
-        
-        echo ""
-    done
-    
-    print_success "Flame graph generation completed!"
-    print_status "Flame graphs saved in: $flamegraph_dir/"
-    echo ""
-    echo "🔥 Flame Graph Analysis Tips:"
-    echo "  • Wider bars = more CPU time spent"
-    echo "  • Click on functions to zoom in"
-    echo "  • Look for unexpected wide bars (hot spots)"
-    echo "  • Search function names using Ctrl+F"
-    echo "  • Colors are random and don't indicate performance"
-}
 
 # Function to optimize system for benchmarking
 optimize_system() {
@@ -496,7 +347,7 @@ show_help() {
     echo "  all        Run ALL benchmark suites (30-60 minutes)"
     echo "  report     Generate HTML benchmark reports"
     echo "  regression Run performance regression test"
-    echo "  flamegraph Generate flame graphs for performance profiling (uses samply on macOS)"
+    echo ""
     echo "  compile    Compile all benchmarks without running"
     echo "  optimize   Optimize system for benchmarking (requires sudo)"
     echo "  help       Show this help message"
@@ -510,7 +361,7 @@ show_help() {
     echo "Examples:"
     echo "  $0 quick                    # Quick development test (recommended)"
     echo "  $0 spsc                     # Test SPSC performance"
-    echo "  $0 flamegraph               # Generate flame graphs for profiling"
+    echo ""
     echo "  $0 compile                  # Check if all benchmarks compile"
     echo "  $0 optimize && $0 all       # Optimize system then run all tests"
     echo ""
@@ -568,9 +419,6 @@ main() {
         regression)
             check_dependencies
             run_regression
-            ;;
-        flamegraph)
-            run_flamegraph
             ;;
         compile)
             compile_all
