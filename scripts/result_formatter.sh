@@ -120,7 +120,9 @@ display_results_table() {
                 
                 echo ""
                 echo "🎯 $display_name"
-                echo "   📈 Throughput: ${throughput} ${throughput_unit}"
+                if [ "$throughput" != "N/A" ] && [ -n "$throughput_unit" ]; then
+                    echo "   📈 Throughput: ${throughput} ${throughput_unit}"
+                fi
                 if [ "$latency" != "N/A" ] && [ -n "$latency_unit" ]; then
                     echo "   ⏱️  Latency: ${latency} ${latency_unit}"
                 fi
@@ -187,19 +189,30 @@ display_single_benchmark_results() {
         
         local throughput_int=$(echo "$throughput" | cut -d. -f1)
         # Adjust thresholds based on unit
-        local threshold_multiplier=1
+        # Convert to elements per second for comparison
+        local elements_per_second=0
         case "$throughput_unit" in
-            "Melem/s") threshold_multiplier=1 ;;
-            "Kelem/s") threshold_multiplier=1000 ;;
-            "elem/s") threshold_multiplier=1000000 ;;
+            "Gelem/s")
+                elements_per_second=$(echo "$throughput * 1000000000" | bc -l 2>/dev/null || echo "$((${throughput%.*} * 1000000000))")
+                ;;
+            "Melem/s")
+                elements_per_second=$(echo "$throughput * 1000000" | bc -l 2>/dev/null || echo "$((${throughput%.*} * 1000000))")
+                ;;
+            "Kelem/s")
+                elements_per_second=$(echo "$throughput * 1000" | bc -l 2>/dev/null || echo "$((${throughput%.*} * 1000))")
+                ;;
+            "elem/s")
+                elements_per_second=${throughput%.*}
+                ;;
         esac
         
-        local effective_throughput=$((throughput_int * threshold_multiplier))
-        if [ "$effective_throughput" -gt 10000000 ]; then
+        # Use scientific notation compatible thresholds
+        local eps_int=${elements_per_second%.*}
+        if [ "$eps_int" -gt 1000000000 ]; then
             echo "  🟢 Excellent throughput (${throughput} ${throughput_unit})"
-        elif [ "$effective_throughput" -gt 5000000 ]; then
+        elif [ "$eps_int" -gt 100000000 ]; then
             echo "  🟡 Good throughput (${throughput} ${throughput_unit})"
-        elif [ "$effective_throughput" -gt 1000000 ]; then
+        elif [ "$eps_int" -gt 10000000 ]; then
             echo "  🟠 Moderate throughput (${throughput} ${throughput_unit})"
         else
             echo "  🔴 Low throughput (${throughput} ${throughput_unit})"
@@ -242,8 +255,9 @@ generate_summary_report() {
                 
                 local throughput_int=$(echo "$throughput" | cut -d. -f1)
                 # Convert to common base unit for comparison
-                local normalized_throughput=$throughput_int
+                local normalized_throughput=0
                 case "$throughput_unit" in
+                    "Gelem/s") normalized_throughput=$(echo "$throughput_int * 1000000000" | bc -l 2>/dev/null || echo "$((throughput_int * 1000000000))") ;;
                     "Melem/s") normalized_throughput=$((throughput_int * 1000000)) ;;
                     "Kelem/s") normalized_throughput=$((throughput_int * 1000)) ;;
                     "elem/s") normalized_throughput=$throughput_int ;;
