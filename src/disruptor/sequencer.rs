@@ -512,9 +512,9 @@ impl MultiProducerSequencer {
         // Initialize bitmap for availability tracking if buffer is large enough
         // For smaller buffers, we'll use an empty bitmap and fall back to legacy method
         let available_bitmap = if buffer_size >= 64 {
-            let bitmap_size = buffer_size / 64; // Each AtomicU64 tracks 64 slots
+            let bitmap_size = (buffer_size + 63) / 64; // Each AtomicU64 tracks 64 slots, round up
             let bitmap: Box<[AtomicU64]> = (0..bitmap_size)
-                .map(|_| AtomicU64::new(!0_u64)) // Initialize with all 1's (nothing published initially)
+                .map(|_| AtomicU64::new(0_u64)) // Initialize with all 0's (nothing published initially)
                 .collect();
             bitmap
         } else {
@@ -569,10 +569,11 @@ impl MultiProducerSequencer {
         let flag = self.calculate_availability_flag(sequence);
         self.available_buffer[index].store(flag, Ordering::Release);
 
+        // TODO: Bitmap method temporarily disabled for MPSC fix
         // New bitmap method (inspired by disruptor-rs) - only for large buffers
-        if self.buffer_size >= 64 && !self.available_bitmap.is_empty() {
-            self.publish_bitmap(sequence);
-        }
+        // if self.buffer_size >= 64 && !self.available_bitmap.is_empty() {
+        //     self.publish_bitmap(sequence);
+        // }
     }
 
     /// Publish using bitmap method (inspired by disruptor-rs)
@@ -580,18 +581,45 @@ impl MultiProducerSequencer {
         let (availability_index, bit_index) = self.calculate_availability_indices(sequence);
         if availability_index < self.available_bitmap.len() {
             let availability = self.availability_at(availability_index);
-            let mask = 1 << bit_index;
-            // XOR operation flips the bit to encode even/odd round publication
-            availability.fetch_xor(mask, Ordering::Release);
+            let mask = 1_u64 << bit_index;
+            // Set the bit to indicate this sequence is published
+            availability.fetch_or(mask, Ordering::Release);
+        }
+    }
+
+    /// Check if a sequence is available using bitmap method (inspired by disruptor-rs)
+    fn is_bitmap_available(&self, sequence: i64) -> bool {
+        let (availability_index, bit_index) = self.calculate_availability_indices(sequence);
+        if availability_index < self.available_bitmap.len() {
+            let availability = self.availability_at(availability_index);
+            let current_value = availability.load(Ordering::Acquire);
+            let mask = 1_u64 << bit_index;
+            // Check if the bit is set (sequence is published)
+            (current_value & mask) != 0
+        } else {
+            false
         }
     }
 
     /// Check if a sequence is available for consumption
     /// This matches the LMAX Disruptor isAvailable method with proper flag checking
+    /// Temporarily using only legacy method for MPSC stability fix
     fn is_available_internal(&self, sequence: i64) -> bool {
+        // Use only legacy method for now to ensure consistency
         let index = self.calculate_index(sequence);
         let flag = self.calculate_availability_flag(sequence);
         self.available_buffer[index].load(Ordering::Acquire) == flag
+        
+        // TODO: Re-enable bitmap checking after proper round-robin implementation
+        // For large buffers, also check bitmap method
+        // if self.buffer_size >= 64 && !self.available_bitmap.is_empty() {
+        //     let bitmap_available = self.is_bitmap_available(sequence);
+        //     // Both methods must agree that the sequence is available
+        //     legacy_available && bitmap_available
+        // } else {
+        //     // For small buffers, only use legacy method
+        //     legacy_available
+        // }
     }
 
     /// Check if there's available capacity for the required number of sequences
