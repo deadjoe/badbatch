@@ -22,7 +22,7 @@ use badbatch::disruptor::{
 const SMALL_BUFFER: usize = 256;
 const MEDIUM_BUFFER: usize = 1024;
 const LARGE_BUFFER: usize = 4096;
-const THROUGHPUT_EVENTS: u64 = 5_000; // Reduced from 10_000 to improve speed
+const THROUGHPUT_EVENTS: u64 = 10_000; // Standardized event count for consistent measurement
 
 #[derive(Debug, Default, Clone, Copy)]
 struct ThroughputEvent {
@@ -301,8 +301,8 @@ pub fn throughput_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("Throughput");
 
     // Configure benchmark group for throughput measurement
-    group.measurement_time(Duration::from_secs(15));
-    group.warm_up_time(Duration::from_secs(5));
+    group.measurement_time(Duration::from_secs(10));
+    group.warm_up_time(Duration::from_secs(3));
 
     // Test different buffer sizes
     let buffer_sizes = [SMALL_BUFFER, MEDIUM_BUFFER, LARGE_BUFFER];
