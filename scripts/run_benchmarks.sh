@@ -270,23 +270,12 @@ run_regression() {
 # Function to generate flame graphs for performance profiling
 run_flamegraph() {
     print_status "Generating flame graph profiles..."
-    print_warning "This requires cargo-flamegraph and appropriate profiling tools."
     
-    # Check if cargo-flamegraph is installed
-    if ! command -v cargo-flamegraph &> /dev/null; then
-        print_error "cargo-flamegraph not found!"
-        echo ""
-        echo "Please install it with:"
-        echo "  cargo install flamegraph"
-        echo ""
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            echo "On macOS, you may also need to install dtrace if not available:"
-            echo "  # dtrace should be available by default on macOS"
-            echo "  # If you encounter permission issues, you may need to:"
-            echo "  # 1. Disable SIP (System Integrity Protection) temporarily, or"
-            echo "  # 2. Use 'sudo' with cargo-flamegraph commands"
-        fi
-        return 1
+    # Check platform and provide initial guidance
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        print_status "macOS detected - using samply (SIP-compatible profiler)"
+    else
+        print_status "Linux/Other platform detected - using cargo-flamegraph"
     fi
     
     # Create flamegraph output directory
@@ -294,7 +283,7 @@ run_flamegraph() {
     mkdir -p "$flamegraph_dir"
     
     # List of benchmarks suitable for flame graph analysis
-    local flame_benchmarks=("comprehensive_benchmarks" "throughput_comparison" "latency_comparison")
+    local flame_benchmarks=("comprehensive_benchmarks" "single_producer_single_consumer" "multi_producer_single_consumer" "pipeline_processing" "latency_comparison" "throughput_comparison" "buffer_size_scaling")
     
     print_status "Available benchmarks for flame graph analysis:"
     for i in "${!flame_benchmarks[@]}"; do
@@ -337,54 +326,43 @@ run_flamegraph() {
         local output_file="$flamegraph_dir/${benchmark}_flamegraph.svg"
         local start_time=$(date +%s)
         
-        # Clean up any existing trace files to prevent conflicts
-        rm -rf cargo-flamegraph.trace *.trace 2>/dev/null || true
+        # Clean up any existing trace files to prevent conflicts (cargo-flamegraph specific)
+        if [[ "$OSTYPE" != "darwin"* ]]; then
+            rm -rf cargo-flamegraph.trace *.trace 2>/dev/null || true
+        fi
         
         # Run flamegraph with appropriate tools for each platform
         if [[ "$OSTYPE" == "darwin"* ]]; then
-            print_status "Detected macOS - using samply for flame graph generation"
-            
-            # Check if samply is installed
-            if ! command -v samply &> /dev/null; then
-                print_error "samply not found! Please install it with:"
-                echo "  cargo install samply"
-                echo ""
-                print_status "samply is the recommended profiler for macOS (no SIP issues)"
-                continue
-            fi
-            
-            # Set a shorter benchmark time for profiling
-            local bench_args="--bench --sample-size 10 --measurement-time 5"
-            
-            print_status "Using samply to generate flame graph (SIP-compatible)..."
+            # Set full benchmark parameters (same as 'all' command for consistency)
+            local bench_args=""
             
             # Use samply record with flame graph output
             local samply_output="${output_file%.svg}"
-            if timeout 90s samply record --rate 997 --output "$samply_output.json" cargo bench --bench "$benchmark" -- $bench_args; then
+            if timeout 120s samply record --rate 997 --output "$samply_output.json" cargo bench --bench "$benchmark" -- $bench_args; then
                 
-                # Convert samply output to flame graph SVG
-                if samply flamegraph "$samply_output.json" --output "$output_file"; then
-                    print_success "Flame graph generated with samply: $output_file"
-                    
-                    # Clean up intermediate files
-                    rm -f "$samply_output.json" 2>/dev/null || true
-                else
-                    print_warning "samply flamegraph conversion failed, trying alternative..."
-                    
-                    # Alternative: use samply's built-in viewer
-                    local html_output="${output_file%.svg}.html"
-                    if samply load "$samply_output.json" --output "$html_output"; then
-                        print_success "Performance profile generated: $html_output"
-                        output_file="$html_output"
-                    else
-                        print_error "Failed to convert samply output"
-                        continue
-                    fi
-                fi
+                # Use samply load to view the profile (opens in browser)
+                print_success "Profiling data recorded: $samply_output.json"
+                print_status "Opening samply profile viewer..."
+                
+                # samply load opens the profile in a web browser
+                print_status "Starting samply profile viewer..."
+                samply load "$samply_output.json" &
+                local samply_pid=$!
+                print_success "Samply profile viewer opened in browser (PID: $samply_pid)"
+                print_status "Samply server running at http://127.0.0.1:3000"
+                print_status "Profile data saved: $samply_output.json"
+                print_status "Press Ctrl+C to stop samply server when finished analyzing"
+                
+                # Set up signal handler for clean shutdown
+                trap "echo ''; print_status 'Stopping samply server...'; kill $samply_pid 2>/dev/null; exit 0" INT
+                
+                # Wait for user to press Ctrl+C
+                wait $samply_pid 2>/dev/null
+                output_file="$samply_output.json"
             else
                 local exit_code=$?
                 if [ $exit_code -eq 124 ]; then
-                    print_error "samply profiling timed out after 90 seconds"
+                    print_error "samply profiling timed out after 120 seconds"
                 else
                     print_error "samply profiling failed (exit code: $exit_code)"
                 fi
@@ -397,8 +375,9 @@ run_flamegraph() {
                 continue
             fi
         else
-            # Linux or other platforms
-            if ! timeout 120s cargo flamegraph --bench "$benchmark" -o "$output_file" -- --bench --sample-size 10; then
+            # Linux or other platforms - use cargo-flamegraph
+            print_status "Using cargo-flamegraph for Linux platform"
+            if ! timeout 120s cargo flamegraph --bench "$benchmark" -o "$output_file"; then
                 print_error "Failed to generate flame graph for $benchmark"
                 continue
             fi

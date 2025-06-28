@@ -163,11 +163,13 @@ cargo bench --bench throughput_comparison           # Throughput analysis
 
 ### 🔥 Flame Graph Analysis
 ```bash
-# Generate flame graphs for performance profiling
+# Generate flame graphs for performance profiling with all benchmarks
 ./scripts/run_benchmarks.sh flamegraph
+# Select: a (All benchmarks) for comprehensive analysis
 
-# Recommended workflow: run benchmarks then analyze
-./scripts/run_benchmarks.sh all && ./scripts/run_benchmarks.sh flamegraph
+# Alternative: Run specific benchmark with profiling
+./scripts/run_benchmarks.sh flamegraph
+# Select: 1-7 for individual benchmark analysis
 ```
 
 ### Individual Benchmark Files
@@ -214,24 +216,32 @@ cargo install flamegraph
 ./scripts/run_benchmarks.sh flamegraph
 
 # Available options:
-#   1. comprehensive_benchmarks  (recommended for getting started)
-#   2. throughput_comparison     (analyze throughput bottlenecks) 
-#   3. latency_comparison        (analyze latency hot paths)
-#   a. All benchmarks           (comprehensive profiling)
+#   1. comprehensive_benchmarks      (recommended for getting started)
+#   2. single_producer_single_consumer (SPSC performance analysis)
+#   3. multi_producer_single_consumer  (MPSC coordination analysis)
+#   4. pipeline_processing           (pipeline dependency analysis)
+#   5. latency_comparison            (latency comparison vs other libs)
+#   6. throughput_comparison         (throughput analysis)
+#   7. buffer_size_scaling           (buffer size optimization)
+#   a. All benchmarks               (comprehensive profiling - recommended)
 ```
 
 ### Output
 - **Location**: `flamegraphs/` directory
-- **Format**: Interactive SVG files
-- **Naming**: `{benchmark_name}_flamegraph.svg`
-- **Auto-open**: Automatically opens in default browser
+- **Format**: JSON profile data + Interactive web viewer
+- **Naming**: `{benchmark_name}_flamegraph.json`
+- **Auto-open**: Automatically opens samply viewer in browser (http://127.0.0.1:3000)
+- **Viewing**: Rich interactive analysis interface with timeline, call tree, and flame graph views
 
 ### Analysis Tips
 - **Width = CPU Time**: Wider bars indicate more CPU time spent
 - **Height = Call Stack**: Shows function call hierarchy
-- **Clickable**: Click functions to zoom in and explore call paths
-- **Search**: Use Ctrl+F to find specific functions
+- **Interactive Navigation**: Click functions to zoom in and explore call paths
+- **Search Functions**: Use Ctrl+F to find specific functions
 - **Hot Spots**: Look for unexpectedly wide bars that indicate bottlenecks
+- **Timeline View**: Samply provides timeline analysis to see performance over time
+- **Multiple Views**: Switch between flame graph, call tree, and source code views
+- **LLM Analysis**: Export JSON profile data for automated analysis with AI tools
 
 ### Common Use Cases
 1. **Performance Optimization**: Identify the slowest functions
@@ -240,10 +250,43 @@ cargo install flamegraph
 4. **Regression Analysis**: Compare flame graphs before/after changes
 
 ### macOS Considerations
-- **Uses samply by default** - no SIP or dtrace issues
-- **No special permissions required** - works out of the box
-- **Fallback options** available if samply fails
-- **Multiple output formats** - SVG flame graphs or interactive HTML profiles
+- **Uses samply by default** - modern profiler that works with SIP enabled
+- **No special permissions required** - works out of the box without disabling SIP
+- **Rich analysis interface** - interactive web-based profiler with multiple views
+- **Performance data export** - JSON format compatible with other analysis tools
+- **Automatic fallback** - Linux uses cargo-flamegraph for traditional SVG output
+
+### Advanced Samply Features
+
+#### **Interactive Web Interface**
+```bash
+# After running flamegraph, samply opens http://127.0.0.1:3000 with:
+# - Timeline view: See performance changes over time
+# - Call tree: Hierarchical function call analysis  
+# - Flame graph: Traditional CPU time visualization
+# - Source view: Link performance data to source code
+```
+
+#### **Re-analyzing Existing Profiles**
+```bash
+# View previously generated profiles without re-running benchmarks
+samply load flamegraphs/comprehensive_benchmarks_flamegraph.json
+
+# Compare multiple profile runs
+samply load flamegraphs/benchmark1.json &
+samply load flamegraphs/benchmark2.json &
+```
+
+#### **Export and Analysis**
+```bash
+# Profile data is stored in JSON format for further analysis
+ls flamegraphs/*.json
+
+# JSON files can be:
+# - Uploaded to LLM for automated performance analysis
+# - Processed with custom analysis scripts
+# - Shared with team members for collaborative debugging
+```
 
 ## Benchmark Configuration
 
