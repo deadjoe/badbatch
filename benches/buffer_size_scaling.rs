@@ -20,7 +20,7 @@ use badbatch::disruptor::{
 #[allow(dead_code)]
 const BUFFER_SIZES: [usize; 8] = [64, 128, 256, 512, 1024, 2048, 4096, 8192];
 #[allow(dead_code)]
-const WORKLOAD_SIZES: [u64; 3] = [1_000, 5_000, 20_000];
+const WORKLOAD_SIZES: [u64; 3] = [1_000, 5_000, 10_000]; // Standardized to common sizes
 const TIMEOUT_MS: u64 = 5000; // 5 second timeout to prevent hanging
 
 #[derive(Debug, Default, Clone)]

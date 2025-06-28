@@ -161,6 +161,15 @@ cargo bench --bench throughput_comparison           # Throughput analysis
 ./scripts/run_benchmarks.sh all
 ```
 
+### 🔥 Flame Graph Analysis
+```bash
+# Generate flame graphs for performance profiling
+./scripts/run_benchmarks.sh flamegraph
+
+# Recommended workflow: run benchmarks then analyze
+./scripts/run_benchmarks.sh all && ./scripts/run_benchmarks.sh flamegraph
+```
+
 ### Individual Benchmark Files
 ```bash
 # Run specific benchmark files
@@ -171,6 +180,56 @@ cargo bench --bench latency_comparison
 cargo bench --bench throughput_comparison
 cargo bench --bench buffer_size_scaling
 ```
+
+## 🔥 Flame Graph Profiling
+
+### Overview
+Flame graphs provide detailed CPU profiling visualization to identify performance bottlenecks and hot paths in the code. The integrated flame graph functionality helps pinpoint exactly where CPU time is being spent.
+
+### Prerequisites
+```bash
+# Install cargo-flamegraph (required)
+cargo install flamegraph
+
+# macOS: dtrace is included by default
+# May require sudo permissions for dtrace access
+```
+
+### Usage
+```bash
+# Interactive flame graph generation
+./scripts/run_benchmarks.sh flamegraph
+
+# Available options:
+#   1. comprehensive_benchmarks  (recommended for getting started)
+#   2. throughput_comparison     (analyze throughput bottlenecks) 
+#   3. latency_comparison        (analyze latency hot paths)
+#   a. All benchmarks           (comprehensive profiling)
+```
+
+### Output
+- **Location**: `flamegraphs/` directory
+- **Format**: Interactive SVG files
+- **Naming**: `{benchmark_name}_flamegraph.svg`
+- **Auto-open**: Automatically opens in default browser
+
+### Analysis Tips
+- **Width = CPU Time**: Wider bars indicate more CPU time spent
+- **Height = Call Stack**: Shows function call hierarchy
+- **Clickable**: Click functions to zoom in and explore call paths
+- **Search**: Use Ctrl+F to find specific functions
+- **Hot Spots**: Look for unexpectedly wide bars that indicate bottlenecks
+
+### Common Use Cases
+1. **Performance Optimization**: Identify the slowest functions
+2. **Bottleneck Analysis**: Find unexpected CPU usage patterns
+3. **Code Review**: Validate that optimizations are working
+4. **Regression Analysis**: Compare flame graphs before/after changes
+
+### macOS Considerations
+- Requires dtrace access (may prompt for password)
+- Script automatically handles permission escalation
+- No additional system optimization needed on macOS
 
 ## Benchmark Configuration
 
@@ -316,6 +375,7 @@ All benchmarks have been validated for:
 - **Reliability**: Consistent results across multiple runs  
 - **Safety**: Timeout protection and error recovery
 - **Completeness**: Full test coverage of all major scenarios
+- **Profiling**: Flame graph support for detailed performance analysis
 
 ## 📊 Current Test Scale Information
 
@@ -376,4 +436,5 @@ All benchmarks have been validated for:
 **Last Updated**: June 28, 2025  
 **Benchmark Files**: 8 (optimized from 12)  
 **Safety Features**: Full timeout protection and error recovery  
-**CI Ready**: Automated testing with `scripts/run_benchmarks.sh`
+**CI Ready**: Automated testing with `scripts/run_benchmarks.sh`  
+**Profiling**: Integrated flame graph analysis for performance optimization
