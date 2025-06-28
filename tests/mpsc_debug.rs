@@ -38,8 +38,10 @@ impl EventHandler<DebugEvent> for DebugHandler {
         sequence: i64,
         _end_of_batch: bool,
     ) -> DisruptorResult<()> {
-        println!("DEBUG: Handler processed event value={}, producer_id={}, sequence={}", 
-                event.value, event.producer_id, sequence);
+        println!(
+            "DEBUG: Handler processed event value={}, producer_id={}, sequence={}",
+            event.value, event.producer_id, sequence
+        );
         self.count.fetch_add(1, Ordering::Release);
         Ok(())
     }
@@ -75,14 +77,14 @@ fn test_mpsc_simple_case() {
             event.producer_id = 0;
         },
     ));
-    
+
     assert!(result.is_ok(), "Single event publish should succeed");
-    
+
     // Wait for processing
     thread::sleep(Duration::from_millis(100));
     let count = counter.load(Ordering::Acquire);
-    println!("DEBUG: Events processed: {}", count);
-    
+    println!("DEBUG: Events processed: {count}");
+
     assert_eq!(count, 1, "Single event should be processed");
 
     // Test 2: Multiple sequential events from one producer
@@ -94,12 +96,12 @@ fn test_mpsc_simple_case() {
                 event.producer_id = 0;
             },
         ));
-        assert!(result.is_ok(), "Event {} should publish successfully", i);
+        assert!(result.is_ok(), "Event {i} should publish successfully");
     }
-    
+
     thread::sleep(Duration::from_millis(100));
     let count = counter.load(Ordering::Acquire);
-    println!("DEBUG: Events processed after sequential: {}", count);
+    println!("DEBUG: Events processed after sequential: {count}");
     assert_eq!(count, 4, "Should have processed 4 events total");
 
     println!("DEBUG: Basic single-producer tests PASSED");
@@ -130,11 +132,11 @@ fn test_mpsc_concurrent_producers() {
     // Test concurrent producers
     println!("DEBUG: Starting 2 concurrent producers");
     let mut handles = Vec::new();
-    
+
     for producer_id in 0..2 {
         let disruptor_clone = disruptor_arc.clone();
         let handle = thread::spawn(move || {
-            println!("DEBUG: Producer {} starting", producer_id);
+            println!("DEBUG: Producer {producer_id} starting");
             for i in 1..=2 {
                 let result = disruptor_clone.publish_event(ClosureEventTranslator::new(
                     move |event: &mut DebugEvent, _seq: i64| {
@@ -143,16 +145,18 @@ fn test_mpsc_concurrent_producers() {
                     },
                 ));
                 match result {
-                    Ok(_) => println!("DEBUG: Producer {} published event {}", producer_id, i),
+                    Ok(_) => println!("DEBUG: Producer {producer_id} published event {i}"),
                     Err(e) => {
-                        println!("ERROR: Producer {} failed to publish event {}: {:?}", producer_id, i, e);
+                        println!(
+                            "ERROR: Producer {producer_id} failed to publish event {i}: {e:?}"
+                        );
                         return false;
                     }
                 }
                 // Small delay between events
                 thread::sleep(Duration::from_millis(10));
             }
-            println!("DEBUG: Producer {} finished", producer_id);
+            println!("DEBUG: Producer {producer_id} finished");
             true
         });
         handles.push(handle);
@@ -164,12 +168,12 @@ fn test_mpsc_concurrent_producers() {
         match handle.join() {
             Ok(success) => {
                 if !success {
-                    println!("ERROR: Producer {} failed", i);
+                    println!("ERROR: Producer {i} failed");
                     all_success = false;
                 }
             }
             Err(_) => {
-                println!("ERROR: Producer {} thread panicked", i);
+                println!("ERROR: Producer {i} thread panicked");
                 all_success = false;
             }
         }
@@ -180,9 +184,12 @@ fn test_mpsc_concurrent_producers() {
     // Wait for event processing
     thread::sleep(Duration::from_millis(200));
     let final_count = counter.load(Ordering::Acquire);
-    println!("DEBUG: Final event count: {}", final_count);
+    println!("DEBUG: Final event count: {final_count}");
 
-    assert_eq!(final_count, 4, "Should have processed 4 events from 2 producers");
+    assert_eq!(
+        final_count, 4,
+        "Should have processed 4 events from 2 producers"
+    );
 
     // Cleanup
     if let Ok(mut disruptor) = Arc::try_unwrap(disruptor_arc) {
