@@ -14,28 +14,57 @@ echo "🔥 macOS Flame Graph Generator"
 echo "Benchmark: $BENCHMARK"
 echo ""
 
-# Method 1: Try simple cargo flamegraph with DTrace
-echo "Method 1: Trying cargo-flamegraph with DTrace..."
+# Method 1: Use samply (recommended for macOS)
+echo "Method 1: Using samply (SIP-compatible profiler)..."
+if command -v samply >/dev/null 2>&1; then
+    echo "✅ samply found, generating flame graph..."
+    
+    # Record with samply
+    if timeout 60s samply record --rate 997 --output "$OUTPUT_DIR/${BENCHMARK}.json" cargo bench --bench "$BENCHMARK" -- --bench --sample-size 5 --measurement-time 3; then
+        
+        # Try to generate SVG flame graph
+        if samply flamegraph "$OUTPUT_DIR/${BENCHMARK}.json" --output "$OUTPUT_DIR/${BENCHMARK}_flamegraph.svg"; then
+            echo "✅ Success! Flame graph created: $OUTPUT_DIR/${BENCHMARK}_flamegraph.svg"
+            open "$OUTPUT_DIR/${BENCHMARK}_flamegraph.svg"
+            rm -f "$OUTPUT_DIR/${BENCHMARK}.json"
+            exit 0
+        else
+            echo "⚠️  SVG generation failed, creating HTML profile instead..."
+            if samply load "$OUTPUT_DIR/${BENCHMARK}.json" --output "$OUTPUT_DIR/${BENCHMARK}_profile.html"; then
+                echo "✅ Success! HTML profile created: $OUTPUT_DIR/${BENCHMARK}_profile.html"
+                open "$OUTPUT_DIR/${BENCHMARK}_profile.html"
+                exit 0
+            fi
+        fi
+    fi
+    echo "❌ samply profiling failed, trying Method 2..."
+else
+    echo "❌ samply not found. Install with: cargo install samply"
+    echo "Trying Method 2..."
+fi
+
+# Method 2: Try simple cargo flamegraph with DTrace
+echo "Method 2: Trying cargo-flamegraph with DTrace..."
 if timeout 30s cargo flamegraph --dev --bench "$BENCHMARK" -o "$OUTPUT_DIR/${BENCHMARK}_flamegraph.svg" -- --bench --sample-size 3 --measurement-time 2; then
     echo "✅ Success! Flame graph created: $OUTPUT_DIR/${BENCHMARK}_flamegraph.svg"
     open "$OUTPUT_DIR/${BENCHMARK}_flamegraph.svg"
     exit 0
 fi
 
-echo "❌ Method 1 failed, trying Method 2..."
+echo "❌ Method 2 failed, trying Method 3..."
 
-# Method 2: Try with sudo
-echo "Method 2: Trying with sudo privileges..."
+# Method 3: Try with sudo
+echo "Method 3: Trying with sudo privileges..."
 if timeout 30s sudo cargo flamegraph --dev --bench "$BENCHMARK" -o "$OUTPUT_DIR/${BENCHMARK}_flamegraph.svg" -- --bench --sample-size 3 --measurement-time 2; then
     echo "✅ Success with sudo! Flame graph created: $OUTPUT_DIR/${BENCHMARK}_flamegraph.svg"
     open "$OUTPUT_DIR/${BENCHMARK}_flamegraph.svg"
     exit 0
 fi
 
-echo "❌ Method 2 failed, trying Method 3..."
+echo "❌ Method 3 failed, trying Method 4..."
 
-# Method 3: Use perf instead of instruments
-echo "Method 3: Trying alternative profiler..."
+# Method 4: Use perf instead of instruments (unlikely on macOS)
+echo "Method 4: Trying alternative profiler..."
 if command -v perf >/dev/null 2>&1; then
     echo "Using perf profiler..."
     cargo flamegraph --freq 997 --bench "$BENCHMARK" -o "$OUTPUT_DIR/${BENCHMARK}_flamegraph.svg" -- --bench --sample-size 3
