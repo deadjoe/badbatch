@@ -337,6 +337,9 @@ run_flamegraph() {
         local output_file="$flamegraph_dir/${benchmark}_flamegraph.svg"
         local start_time=$(date +%s)
         
+        # Clean up any existing trace files to prevent conflicts
+        rm -rf cargo-flamegraph.trace *.trace 2>/dev/null || true
+        
         # Run flamegraph with appropriate flags for benchmarks
         # Note: On macOS, this might require sudo for dtrace access
         if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -348,18 +351,37 @@ run_flamegraph() {
             
             # Try without sudo first, fall back to sudo if needed
             print_status "Attempting flame graph generation without sudo..."
-            if timeout 120s cargo flamegraph --bench "$benchmark" -o "$output_file" -- $bench_args 2>/dev/null; then
+            if timeout 120s cargo flamegraph --bench "$benchmark" -o "$output_file" -- $bench_args 2>&1; then
                 print_success "Flame graph generated without sudo"
             else
-                print_warning "Retrying with sudo for dtrace access..."
-                if timeout 120s sudo cargo flamegraph --bench "$benchmark" -o "$output_file" -- $bench_args; then
+                local exit_code=$?
+                # Clean up any partial trace files
+                rm -rf cargo-flamegraph.trace *.trace 2>/dev/null || true
+                
+                if [ $exit_code -eq 124 ]; then
+                    print_warning "First attempt timed out, retrying with sudo..."
+                else
+                    print_warning "First attempt failed (exit code: $exit_code), retrying with sudo for dtrace access..."
+                fi
+                
+                if timeout 120s sudo cargo flamegraph --bench "$benchmark" -o "$output_file" -- $bench_args 2>&1; then
                     print_success "Flame graph generated with sudo"
                 else
-                    print_error "Failed to generate flame graph for $benchmark (timeout or permission issue)"
-                    print_status "You may need to:"
-                    echo "  1. Install cargo-flamegraph: cargo install flamegraph"
-                    echo "  2. Grant dtrace permissions or disable SIP temporarily"
-                    echo "  3. Try running the command manually with sudo"
+                    exit_code=$?
+                    print_error "Failed to generate flame graph for $benchmark (exit code: $exit_code)"
+                    
+                    if [ $exit_code -eq 124 ]; then
+                        print_status "Operation timed out after 120 seconds"
+                    elif [ $exit_code -eq 42 ]; then
+                        print_status "Trace file conflict detected"
+                        print_status "Cleaned up trace files, you can retry"
+                    fi
+                    
+                    print_status "Troubleshooting:"
+                    echo "  1. Ensure cargo-flamegraph is installed: cargo install flamegraph"
+                    echo "  2. On macOS, dtrace may require SIP to be disabled"
+                    echo "  3. Try running manually: sudo cargo flamegraph --bench $benchmark"
+                    echo "  4. Check for conflicting trace files and remove them"
                     continue
                 fi
             fi
