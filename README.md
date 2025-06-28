@@ -242,9 +242,6 @@ cargo test --doc                    # Documentation tests
 bash scripts/run_benchmarks.sh quick    # Quick benchmark suite (2-5 minutes)
 bash scripts/run_benchmarks.sh all      # Full benchmark suite (30-60 minutes)
 
-# Generate flame graphs for performance profiling
-bash scripts/run_benchmarks.sh flamegraph    # Interactive flame graph analysis
-
 # Individual benchmark categories
 cargo bench --bench single_producer_single_consumer
 cargo bench --bench throughput_comparison
@@ -302,7 +299,7 @@ Our comprehensive benchmark suite covers multiple scenarios:
 - **Throughput Analysis**: Raw event processing rates across different configurations
 - **Buffer Scaling**: Performance characteristics with buffer sizes from 64 to 8192 slots
 
-Run `./scripts/run_benchmarks.sh all` to execute the full performance evaluation suite. Use `./scripts/run_benchmarks.sh flamegraph` (select 'a' for all benchmarks) for comprehensive CPU profiling with interactive analysis to identify performance bottlenecks.
+Run `./scripts/run_benchmarks.sh all` to execute the full performance evaluation suite.
 
 ## 🤝 Contributing
 
