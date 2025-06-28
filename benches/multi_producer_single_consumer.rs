@@ -275,25 +275,24 @@ fn benchmark_mpsc_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u6
             // Wait for all events to be processed
             if !wait_for_mpsc_completion(&event_counter, expected_total as i64, TIMEOUT_MS) {
                 let final_count = event_counter.load(Ordering::Acquire);
-                
+
                 // Clean up producers before panicking
                 for producer in &mut producers {
                     producer.stop();
                 }
-                panic!("MPSC benchmark failed: events {} of {} processed within timeout", 
-                       final_count, expected_total);
+                panic!("MPSC benchmark failed: events {final_count} of {expected_total} processed within timeout");
             }
 
             // Clean up producers and disruptor
             for producer in &mut producers {
                 producer.stop();
             }
-            
+
             // Properly shutdown the disruptor
             if let Ok(mut disruptor) = Arc::try_unwrap(disruptor_arc) {
                 disruptor.shutdown().unwrap();
             }
-            
+
             // Return the expected count for validation
             expected_total
         });
