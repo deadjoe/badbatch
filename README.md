@@ -17,7 +17,7 @@
 - **Lock-free ring buffer** with power-of-2 sizing for maximum performance
 - **Multiple wait strategies**: Blocking, BusySpin, Yielding, Sleeping
 - **Event processors** with batch processing capabilities
-- **Single and multi-producer** support with bitmap optimization
+- **Single and multi-producer** support with experimental bitmap optimization (disabled by default)
 - **Comprehensive exception handling** with custom error types
 - **Sequence barriers** and dependency management
 - **Event factories, handlers, and translators** for flexible event processing
@@ -59,7 +59,7 @@ BadBatch is a focused, high-performance disruptor library with a clean, modular 
 │  ├─ Ring Buffer (Lock-free, Power-of-2 Sizing)             │
 │  ├─ Event Processors (Batch Processing)                    │
 │  ├─ Wait Strategies (Blocking, BusySpin, Yielding, Sleep)  │
-│  ├─ Producer Types (Single/Multi with Bitmap Optimization) │
+│  ├─ Producer Types (Single/Multi with Experimental Bitmap) │
 │  ├─ Sequence Management (Atomic Coordination)              │
 │  ├─ Event Factories, Handlers & Translators               │
 │  └─ Exception Handling (Custom Error Types)                │
@@ -283,10 +283,14 @@ BadBatch is designed for high-performance event processing with the following ch
 ### Optimization Techniques
 
 - **Cache Line Padding**: Uses `crossbeam_utils::CachePadded` to prevent false sharing
-- **Bitmap Optimization**: O(1) availability checking for large buffers (inspired by disruptor-rs)
+- **Experimental Bitmap Optimization** (disabled by default): O(1) availability checking for large buffers (inspired by disruptor-rs)
 - **Batch Processing**: Automatic batching reduces coordination overhead
 - **Bit Manipulation**: Fast modulo operations using bit masks for power-of-2 buffer sizes
 - **Memory Layout**: Optimal data structures (`Box<[UnsafeCell<T>]>`) for better cache locality
+
+### Experimental Features
+
+- **Bitmap Optimization**: Currently disabled by default due to ongoing stability improvements. This feature provides O(1) availability checking for large buffers using atomic bitmap operations. While functionally complete, it has been temporarily disabled to ensure maximum stability for multi-producer scenarios. The proven legacy availability checking method is used instead, providing excellent performance and reliability.
 
 ### Benchmark Results
 
