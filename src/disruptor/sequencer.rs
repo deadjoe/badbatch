@@ -475,7 +475,6 @@ pub struct MultiProducerSequencer {
     /// Bitmap tracking availability of slots using AtomicU64 arrays
     /// Each bit represents whether a slot was published in an even or odd round
     /// This is inspired by disruptor-rs's innovative bitmap approach
-    #[allow(dead_code)] // Temporarily disabled for MPSC stability
     available_bitmap: Box<[AtomicU64]>,
     /// Index mask for fast modulo operations (buffer_size - 1)
     index_mask: usize,
@@ -549,7 +548,6 @@ impl MultiProducerSequencer {
     }
 
     /// Calculate availability indices for bitmap (inspired by disruptor-rs)
-    #[allow(dead_code)] // Temporarily disabled for MPSC stability
     fn calculate_availability_indices(&self, sequence: i64) -> (usize, usize) {
         let slot_index = (sequence as usize) & self.index_mask;
         let availability_index = slot_index >> 6; // Divide by 64
@@ -558,7 +556,6 @@ impl MultiProducerSequencer {
     }
 
     /// Get availability bitmap at index (inspired by disruptor-rs)
-    #[allow(dead_code)] // Temporarily disabled for MPSC stability
     fn availability_at(&self, index: usize) -> &AtomicU64 {
         // SAFETY: Index is always calculated with calculate_availability_indices and is within bounds
         unsafe { self.available_bitmap.get_unchecked(index) }
@@ -572,15 +569,13 @@ impl MultiProducerSequencer {
         let flag = self.calculate_availability_flag(sequence);
         self.available_buffer[index].store(flag, Ordering::Release);
 
-        // TODO: Bitmap method temporarily disabled for MPSC fix
         // New bitmap method (inspired by disruptor-rs) - only for large buffers
-        // if self.buffer_size >= 64 && !self.available_bitmap.is_empty() {
-        //     self.publish_bitmap(sequence);
-        // }
+        if self.buffer_size >= 64 && !self.available_bitmap.is_empty() {
+            self.publish_bitmap(sequence);
+        }
     }
 
     /// Publish using bitmap method (inspired by disruptor-rs)
-    #[allow(dead_code)] // Temporarily disabled for MPSC stability
     fn publish_bitmap(&self, sequence: i64) {
         let (availability_index, bit_index) = self.calculate_availability_indices(sequence);
         if availability_index < self.available_bitmap.len() {
@@ -592,7 +587,6 @@ impl MultiProducerSequencer {
     }
 
     /// Check if a sequence is available using bitmap method (inspired by disruptor-rs)
-    #[allow(dead_code)] // Temporarily disabled for MPSC stability
     fn is_bitmap_available(&self, sequence: i64) -> bool {
         let (availability_index, bit_index) = self.calculate_availability_indices(sequence);
         if availability_index < self.available_bitmap.len() {
@@ -608,23 +602,21 @@ impl MultiProducerSequencer {
 
     /// Check if a sequence is available for consumption
     /// This matches the LMAX Disruptor isAvailable method with proper flag checking
-    /// Temporarily using only legacy method for MPSC stability fix
     fn is_available_internal(&self, sequence: i64) -> bool {
-        // Use only legacy method for now to ensure consistency
+        // Use legacy method for consistency
         let index = self.calculate_index(sequence);
         let flag = self.calculate_availability_flag(sequence);
-        self.available_buffer[index].load(Ordering::Acquire) == flag
+        let legacy_available = self.available_buffer[index].load(Ordering::Acquire) == flag;
 
-        // TODO: Re-enable bitmap checking after proper round-robin implementation
         // For large buffers, also check bitmap method
-        // if self.buffer_size >= 64 && !self.available_bitmap.is_empty() {
-        //     let bitmap_available = self.is_bitmap_available(sequence);
-        //     // Both methods must agree that the sequence is available
-        //     legacy_available && bitmap_available
-        // } else {
-        //     // For small buffers, only use legacy method
-        //     legacy_available
-        // }
+        if self.buffer_size >= 64 && !self.available_bitmap.is_empty() {
+            let bitmap_available = self.is_bitmap_available(sequence);
+            // Both methods must agree that the sequence is available
+            legacy_available && bitmap_available
+        } else {
+            // For small buffers, only use legacy method
+            legacy_available
+        }
     }
 
     /// Check if there's available capacity for the required number of sequences
