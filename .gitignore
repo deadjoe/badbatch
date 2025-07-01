@@ -150,6 +150,11 @@ coverage-report/
 # Documentation Internal
 docs
 
+# ***REMOVED*** memory and debug files
+***REMOVED***.md
+debug_*.rs
+*.rcgu.o
+
 # Environment and configuration
 .env
 .env.local
