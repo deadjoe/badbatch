@@ -478,6 +478,9 @@ pub struct MultiProducerSequencer {
     available_bitmap: Box<[AtomicU64]>,
     /// Index mask for fast modulo operations (buffer_size - 1)
     index_mask: usize,
+    /// Precomputed buffer shift for efficient round calculation
+    /// This is log2(buffer_size) for fast round flag computation
+    buffer_shift: u8,
 
     /// Cached minimum gating sequence to reduce lock contention
     /// This is an optimization from the LMAX Disruptor to avoid frequent reads of gating sequences
@@ -514,7 +517,7 @@ impl MultiProducerSequencer {
         let available_bitmap = if buffer_size >= 64 {
             let bitmap_size = (buffer_size + 63) / 64; // Each AtomicU64 tracks 64 slots, round up
             let bitmap: Box<[AtomicU64]> = (0..bitmap_size)
-                .map(|_| AtomicU64::new(0_u64)) // Initialize with all 0's (nothing published initially)
+                .map(|_| AtomicU64::new(!0_u64)) // Initialize with all 1's (nothing published initially, matching disruptor-rs)
                 .collect();
             bitmap
         } else {
@@ -523,6 +526,9 @@ impl MultiProducerSequencer {
             empty_bitmap
         };
 
+        // Precompute buffer shift for efficient round calculation
+        let buffer_shift = buffer_size.trailing_zeros() as u8;
+
         Self {
             buffer_size,
             wait_strategy,
@@ -530,6 +536,7 @@ impl MultiProducerSequencer {
             gating_sequences: parking_lot::RwLock::new(Vec::new()),
             available_bitmap,
             index_mask: buffer_size - 1,
+            buffer_shift,
             cached_gating_sequence: CachePadded::new(AtomicI64::new(-1)),
             available_buffer,
         }
@@ -544,7 +551,14 @@ impl MultiProducerSequencer {
     /// Calculate the availability flag for a given sequence
     /// This matches the LMAX Disruptor calculateAvailabilityFlag method
     fn calculate_availability_flag(&self, sequence: i64) -> i32 {
-        (sequence >> self.buffer_size.trailing_zeros()) as i32
+        (sequence >> self.buffer_shift) as i32
+    }
+
+    /// Calculate the round flag for bitmap availability checking (inspired by disruptor-rs)
+    /// Returns 0 for even rounds, 1 for odd rounds
+    #[inline]
+    fn calculate_round_flag(&self, sequence: i64) -> u64 {
+        ((sequence as u64) >> self.buffer_shift) & 1
     }
 
     /// Calculate availability indices for bitmap (inspired by disruptor-rs)
@@ -576,25 +590,28 @@ impl MultiProducerSequencer {
     }
 
     /// Publish using bitmap method (inspired by disruptor-rs)
+    /// Uses XOR operation to flip the bit, encoding even/odd round publication
     fn publish_bitmap(&self, sequence: i64) {
         let (availability_index, bit_index) = self.calculate_availability_indices(sequence);
         if availability_index < self.available_bitmap.len() {
             let availability = self.availability_at(availability_index);
             let mask = 1_u64 << bit_index;
-            // Set the bit to indicate this sequence is published
-            availability.fetch_or(mask, Ordering::Release);
+            // XOR operation flips the bit to encode even/odd round publication
+            availability.fetch_xor(mask, Ordering::Release);
         }
     }
 
     /// Check if a sequence is available using bitmap method (inspired by disruptor-rs)
+    /// Compares the bit value with the expected round flag
     fn is_bitmap_available(&self, sequence: i64) -> bool {
         let (availability_index, bit_index) = self.calculate_availability_indices(sequence);
         if availability_index < self.available_bitmap.len() {
             let availability = self.availability_at(availability_index);
             let current_value = availability.load(Ordering::Acquire);
-            let mask = 1_u64 << bit_index;
-            // Check if the bit is set (sequence is published)
-            (current_value & mask) != 0
+            let expected_flag = self.calculate_round_flag(sequence);
+            let actual_flag = (current_value >> bit_index) & 1;
+            // Check if the bit matches the expected round flag
+            actual_flag == expected_flag
         } else {
             false
         }
@@ -608,11 +625,12 @@ impl MultiProducerSequencer {
         let flag = self.calculate_availability_flag(sequence);
         let legacy_available = self.available_buffer[index].load(Ordering::Acquire) == flag;
 
-        // For large buffers, also check bitmap method
+        // For large buffers, use bitmap method as the primary check
+        // Fall back to legacy method only if bitmap indicates unavailable
         if self.buffer_size >= 64 && !self.available_bitmap.is_empty() {
             let bitmap_available = self.is_bitmap_available(sequence);
-            // Both methods must agree that the sequence is available
-            legacy_available && bitmap_available
+            // Bitmap is primary, legacy is fallback for safety
+            bitmap_available || legacy_available
         } else {
             // For small buffers, only use legacy method
             legacy_available
