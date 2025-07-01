@@ -602,13 +602,25 @@ impl MultiProducerSequencer {
     }
 
     /// Check if a sequence is available using bitmap method (inspired by disruptor-rs)
-    /// Compares the bit value with the expected round flag
+    /// Compares the bit value with the expected round flag, handling bitmap wraparound
     fn is_bitmap_available(&self, sequence: i64) -> bool {
         let (availability_index, bit_index) = self.calculate_availability_indices(sequence);
         if availability_index < self.available_bitmap.len() {
             let availability = self.availability_at(availability_index);
             let current_value = availability.load(Ordering::Acquire);
-            let expected_flag = self.calculate_round_flag(sequence);
+            
+            // Calculate expected flag, accounting for bitmap wraparound
+            let mut expected_flag = self.calculate_round_flag(sequence);
+            
+            // Key insight from disruptor-rs: when availability_index wraps to 0,
+            // we need to look for the flipped bit (odd to even or even to odd)
+            let slot_index = (sequence as usize) & self.index_mask;
+            let current_availability_index = slot_index >> 6;
+            if current_availability_index == 0 && sequence >= self.buffer_size as i64 {
+                // We've wrapped around, flip the expected flag
+                expected_flag ^= 1;
+            }
+            
             let actual_flag = (current_value >> bit_index) & 1;
             // Check if the bit matches the expected round flag
             actual_flag == expected_flag
