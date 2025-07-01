@@ -150,6 +150,11 @@ coverage-report/
 # Documentation Internal
 docs
 
+# Claude Code memory and debug files
+CLAUDE.md
+debug_*.rs
+*.rcgu.o
+
 # Environment and configuration
 .env
 .env.local
