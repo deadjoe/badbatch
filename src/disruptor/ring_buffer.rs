@@ -187,7 +187,7 @@ where
     ///
     /// # Safety
     /// The caller must ensure exclusive access to the specified range
-    pub unsafe fn batch_iter_mut(&self, start: i64, end: i64) -> BatchIterMut<T>
+    pub unsafe fn batch_iter_mut(&self, start: i64, end: i64) -> BatchIterMut<'_, T>
     where
         T: Send + Sync,
     {

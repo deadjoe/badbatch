@@ -609,10 +609,10 @@ impl MultiProducerSequencer {
         if availability_index < self.available_bitmap.len() {
             let availability = self.availability_at(availability_index);
             let current_value = availability.load(Ordering::Acquire);
-            
+
             // Calculate expected flag for this sequence
             let expected_flag = self.calculate_round_flag(sequence);
-            
+
             let actual_flag = (current_value >> bit_index) & 1;
             // Check if the bit matches the expected round flag
             actual_flag == expected_flag
@@ -623,7 +623,11 @@ impl MultiProducerSequencer {
 
     /// Get highest published sequence using bitmap method (inspired by disruptor-rs get_after)
     /// This correctly handles wraparound by tracking when availability_index wraps to 0
-    fn get_highest_published_sequence_bitmap(&self, next_sequence: i64, available_sequence: i64) -> i64 {
+    fn get_highest_published_sequence_bitmap(
+        &self,
+        next_sequence: i64,
+        available_sequence: i64,
+    ) -> i64 {
         if next_sequence > available_sequence {
             return available_sequence;
         }
@@ -631,12 +635,13 @@ impl MultiProducerSequencer {
         // Use disruptor-rs approach: start from previous sequence and find highest available
         let prev_sequence = next_sequence - 1;
         let mut availability_flag = self.calculate_round_flag(prev_sequence);
-        let (mut availability_index, mut bit_index) = self.calculate_availability_indices(prev_sequence);
-        
+        let (mut availability_index, mut bit_index) =
+            self.calculate_availability_indices(prev_sequence);
+
         if availability_index >= self.available_bitmap.len() {
             return prev_sequence; // No bitmap available, fall back
         }
-        
+
         let mut availability = self.available_bitmap[availability_index].load(Ordering::Acquire);
         // Shift to the first relevant bit
         availability >>= bit_index;
@@ -648,31 +653,32 @@ impl MultiProducerSequencer {
                 // Found unavailable sequence, return the previous one
                 return highest_available - 1;
             }
-            
+
             highest_available += 1;
-            
+
             // If we've checked all sequences up to available_sequence, we're done
             if highest_available > available_sequence {
                 return available_sequence;
             }
-            
+
             // Prepare for checking the next bit
             if bit_index < 63 {
                 bit_index += 1;
                 availability >>= 1;
             } else {
                 // Move to next AtomicU64 (bitmap field)
-                let (next_availability_index, _) = self.calculate_availability_indices(highest_available);
-                
+                let (next_availability_index, _) =
+                    self.calculate_availability_indices(highest_available);
+
                 if next_availability_index >= self.available_bitmap.len() {
                     // No more bitmap data available
                     return highest_available - 1;
                 }
-                
+
                 availability_index = next_availability_index;
                 availability = self.available_bitmap[availability_index].load(Ordering::Acquire);
                 bit_index = 0;
-                
+
                 // Critical wraparound detection: when availability_index becomes 0 again
                 if availability_index == 0 {
                     // We've wrapped around the bitmap, flip the expected flag
@@ -683,7 +689,11 @@ impl MultiProducerSequencer {
     }
 
     /// Get highest published sequence using legacy LMAX Disruptor algorithm
-    fn get_highest_published_sequence_legacy(&self, next_sequence: i64, available_sequence: i64) -> i64 {
+    fn get_highest_published_sequence_legacy(
+        &self,
+        next_sequence: i64,
+        available_sequence: i64,
+    ) -> i64 {
         // This is the core algorithm from LMAX Disruptor for finding the highest
         // contiguous published sequence in a multi-producer environment
 
@@ -1363,85 +1373,141 @@ mod tests {
     fn test_bitmap_basic_functionality() {
         let wait_strategy = Arc::new(crate::disruptor::BlockingWaitStrategy::new());
         let sequencer = MultiProducerSequencer::new(64, wait_strategy);
-        
+
         // Initially, sequence 0 should not be available
-        assert!(!sequencer.is_bitmap_available(0), "Sequence 0 should not be available initially");
-        
+        assert!(
+            !sequencer.is_bitmap_available(0),
+            "Sequence 0 should not be available initially"
+        );
+
         // Publish sequence 0
         sequencer.publish_bitmap(0);
-        
+
         // Now sequence 0 should be available
-        assert!(sequencer.is_bitmap_available(0), "Sequence 0 should be available after publishing");
-        
+        assert!(
+            sequencer.is_bitmap_available(0),
+            "Sequence 0 should be available after publishing"
+        );
+
         // Sequence 1 should still not be available
-        assert!(!sequencer.is_bitmap_available(1), "Sequence 1 should not be available");
-        
+        assert!(
+            !sequencer.is_bitmap_available(1),
+            "Sequence 1 should not be available"
+        );
+
         // Publish sequence 1
         sequencer.publish_bitmap(1);
-        
+
         // Now sequence 1 should be available
-        assert!(sequencer.is_bitmap_available(1), "Sequence 1 should be available after publishing");
-        
+        assert!(
+            sequencer.is_bitmap_available(1),
+            "Sequence 1 should be available after publishing"
+        );
+
         // Test round wraparound - sequence 64 should use different round flag
         sequencer.publish_bitmap(64);
-        assert!(sequencer.is_bitmap_available(64), "Sequence 64 should be available after publishing");
+        assert!(
+            sequencer.is_bitmap_available(64),
+            "Sequence 64 should be available after publishing"
+        );
     }
 
     #[test]
     fn test_bitmap_flags_calculation() {
         let wait_strategy = Arc::new(crate::disruptor::BlockingWaitStrategy::new());
         let sequencer = MultiProducerSequencer::new(64, wait_strategy);
-        
+
         // Test round flag calculation
-        assert_eq!(sequencer.calculate_round_flag(0), 0, "Sequence 0 should be round 0 (even)");
-        assert_eq!(sequencer.calculate_round_flag(63), 0, "Sequence 63 should be round 0 (even)");
-        assert_eq!(sequencer.calculate_round_flag(64), 1, "Sequence 64 should be round 1 (odd)");
-        assert_eq!(sequencer.calculate_round_flag(127), 1, "Sequence 127 should be round 1 (odd)");
-        assert_eq!(sequencer.calculate_round_flag(128), 0, "Sequence 128 should be round 0 (even)");
-        
+        assert_eq!(
+            sequencer.calculate_round_flag(0),
+            0,
+            "Sequence 0 should be round 0 (even)"
+        );
+        assert_eq!(
+            sequencer.calculate_round_flag(63),
+            0,
+            "Sequence 63 should be round 0 (even)"
+        );
+        assert_eq!(
+            sequencer.calculate_round_flag(64),
+            1,
+            "Sequence 64 should be round 1 (odd)"
+        );
+        assert_eq!(
+            sequencer.calculate_round_flag(127),
+            1,
+            "Sequence 127 should be round 1 (odd)"
+        );
+        assert_eq!(
+            sequencer.calculate_round_flag(128),
+            0,
+            "Sequence 128 should be round 0 (even)"
+        );
+
         // Test availability indices calculation
         let (avail_idx, bit_idx) = sequencer.calculate_availability_indices(0);
         assert_eq!(avail_idx, 0);
         assert_eq!(bit_idx, 0);
-        
+
         let (avail_idx, bit_idx) = sequencer.calculate_availability_indices(63);
         assert_eq!(avail_idx, 0);
         assert_eq!(bit_idx, 63);
-        
+
         let (avail_idx, bit_idx) = sequencer.calculate_availability_indices(64);
-        assert_eq!(avail_idx, 0, "Sequence 64 should map to availability_index 0 (same as sequence 0)");
-        assert_eq!(bit_idx, 0, "Sequence 64 should map to bit_index 0 (same as sequence 0)");
+        assert_eq!(
+            avail_idx, 0,
+            "Sequence 64 should map to availability_index 0 (same as sequence 0)"
+        );
+        assert_eq!(
+            bit_idx, 0,
+            "Sequence 64 should map to bit_index 0 (same as sequence 0)"
+        );
     }
 
     #[test]
     fn test_bitmap_get_highest_published() {
         let wait_strategy = Arc::new(crate::disruptor::BlockingWaitStrategy::new());
         let sequencer = MultiProducerSequencer::new(64, wait_strategy);
-        
+
         // No sequences published yet
         let highest = sequencer.get_highest_published_sequence_bitmap(0, 5);
-        assert_eq!(highest, -1, "Should return -1 when no sequences are published");
-        
+        assert_eq!(
+            highest, -1,
+            "Should return -1 when no sequences are published"
+        );
+
         // Publish sequence 0
         sequencer.publish_bitmap(0);
         let highest = sequencer.get_highest_published_sequence_bitmap(0, 5);
-        assert_eq!(highest, 0, "Should return 0 when only sequence 0 is published");
-        
+        assert_eq!(
+            highest, 0,
+            "Should return 0 when only sequence 0 is published"
+        );
+
         // Publish sequences 0, 1, 2
         sequencer.publish_bitmap(1);
         sequencer.publish_bitmap(2);
         let highest = sequencer.get_highest_published_sequence_bitmap(0, 5);
-        assert_eq!(highest, 2, "Should return 2 when sequences 0,1,2 are published");
-        
+        assert_eq!(
+            highest, 2,
+            "Should return 2 when sequences 0,1,2 are published"
+        );
+
         // Gap test: publish 0,1,2,4 (skip 3)
         sequencer.publish_bitmap(4);
         let highest = sequencer.get_highest_published_sequence_bitmap(0, 5);
-        assert_eq!(highest, 2, "Should return 2 when there's a gap at sequence 3");
-        
+        assert_eq!(
+            highest, 2,
+            "Should return 2 when there's a gap at sequence 3"
+        );
+
         // Fill the gap
         sequencer.publish_bitmap(3);
         let highest = sequencer.get_highest_published_sequence_bitmap(0, 5);
-        assert_eq!(highest, 4, "Should return 4 when all sequences 0-4 are published");
+        assert_eq!(
+            highest, 4,
+            "Should return 4 when all sequences 0-4 are published"
+        );
     }
 
     #[test]
