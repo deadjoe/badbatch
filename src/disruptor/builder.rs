@@ -326,15 +326,11 @@ pub struct MultipleConsumers;
 ///
 /// # Example
 /// ```rust,no_run
-/// # use badbatch::disruptor::builder::DisruptorBuilder;
-/// # use badbatch::disruptor::EventHandler;
+/// # use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
+/// # #[derive(Default)]
 /// # struct TestEvent { value: i32 }
-/// # impl TestEvent { fn new() -> Self { Self { value: 0 } } }
-/// # impl EventHandler<TestEvent> for fn(&mut TestEvent, i64, bool) {
-/// #     fn on_event(&mut self, _event: &mut TestEvent, _sequence: i64, _end_of_batch: bool) -> Result<(), badbatch::disruptor::DisruptorError> { Ok(()) }
-/// # }
-/// let mut disruptor = DisruptorBuilder::with_ring_buffer(1024, TestEvent::new)
-///     .single_producer()
+/// // Build a single-producer disruptor with a simple event handler
+/// let mut disruptor = build_single_producer(1024, TestEvent::default, BusySpinWaitStrategy)
 ///     .handle_events_with(|_event: &mut TestEvent, _seq, _end_of_batch| {})
 ///     .build();
 ///
@@ -627,11 +623,10 @@ where
     ///
     /// # Example
     /// ```rust,no_run
-    /// # use badbatch::disruptor::builder::DisruptorBuilder;
+    /// # use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
+    /// # #[derive(Default)]
     /// # struct TestEvent { value: i32 }
-    /// # impl TestEvent { fn new() -> Self { Self { value: 0 } } }
-    /// let mut disruptor = DisruptorBuilder::with_ring_buffer(1024, TestEvent::new)
-    ///     .single_producer()
+    /// let mut disruptor = build_single_producer(1024, TestEvent::default, BusySpinWaitStrategy)
     ///     .handle_events_with(|_event: &mut TestEvent, _seq, _end_of_batch| {})
     ///     .build();
     ///
