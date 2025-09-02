@@ -121,20 +121,9 @@ pub trait Sequenced {
     fn publish_range(&self, lo: i64, hi: i64);
 }
 
-/// Provides data access abstraction
-///
-/// This trait is equivalent to the DataProvider interface in the original LMAX Disruptor.
-/// It's typically used to decouple classes from RingBuffer to allow easier testing.
-pub trait DataProvider<T> {
-    /// Get the data item at the specified sequence
-    ///
-    /// # Arguments
-    /// * `sequence` - The sequence at which to find the data
-    ///
-    /// # Returns
-    /// The data item located at that sequence
-    fn get(&self, sequence: i64) -> &T;
-}
+// Re-export DataProvider from event_processor to avoid duplication
+// This provides a unified DataProvider interface across the codebase
+pub use crate::disruptor::event_processor::DataProvider;
 
 /// Event sink for publishing events
 ///
@@ -213,6 +202,13 @@ mod tests {
     impl DataProvider<i32> for TestDataProvider {
         fn get(&self, sequence: i64) -> &i32 {
             &self.data[sequence as usize % self.data.len()]
+        }
+
+        #[allow(clippy::mut_from_ref)]
+        unsafe fn get_mut(&self, sequence: i64) -> &mut i32 {
+            // SAFETY: This is only used in tests where we control access
+            let ptr = self.data.as_ptr() as *mut i32;
+            &mut *ptr.add(sequence as usize % self.data.len())
         }
     }
 

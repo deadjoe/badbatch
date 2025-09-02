@@ -232,11 +232,14 @@ pub fn get_available_cores() -> Vec<usize> {
         .collect()
 }
 
-/// Get the current thread's CPU core ID
+/// Get the first available CPU core ID
+///
+/// This function returns the first available CPU core from the system's core list,
+/// not necessarily the core that the current thread is running on.
 ///
 /// # Returns
-/// The CPU core ID that the current thread is running on, if available
-pub fn get_current_core() -> Option<usize> {
+/// The first available CPU core ID, if any cores are available
+pub fn get_first_available_core() -> Option<usize> {
     core_affinity::get_core_ids()
         .unwrap_or_default()
         .into_iter()

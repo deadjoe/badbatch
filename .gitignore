@@ -5,6 +5,9 @@
 **/*.rs.bk
 *.pdb
 
+# Development process documents
+review_report.md
+
 # Cargo
 # Keep Cargo.lock for applications, ignore for libraries
 # Since BadBatch is an application, we keep Cargo.lock tracked
