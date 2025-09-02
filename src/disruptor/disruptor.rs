@@ -201,7 +201,7 @@ where
 
         // Add the processor's sequence as a gating sequence
         self.sequencer
-            .add_gating_sequences(&[processor_sequence.clone()]);
+            .add_gating_sequences(std::slice::from_ref(&processor_sequence));
 
         self.event_processors.push(processor.clone());
 
@@ -452,7 +452,7 @@ where
         // Add the processor's sequence as a gating sequence
         self.disruptor
             .sequencer
-            .add_gating_sequences(&[processor_sequence.clone()]);
+            .add_gating_sequences(std::slice::from_ref(&processor_sequence));
 
         self.disruptor.event_processors.push(processor);
         self.last_processor_sequences = vec![processor_sequence];
