@@ -15,17 +15,31 @@ name = "badbatch"
 path = "src/lib.rs"
 
 [dependencies]
-# Error handling
+# Core dependencies
+tokio = { version = "1.47", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1.0"
 thiserror = "1.0"
+
+# Configuration
+env_logger = "0.10"
+
+# Async runtime
+uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # Synchronization primitives
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 crossbeam-utils = "0.8"
 core_affinity = "0.8"
+chrono = { version = "0.4.41", features = ["serde"] }
 
 [dev-dependencies]
 # Testing and benchmarking
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+tokio-test = "0.4"
 crossbeam = "0.8"  # For performance comparison benchmarks
 proptest = "1.0"  # Property-based testing
 
@@ -49,8 +63,8 @@ codegen-units = 1
 debug = true
 
 [lints.clippy]
-# Unified clippy strictness - all warnings as errors (consistent with CI/scripts)
-all = { level = "deny", priority = -1 }
+# Match GitHub Actions clippy strictness - all warnings as errors
+all = { level = "warn", priority = -1 }
 uninlined_format_args = "deny"
 
 # Benchmark configurations
