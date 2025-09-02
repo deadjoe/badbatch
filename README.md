@@ -283,7 +283,7 @@ BadBatch is designed for high-performance event processing with the following ch
 ### Optimization Techniques
 
 - **Cache Line Padding**: Uses `crossbeam_utils::CachePadded` to prevent false sharing
-- **Experimental Bitmap Optimization** (disabled by default): O(1) availability checking for large buffers (inspired by disruptor-rs)
+- **Bitmap Optimization**: Enabled by default for buffers with size ≥ 64, providing O(1) availability checking for large buffers (inspired by disruptor-rs). For smaller buffers, the sequencer transparently falls back to the legacy LMAX availability buffer.
 - **Batch Processing**: Automatic batching reduces coordination overhead
 - **Bit Manipulation**: Fast modulo operations using bit masks for power-of-2 buffer sizes
 - **Memory Layout**: Optimal data structures (`Box<[UnsafeCell<T>]>`) for better cache locality
