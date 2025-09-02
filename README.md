@@ -17,7 +17,7 @@
 - **Lock-free ring buffer** with power-of-2 sizing for maximum performance
 - **Multiple wait strategies**: Blocking, BusySpin, Yielding, Sleeping
 - **Event processors** with batch processing capabilities
-- **Single and multi-producer** support with experimental bitmap optimization (disabled by default)
+- **Single and multi-producer** support with experimental bitmap optimization (enabled by default for buffer size ≥ 64)
 - **Comprehensive exception handling** with custom error types
 - **Sequence barriers** and dependency management
 - **Event factories, handlers, and translators** for flexible event processing
