@@ -39,9 +39,9 @@ check_tools() {
 
     local missing_tools=()
 
-    # 检查cargo子命令 - 使用更可靠的方法
+    # cargo-llvm-cov 为可选，缺失时仅提示，覆盖率步骤会自动跳过
     if ! cargo llvm-cov --version >/dev/null 2>&1; then
-        missing_tools+=("cargo-llvm-cov")
+        print_warning "未检测到 cargo-llvm-cov，将在覆盖率步骤自动跳过 (安装: cargo install cargo-llvm-cov)"
     fi
 
     # 在离线或显式跳过时，不强制检查 audit/deny
@@ -63,7 +63,7 @@ check_tools() {
         exit 1
     fi
 
-    print_success "所有必要工具已安装"
+    print_success "所有必要工具已就绪"
 }
 
 # 1. 代码格式检查
@@ -73,17 +73,30 @@ format_check() {
     if cargo fmt --check; then
         print_success "代码格式检查通过"
     else
-        print_warning "代码格式不符合标准，正在自动修复..."
-        cargo fmt
-        print_success "代码格式已修复"
+        if [ -n "$BB_CI" ]; then
+            print_error "CI 模式下格式检查失败，请先本地运行 cargo fmt 修复"
+            exit 1
+        else
+            print_warning "代码格式不符合标准，正在自动修复..."
+            cargo fmt
+            print_success "代码格式已修复"
+        fi
     fi
+}
+
+# 1b. 特性矩阵编译检查（快速发现特性组合问题）
+feature_matrix_check() {
+    print_step "1b. 特性矩阵编译检查 (cargo check)"
+    cargo check --all-targets --all-features --locked
+    cargo check --all-targets --no-default-features --locked || true
+    # 允许无默认特性失败作为提示（部分项目不支持完全关闭默认特性）
 }
 
 # 2. 静态代码分析
 clippy_check() {
     print_step "2. 静态代码分析 (clippy)"
 
-    if cargo clippy --all-targets --all-features -- -D warnings; then
+    if cargo clippy --all-targets --all-features --locked -- -D warnings; then
         print_success "静态代码分析通过"
     else
         print_error "静态代码分析发现问题，请修复后重试"
@@ -95,7 +108,7 @@ clippy_check() {
 unit_tests() {
     print_step "3. 单元测试"
 
-    if cargo test --lib; then
+    if cargo test --lib --locked; then
         print_success "单元测试通过"
     else
         print_error "单元测试失败"
@@ -228,7 +241,7 @@ dependency_check() {
 integration_tests() {
     print_step "6. 集成测试"
 
-    if cargo test --test '*'; then
+    if cargo test --test '*' --locked; then
         print_success "集成测试通过"
     else
         print_error "集成测试失败"
@@ -240,7 +253,7 @@ integration_tests() {
 doc_tests() {
     print_step "7. 文档测试"
 
-    if cargo test --doc; then
+    if cargo test --doc --locked; then
         print_success "文档测试通过"
     else
         print_error "文档测试失败"
@@ -248,16 +261,28 @@ doc_tests() {
     fi
 }
 
+# 8. 文档构建（可选）
+doc_build() {
+    print_step "8. 文档构建 (cargo doc)"
+    if cargo doc --no-deps >/dev/null 2>&1; then
+        print_success "文档构建成功"
+    else
+        print_warning "文档构建失败，非阻断（可在本地修复文档注释或类型可见性）"
+    fi
+}
+
 # 主函数
 main() {
     check_tools
     format_check
+    feature_matrix_check
     clippy_check
     unit_tests
     security_audit
     dependency_check
     integration_tests
     doc_tests
+    doc_build
     coverage_test
 
     echo ""
