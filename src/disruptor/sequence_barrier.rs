@@ -537,7 +537,9 @@ mod tests {
 
         // Consumer is starting from -1, so it will request next_sequence=0
         // Since there is a gap at 1, highest contiguous from 0 is 0
-        let available = barrier.wait_for_with_timeout(0, Duration::from_millis(10)).unwrap();
+        let available = barrier
+            .wait_for_with_timeout(0, Duration::from_millis(10))
+            .unwrap();
         assert_eq!(available, 0);
 
         // Now fill the gap

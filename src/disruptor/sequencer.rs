@@ -453,8 +453,10 @@ impl Sequencer for SingleProducerSequencer {
             self.cursor.clone(),
             Arc::clone(&self.wait_strategy),
             sequences_to_track,
-            Arc::new(SequencerWrapper::new_single_producer(self.buffer_size, self_ptr))
-                as Arc<dyn Sequencer>,
+            Arc::new(SequencerWrapper::new_single_producer(
+                self.buffer_size,
+                self_ptr,
+            )) as Arc<dyn Sequencer>,
         ))
     }
 
@@ -490,11 +492,11 @@ impl Sequencer for SingleProducerSequencer {
 /// combining the best of both approaches for maximum performance.
 ///
 /// ## Cursor Semantics
-/// 
+///
 /// **Important**: This implementation uses a different cursor semantic than the original LMAX Disruptor:
 /// - **Our cursor**: Tracks the highest **claimed** sequence across all producers
 /// - **LMAX cursor**: Tracks the highest **published contiguous** sequence
-/// 
+///
 /// This design choice prioritizes performance by avoiding cursor updates during publish operations,
 /// instead relying on sequence barriers to perform contiguity convergence via `get_highest_published_sequence()`.
 /// This approach is safe but requires proper barrier implementation for correctness.
@@ -510,12 +512,12 @@ pub struct MultiProducerSequencer {
     buffer_size: usize,
     wait_strategy: Arc<dyn WaitStrategy>,
     /// Cursor tracks the highest **claimed** sequence number by any producer.
-    /// 
-    /// **Important**: Unlike LMAX Disruptor's cursor which represents the "highest published 
+    ///
+    /// **Important**: Unlike LMAX Disruptor's cursor which represents the "highest published
     /// contiguous sequence", our cursor represents the "highest claimed sequence" across all
     /// producers. This design choice requires barrier-side contiguity convergence via
     /// `get_highest_published_sequence()` to ensure correctness in MPMC scenarios.
-    /// 
+    ///
     /// The publish operation only marks availability bits without advancing the cursor,
     /// relying on consumers to perform contiguity checking through sequence barriers.
     cursor: Arc<Sequence>,
@@ -950,8 +952,10 @@ impl Sequencer for MultiProducerSequencer {
             self.cursor.clone(),
             Arc::clone(&self.wait_strategy),
             sequences_to_track,
-            Arc::new(SequencerWrapper::new_multi_producer(self.buffer_size, self_ptr))
-                as Arc<dyn Sequencer>,
+            Arc::new(SequencerWrapper::new_multi_producer(
+                self.buffer_size,
+                self_ptr,
+            )) as Arc<dyn Sequencer>,
         ))
     }
 

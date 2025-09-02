@@ -630,13 +630,13 @@ impl WaitStrategy for SleepingWaitStrategy {
         timeout: Duration,
     ) -> Result<i64> {
         let start_time = std::time::Instant::now();
-        
+
         loop {
             // Check timeout first
             if start_time.elapsed() >= timeout {
                 return Err(DisruptorError::Timeout);
             }
-            
+
             let cursor_sequence = cursor.get();
             let dep_min = if dependent_sequences.is_empty() {
                 cursor_sequence

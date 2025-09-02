@@ -314,7 +314,7 @@ pub struct MultipleConsumers;
 /// A consumer thread handle in the Disruptor system.
 ///
 /// # Drop Behavior Warning
-/// 
+///
 /// **Important**: When a `Consumer` is dropped, its `Drop` implementation will
 /// automatically call `join()` on the underlying thread, which **may block**
 /// until the consumer thread completes.
@@ -391,7 +391,7 @@ impl Consumer {
 
 impl Drop for Consumer {
     /// Drop implementation that automatically joins the consumer thread.
-    /// 
+    ///
     /// **Warning**: This may block until the consumer thread completes!
     /// For better control, use `DisruptorHandle::shutdown()` explicitly.
     fn drop(&mut self) {
@@ -615,16 +615,16 @@ where
     }
 
     /// Shutdown the disruptor and wait for all consumer threads to complete.
-    /// 
+    ///
     /// **Recommended Usage**: Call this method explicitly before dropping the
     /// `DisruptorHandle` to ensure controlled shutdown and avoid potential
     /// blocking in the `Drop` implementation of individual consumers.
-    /// 
+    ///
     /// This method:
     /// 1. Sets the shutdown flag to signal all consumer threads to stop
     /// 2. Waits for all consumer threads to complete gracefully
     /// 3. Prevents blocking behavior when the disruptor is dropped
-    /// 
+    ///
     /// # Example
     /// ```rust,no_run
     /// # use badbatch::disruptor::builder::DisruptorBuilder;
@@ -636,7 +636,7 @@ where
     ///     .build();
     ///
     /// // Do work...
-    /// 
+    ///
     /// // Explicitly shutdown before drop (recommended!)
     /// disruptor.shutdown();
     /// ```

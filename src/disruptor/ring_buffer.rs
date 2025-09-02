@@ -430,7 +430,7 @@ mod tests {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let buffer = RingBuffer::new(8, factory).unwrap();
 
-        // Test mutable access 
+        // Test mutable access
         {
             let event = unsafe { DataProvider::get_mut(&buffer, 0) };
             event.value = 42;

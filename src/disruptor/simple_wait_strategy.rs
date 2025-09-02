@@ -174,6 +174,58 @@ where
         Ok(std::cmp::min(available, dep_min))
     }
 
+    fn wait_for_with_timeout(
+        &self,
+        sequence: i64,
+        _cursor: Arc<Sequence>,
+        _dependent_sequences: &[Arc<Sequence>],
+        timeout: std::time::Duration,
+    ) -> crate::disruptor::Result<i64> {
+        let start = std::time::Instant::now();
+        loop {
+            let cursor_val = _cursor.get();
+            let dep_min = if _dependent_sequences.is_empty() {
+                cursor_val
+            } else {
+                Sequence::get_minimum_sequence(_dependent_sequences)
+            };
+            let available = std::cmp::min(cursor_val, dep_min);
+            if available >= sequence {
+                return Ok(available);
+            }
+            if start.elapsed() >= timeout {
+                return Err(crate::disruptor::DisruptorError::Timeout);
+            }
+            // Backoff according to strategy
+            self.strategy.wait_for(sequence);
+        }
+    }
+
+    fn wait_for_with_shutdown(
+        &self,
+        sequence: i64,
+        _cursor: Arc<Sequence>,
+        _dependent_sequences: &[Arc<Sequence>],
+        shutdown_flag: &std::sync::atomic::AtomicBool,
+    ) -> crate::disruptor::Result<i64> {
+        loop {
+            if shutdown_flag.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(crate::disruptor::DisruptorError::Alert);
+            }
+            let cursor_val = _cursor.get();
+            let dep_min = if _dependent_sequences.is_empty() {
+                cursor_val
+            } else {
+                Sequence::get_minimum_sequence(_dependent_sequences)
+            };
+            let available = std::cmp::min(cursor_val, dep_min);
+            if available >= sequence {
+                return Ok(available);
+            }
+            self.strategy.wait_for(sequence);
+        }
+    }
+
     fn signal_all_when_blocking(&self) {
         // Simple strategies don't need signaling
     }
