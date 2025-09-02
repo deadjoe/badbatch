@@ -20,20 +20,39 @@ use std::sync::Arc;
 struct SequencerWrapper {
     buffer_size: usize,
     cursor: Arc<Sequence>,
+    /// Unsafe back-reference to the real sequencer for delegation.
+    /// This is required so the barrier can query publication continuity
+    /// without changing the public Sequencer API surface.
+    sequencer_ptr: *const (dyn Sequencer + 'static),
 }
 
+// SAFETY: The raw pointer is only used to delegate read-only queries
+// to the underlying sequencer and is expected to outlive the wrapper
+// (in production held by Arc, in tests by stack within the same scope).
+// No mutation is performed through this pointer.
+unsafe impl Send for SequencerWrapper {}
+unsafe impl Sync for SequencerWrapper {}
+
 impl SequencerWrapper {
-    fn new_single_producer(buffer_size: usize, _wait_strategy: Arc<dyn WaitStrategy>) -> Self {
+    fn new_single_producer(
+        buffer_size: usize,
+        sequencer_ptr: *const (dyn Sequencer + 'static),
+    ) -> Self {
         Self {
             buffer_size,
             cursor: Arc::new(Sequence::new(-1)),
+            sequencer_ptr,
         }
     }
 
-    fn new_multi_producer(buffer_size: usize, _wait_strategy: Arc<dyn WaitStrategy>) -> Self {
+    fn new_multi_producer(
+        buffer_size: usize,
+        sequencer_ptr: *const (dyn Sequencer + 'static),
+    ) -> Self {
         Self {
             buffer_size,
             cursor: Arc::new(Sequence::new(-1)),
+            sequencer_ptr,
         }
     }
 }
@@ -77,12 +96,24 @@ impl Sequencer for SequencerWrapper {
         true // Simplified for wrapper
     }
 
-    fn is_available(&self, _sequence: i64) -> bool {
-        true // Simplified for wrapper
+    fn is_available(&self, sequence: i64) -> bool {
+        // Delegate to the real sequencer if possible
+        let ptr = self.sequencer_ptr;
+        if ptr.is_null() {
+            return false;
+        }
+        // SAFETY: The underlying sequencer is owned elsewhere (Arc in production
+        // paths or stack in tests) and outlives the barrier created here.
+        unsafe { (&*ptr).is_available(sequence) }
     }
 
-    fn get_highest_published_sequence(&self, _next_sequence: i64, available_sequence: i64) -> i64 {
-        available_sequence // Simplified implementation
+    fn get_highest_published_sequence(&self, next_sequence: i64, available_sequence: i64) -> i64 {
+        let ptr = self.sequencer_ptr;
+        if ptr.is_null() {
+            return available_sequence;
+        }
+        // SAFETY: See note above.
+        unsafe { (&*ptr).get_highest_published_sequence(next_sequence, available_sequence) }
     }
 
     fn new_barrier(&self, _sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
@@ -415,16 +446,16 @@ impl Sequencer for SingleProducerSequencer {
 
     fn new_barrier(&self, sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
         // Create a processing barrier with proper dependency tracking
-        // We need to use a self-reference here, which requires careful handling
+        // Delegate continuity queries through a thin wrapper that
+        // holds an unsafe back-reference to this sequencer.
+        let self_ptr: *const (dyn Sequencer + 'static) = self as &dyn Sequencer;
         Arc::new(ProcessingSequenceBarrier::new(
             self.cursor.clone(),
             Arc::clone(&self.wait_strategy),
             sequences_to_track,
-            // Create a weak reference to avoid circular dependency issues
-            // This works because the barrier doesn't need strong ownership of the sequencer
             Arc::new(SequencerWrapper::new_single_producer(
                 self.buffer_size,
-                Arc::clone(&self.wait_strategy),
+                self_ptr,
             )) as Arc<dyn Sequencer>,
         ))
     }
@@ -460,6 +491,16 @@ impl Sequencer for SingleProducerSequencer {
 /// It uses optimized algorithms inspired by both LMAX Disruptor and disruptor-rs,
 /// combining the best of both approaches for maximum performance.
 ///
+/// ## Cursor Semantics
+///
+/// **Important**: This implementation uses a different cursor semantic than the original LMAX Disruptor:
+/// - **Our cursor**: Tracks the highest **claimed** sequence across all producers
+/// - **LMAX cursor**: Tracks the highest **published contiguous** sequence
+///
+/// This design choice prioritizes performance by avoiding cursor updates during publish operations,
+/// instead relying on sequence barriers to perform contiguity convergence via `get_highest_published_sequence()`.
+/// This approach is safe but requires proper barrier implementation for correctness.
+///
 /// Key features:
 /// - Bitmap-based availability tracking (inspired by disruptor-rs)
 /// - CAS-based coordination between producers (LMAX Disruptor)
@@ -470,6 +511,15 @@ impl Sequencer for SingleProducerSequencer {
 pub struct MultiProducerSequencer {
     buffer_size: usize,
     wait_strategy: Arc<dyn WaitStrategy>,
+    /// Cursor tracks the highest **claimed** sequence number by any producer.
+    ///
+    /// **Important**: Unlike LMAX Disruptor's cursor which represents the "highest published
+    /// contiguous sequence", our cursor represents the "highest claimed sequence" across all
+    /// producers. This design choice requires barrier-side contiguity convergence via
+    /// `get_highest_published_sequence()` to ensure correctness in MPMC scenarios.
+    ///
+    /// The publish operation only marks availability bits without advancing the cursor,
+    /// relying on consumers to perform contiguity checking through sequence barriers.
     cursor: Arc<Sequence>,
     gating_sequences: parking_lot::RwLock<Vec<Arc<Sequence>>>,
     /// Bitmap tracking availability of slots using AtomicU64 arrays
@@ -895,15 +945,16 @@ impl Sequencer for MultiProducerSequencer {
     }
 
     fn new_barrier(&self, sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
-        // Create a processing barrier with proper dependency tracking
+        // Create a processing barrier with proper dependency tracking.
+        // The wrapper delegates continuity queries to the real sequencer.
+        let self_ptr: *const (dyn Sequencer + 'static) = self as &dyn Sequencer;
         Arc::new(ProcessingSequenceBarrier::new(
             self.cursor.clone(),
             Arc::clone(&self.wait_strategy),
             sequences_to_track,
-            // Create a wrapper to avoid circular dependency
             Arc::new(SequencerWrapper::new_multi_producer(
                 self.buffer_size,
-                Arc::clone(&self.wait_strategy),
+                self_ptr,
             )) as Arc<dyn Sequencer>,
         ))
     }
@@ -1339,8 +1390,12 @@ mod tests {
     fn test_sequencer_wrapper_functionality() {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
 
+        // Backing sequencer for delegation
+        let sp = SingleProducerSequencer::new(8, wait_strategy.clone());
+        let sp_ptr: *const (dyn Sequencer + 'static) = &sp as &dyn Sequencer;
+
         // Test single producer wrapper
-        let wrapper = SequencerWrapper::new_single_producer(8, wait_strategy.clone());
+        let wrapper = SequencerWrapper::new_single_producer(8, sp_ptr);
         assert_eq!(wrapper.get_buffer_size(), 8);
         assert_eq!(wrapper.get_cursor().get(), -1);
         assert_eq!(wrapper.next().unwrap(), 0);
@@ -1348,13 +1403,16 @@ mod tests {
         assert_eq!(wrapper.try_next().unwrap(), 0);
         assert_eq!(wrapper.try_next_n(2).unwrap(), 1);
         assert!(wrapper.has_available_capacity(4));
-        assert!(wrapper.is_available(0));
+        // Delegated is_available should reflect real sequencer state (initially unpublished)
+        assert!(!wrapper.is_available(0));
         assert_eq!(wrapper.get_highest_published_sequence(0, 5), 5);
         assert_eq!(wrapper.get_minimum_sequence(), -1);
         assert_eq!(wrapper.remaining_capacity(), 8);
 
         // Test multi producer wrapper
-        let wrapper = SequencerWrapper::new_multi_producer(16, wait_strategy);
+        let sp2 = SingleProducerSequencer::new(16, Arc::new(BlockingWaitStrategy::new()));
+        let ptr2: *const (dyn Sequencer + 'static) = &sp2 as &dyn Sequencer;
+        let wrapper = SequencerWrapper::new_multi_producer(16, ptr2);
         assert_eq!(wrapper.get_buffer_size(), 16);
         assert_eq!(wrapper.get_cursor().get(), -1);
 

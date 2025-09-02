@@ -67,10 +67,13 @@ where
         for mut consumer in self.consumers.drain(..) {
             if let Some(handle) = consumer.join_handle.take() {
                 if let Err(e) = handle.join() {
+                    #[cfg(debug_assertions)]
                     eprintln!(
                         "Error joining consumer thread '{thread_name}': {e:?}",
                         thread_name = consumer.thread_name
                     );
+                    #[cfg(not(debug_assertions))]
+                    let _ = e;
                 }
             }
         }
@@ -308,6 +311,35 @@ pub struct MultipleConsumers;
 /// This structure manages a consumer thread and provides methods to control its lifecycle.
 /// It's inspired by the Consumer structure in disruptor-rs.
 #[derive(Debug)]
+/// A consumer thread handle in the Disruptor system.
+///
+/// # Drop Behavior Warning
+///
+/// **Important**: When a `Consumer` is dropped, its `Drop` implementation will
+/// automatically call `join()` on the underlying thread, which **may block**
+/// until the consumer thread completes.
+///
+/// **Recommendation**: For better control and to avoid unexpected blocking,
+/// explicitly call `DisruptorHandle::shutdown()` before dropping the disruptor
+/// system. This ensures all consumer threads are properly terminated in a
+/// controlled manner.
+///
+/// # Example
+/// ```rust,no_run
+/// # use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
+/// # #[derive(Default)]
+/// # struct TestEvent { value: i32 }
+/// // Build a single-producer disruptor with a simple event handler
+/// let mut disruptor = build_single_producer(1024, TestEvent::default, BusySpinWaitStrategy)
+///     .handle_events_with(|_event: &mut TestEvent, _seq, _end_of_batch| {})
+///     .build();
+///
+/// // Do some work...
+///
+/// // Explicitly shutdown before drop to avoid blocking
+/// disruptor.shutdown(); // Recommended!
+/// // Now disruptor can be safely dropped without blocking
+/// ```
 pub struct Consumer {
     /// Handle to the consumer thread
     join_handle: Option<JoinHandle<()>>,
@@ -354,8 +386,14 @@ impl Consumer {
 }
 
 impl Drop for Consumer {
+    /// Drop implementation that automatically joins the consumer thread.
+    ///
+    /// **Warning**: This may block until the consumer thread completes!
+    /// For better control, use `DisruptorHandle::shutdown()` explicitly.
     fn drop(&mut self) {
         if let Some(handle) = self.join_handle.take() {
+            // Note: This join() call may block until the consumer thread terminates.
+            // Consider calling shutdown() explicitly for better control over timing.
             let _ = handle.join();
         }
     }
@@ -391,9 +429,12 @@ where
             // Set CPU affinity if specified
             if let Some(core_id) = cpu_affinity {
                 if let Err(e) = set_thread_affinity(core_id) {
+                    #[cfg(debug_assertions)]
                     eprintln!(
                         "Warning: Failed to set CPU affinity for thread '{thread_name}' to core {core_id}: {e}"
                     );
+                    #[cfg(not(debug_assertions))]
+                    let _ = e;
                 }
             }
 
@@ -427,9 +468,12 @@ where
                             {
                                 // Log the error but continue processing
                                 // This follows LMAX Disruptor's approach of not stopping on individual event errors
+                                #[cfg(debug_assertions)]
                                 eprintln!(
                                     "Event processing error in thread '{thread_name}' at sequence {next_sequence}: {e:?}"
                                 );
+                                #[cfg(not(debug_assertions))]
+                                let _ = e;
 
                                 // You could also use an exception handler here if available:
                                 // exception_handler.handle_event_exception(e, next_sequence, event);
@@ -566,7 +610,31 @@ where
         self.producer.try_batch_publish(n, update)
     }
 
-    /// Shutdown the disruptor and wait for all consumer threads to complete
+    /// Shutdown the disruptor and wait for all consumer threads to complete.
+    ///
+    /// **Recommended Usage**: Call this method explicitly before dropping the
+    /// `DisruptorHandle` to ensure controlled shutdown and avoid potential
+    /// blocking in the `Drop` implementation of individual consumers.
+    ///
+    /// This method:
+    /// 1. Sets the shutdown flag to signal all consumer threads to stop
+    /// 2. Waits for all consumer threads to complete gracefully
+    /// 3. Prevents blocking behavior when the disruptor is dropped
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
+    /// # #[derive(Default)]
+    /// # struct TestEvent { value: i32 }
+    /// let mut disruptor = build_single_producer(1024, TestEvent::default, BusySpinWaitStrategy)
+    ///     .handle_events_with(|_event: &mut TestEvent, _seq, _end_of_batch| {})
+    ///     .build();
+    ///
+    /// // Do work...
+    ///
+    /// // Explicitly shutdown before drop (recommended!)
+    /// disruptor.shutdown();
+    /// ```
     pub fn shutdown(&mut self) {
         self.core.shutdown();
     }

@@ -272,6 +272,16 @@ where
     fn get(&self, sequence: i64) -> &T {
         self.get(sequence)
     }
+
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn get_mut(&self, sequence: i64) -> &mut T {
+        // SAFETY: The caller must ensure exclusive access to the sequence slot.
+        // This is guaranteed by the Disruptor pattern where:
+        // - Producers only access sequences they've claimed from the sequencer
+        // - Consumers only access sequences after all producers have published
+        // - The sequencer coordinates access to prevent overlapping claims
+        &mut *self.get_mut_unchecked(sequence)
+    }
 }
 
 /// A thread-safe wrapper around the ring buffer
@@ -418,11 +428,11 @@ mod tests {
     #[test]
     fn test_ring_buffer_access() {
         let factory = DefaultEventFactory::<TestEvent>::new();
-        let mut buffer = RingBuffer::new(8, factory).unwrap();
+        let buffer = RingBuffer::new(8, factory).unwrap();
 
         // Test mutable access
         {
-            let event = buffer.get_mut(0);
+            let event = unsafe { DataProvider::get_mut(&buffer, 0) };
             event.value = 42;
         }
 
@@ -434,7 +444,7 @@ mod tests {
 
         // Test wrapping
         {
-            let event = buffer.get_mut(8); // Should wrap to index 0
+            let event = unsafe { DataProvider::get_mut(&buffer, 8) }; // Should wrap to index 0
             event.value = 100;
         }
 
@@ -566,11 +576,11 @@ mod tests {
     #[test]
     fn test_ring_buffer_data_provider_trait() {
         let factory = DefaultEventFactory::<TestEvent>::new();
-        let mut buffer = RingBuffer::new(8, factory).unwrap();
+        let buffer = RingBuffer::new(8, factory).unwrap();
 
         // Set a value using mutable access
         {
-            let event = buffer.get_mut(0);
+            let event = unsafe { DataProvider::get_mut(&buffer, 0) };
             event.value = 456;
         }
 
@@ -583,11 +593,11 @@ mod tests {
     #[test]
     fn test_ring_buffer_wrapping_access() {
         let factory = DefaultEventFactory::<TestEvent>::new();
-        let mut buffer = RingBuffer::new(4, factory).unwrap();
+        let buffer = RingBuffer::new(4, factory).unwrap();
 
         // Test multiple wraps
         for i in 0..12 {
-            let event = buffer.get_mut(i);
+            let event = unsafe { DataProvider::get_mut(&buffer, i) };
             event.value = i;
         }
 
@@ -630,10 +640,10 @@ mod tests {
     #[test]
     fn test_ring_buffer_negative_sequence() {
         let factory = DefaultEventFactory::<TestEvent>::new();
-        let mut buffer = RingBuffer::new(8, factory).unwrap();
+        let buffer = RingBuffer::new(8, factory).unwrap();
 
         // Test negative sequence (should still work due to wrapping)
-        let event = buffer.get_mut(-1);
+        let event = unsafe { DataProvider::get_mut(&buffer, -1) };
         event.value = 999;
 
         // Verify negative sequence access
@@ -648,11 +658,11 @@ mod tests {
     #[test]
     fn test_ring_buffer_large_sequence() {
         let factory = DefaultEventFactory::<TestEvent>::new();
-        let mut buffer = RingBuffer::new(4, factory).unwrap();
+        let buffer = RingBuffer::new(4, factory).unwrap();
 
         // Test very large sequence numbers
         let large_seq = i64::MAX - 100;
-        let event = buffer.get_mut(large_seq);
+        let event = unsafe { DataProvider::get_mut(&buffer, large_seq) };
         event.value = 777;
 
         // Verify large sequence access
