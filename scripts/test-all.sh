@@ -110,7 +110,7 @@ coverage_test() {
     if [ -n "$BB_SKIP_COVERAGE" ]; then
         print_warning "已跳过覆盖率分析 (设置 BB_SKIP_COVERAGE=1)"
         return 0
-    }
+    fi
 
     # 检查是否安装了cargo-llvm-cov
     if ! cargo llvm-cov --version >/dev/null 2>&1; then
