@@ -469,24 +469,8 @@ where
     }
 }
 
-// Implement DataProvider for RingBuffer
-impl<T> DataProvider<T> for RingBuffer<T>
-where
-    T: Send + Sync,
-{
-    fn get(&self, sequence: i64) -> &T {
-        self.get(sequence)
-    }
-
-    unsafe fn get_mut(&self, sequence: i64) -> &mut T {
-        // SAFETY: The caller must ensure exclusive access to the sequence slot.
-        // This is guaranteed by the Disruptor pattern where:
-        // - Producers only access sequences they've claimed from the sequencer
-        // - Consumers only access sequences after all producers have published
-        // - The sequencer coordinates access to prevent overlapping claims
-        &mut *self.get_mut_unchecked(sequence)
-    }
-}
+// DataProvider implementation for RingBuffer is now provided in ring_buffer.rs
+// to avoid duplication and maintain a single source of truth
 
 #[cfg(test)]
 mod tests {
