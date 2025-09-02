@@ -1115,7 +1115,7 @@ mod tests {
 
         // Add a consumer sequence
         let consumer_seq = Arc::new(Sequence::new(-1));
-        sequencer.add_gating_sequences(&[consumer_seq.clone()]);
+        sequencer.add_gating_sequences(std::slice::from_ref(&consumer_seq));
 
         // Claim some sequences
         let _seq1 = sequencer.next_n(4).unwrap();
@@ -1248,7 +1248,7 @@ mod tests {
 
         // Add a consumer sequence
         let consumer_seq = Arc::new(Sequence::new(-1));
-        sequencer.add_gating_sequences(&[consumer_seq.clone()]);
+        sequencer.add_gating_sequences(std::slice::from_ref(&consumer_seq));
 
         // Claim some sequences
         let _seq1 = sequencer.next_n(4).unwrap();
