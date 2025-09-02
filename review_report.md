@@ -16,7 +16,7 @@
         - 说明：当前 `MultiProducerSequencer` 将 `cursor` 用作“claimed 进度”，`publish` 只打可用位，这一设计依赖屏障侧“最高连续已发布”收敛来保证正确性。因此屏障的这两个缺口会直接影响正确性。
 
 高优先级（P1）一致性与职责边界问题
-    - SimpleWaitStrategyAdapter 语义过于简化
+    - SimpleWaitStrategyAdapter 语义过于简化 [done]
         - 问题：忽略 `cursor/依赖`，直接 `Ok(sequence)`，放到 DSL/Builder 的屏障链路会破坏一致性。
         - 修复建议：限定 Adapter 的适用范围（仅用于 ElegantConsumer 简化模型），或在 Adapter 中至少基于 `cursor.get()` 与 `Sequence::get_minimum_sequence` 做基本等待；文档中明确“不用于通用 Disruptor 屏障链路”。
     - WaitStrategy 返回 InsufficientCapacity 的职责边界
@@ -29,13 +29,13 @@
         - 建议新增 E2E 测试：两生产者乱序发布（0、2、3 后补齐 1），验证在补齐前消费者不会越过 0，补齐后推进到 3。分别覆盖 DSL 与 Builder 两条链路；同时覆盖 `wait_for_with_shutdown` 分支。
 
 中优先级（P2）质量改进
-    - 未使用依赖清理
+    - 未使用依赖清理 [done]
         - 结论：`tokio/serde/serde_json/tracing/tracing-subscriber/uuid/env_logger/anyhow/chrono/tokio-test` 在 src/tests/benches 未发现使用。
         - 建议：在不影响未来规划的前提下裁剪，减少编译时间与供应链风险。
     - DataProvider 重复定义
         - 现状：`src/disruptor/core_interfaces.rs` 与 `src/disruptor/event_processor.rs` 各有 `DataProvider`，RingBuffer 分别实现，命名相同但用途不同。
         - 建议：合并到单一 trait（或统一再导出），降低认知成本与维护复杂度。
-    - 文档与实现一致性（位图优化）
+    - 文档与实现一致性（位图优化） [done]
         - 现状：README 写“默认禁用”；实现是 `buffer_size >= 64` 就启用位图路径。
         - 建议：统一为“默认在 buffer_size>=64 启用”；如需“默认禁用”，加 feature/flag 显式控制。
     - 日志输出与库使用
