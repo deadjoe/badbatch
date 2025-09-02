@@ -25,7 +25,7 @@
     - MultiProducerSequencer 的 cursor 语义说明
         - 现状：`cursor` 表达“claimed 序号”，并非 LMAX 语义中的“已发布最高连续序号”。这本身不是错误，但必须配合“屏障连续性收敛”才安全。
         - 建议：在文档中明确 `cursor` 的含义（claimed），并通过 P0 修复确保屏障侧严格收敛；或考虑切回“publish 推进 cursor”的 LMAX 语义（改动较大，非必要）。
-    - MPMC 端到端连续性测试缺口
+    - MPMC 端到端连续性测试缺口 [done]
         - 建议新增 E2E 测试：两生产者乱序发布（0、2、3 后补齐 1），验证在补齐前消费者不会越过 0，补齐后推进到 3。分别覆盖 DSL 与 Builder 两条链路；同时覆盖 `wait_for_with_shutdown` 分支。
 
 中优先级（P2）质量改进

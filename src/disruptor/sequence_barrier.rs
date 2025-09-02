@@ -508,6 +508,49 @@ mod tests {
     }
 
     #[test]
+    fn test_processing_sequence_barrier_mpmc_gaps() {
+        use crate::disruptor::MultiProducerSequencer;
+        use std::time::Duration;
+
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = Arc::new(MultiProducerSequencer::new(16, wait_strategy.clone()))
+            as Arc<dyn crate::disruptor::Sequencer>;
+
+        // Create barrier tracking only the cursor (no dependent consumers)
+        let cursor = sequencer.get_cursor();
+        let barrier = ProcessingSequenceBarrier::new(cursor, wait_strategy, vec![], sequencer);
+
+        // Claim sequences 0..=3
+        let seq0 = barrier.sequencer.next().unwrap();
+        let seq1 = barrier.sequencer.next().unwrap();
+        let seq2 = barrier.sequencer.next().unwrap();
+        let seq3 = barrier.sequencer.next().unwrap();
+        assert_eq!(seq0, 0);
+        assert_eq!(seq1, 1);
+        assert_eq!(seq2, 2);
+        assert_eq!(seq3, 3);
+
+        // Publish out of order: 0, 2, 3 (gap at 1)
+        barrier.sequencer.publish(seq0);
+        barrier.sequencer.publish(seq2);
+        barrier.sequencer.publish(seq3);
+
+        // Consumer is starting from -1, so it will request next_sequence=0
+        // Since there is a gap at 1, highest contiguous from 0 is 0
+        let available = barrier.wait_for_with_timeout(0, Duration::from_millis(10)).unwrap();
+        assert_eq!(available, 0);
+
+        // Now fill the gap
+        barrier.sequencer.publish(seq1);
+
+        // Highest contiguous should become 3 when starting from 0
+        let available2 = barrier
+            .wait_for_with_timeout(0, Duration::from_millis(10))
+            .unwrap();
+        assert_eq!(available2, 3);
+    }
+
+    #[test]
     fn test_simple_sequence_barrier_with_timeout() {
         use std::time::Duration;
 

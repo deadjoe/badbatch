@@ -290,7 +290,7 @@ BadBatch is designed for high-performance event processing with the following ch
 
 ### Experimental Features
 
-- **Bitmap Optimization**: Currently disabled by default due to ongoing stability improvements. This feature provides O(1) availability checking for large buffers using atomic bitmap operations. While functionally complete, it has been temporarily disabled to ensure maximum stability for multi-producer scenarios. The proven legacy availability checking method is used instead, providing excellent performance and reliability.
+- **Bitmap Optimization**: Enabled by default for buffers with size ≥ 64. This feature provides O(1) availability checking for large buffers using atomic bitmap operations（inspired by disruptor‑rs）. For smaller buffers, the sequencer transparently falls back to the legacy LMAX availability buffer. You can evaluate performance trade‑offs via the provided benchmarks.
 
 ### Benchmark Results
 
