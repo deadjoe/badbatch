@@ -622,6 +622,35 @@ impl WaitStrategy for SleepingWaitStrategy {
         }
     }
 
+    fn wait_for_with_timeout(
+        &self,
+        sequence: i64,
+        cursor: Arc<Sequence>,
+        dependent_sequences: &[Arc<Sequence>],
+        timeout: Duration,
+    ) -> Result<i64> {
+        let start_time = std::time::Instant::now();
+        
+        loop {
+            // Check timeout first
+            if start_time.elapsed() >= timeout {
+                return Err(DisruptorError::Timeout);
+            }
+            
+            let cursor_sequence = cursor.get();
+            let dep_min = if dependent_sequences.is_empty() {
+                cursor_sequence
+            } else {
+                Sequence::get_minimum_sequence(dependent_sequences)
+            };
+            let available = std::cmp::min(cursor_sequence, dep_min);
+            if available >= sequence {
+                return Ok(available);
+            }
+            thread::sleep(self.sleep_duration);
+        }
+    }
+
     fn signal_all_when_blocking(&self) {
         // Sleeping strategy doesn't use complex blocking, so no signaling needed
     }
