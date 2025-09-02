@@ -260,7 +260,16 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
         // This matches disruptor-rs fence(Ordering::Acquire) at line 177
         std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
 
-        Ok(available_sequence)
+        // Align with other wait paths: ensure we return the highest
+        // contiguous published sequence for multi-producer scenarios.
+        if available_sequence < sequence {
+            return Ok(available_sequence);
+        }
+
+        let highest_published = self
+            .sequencer
+            .get_highest_published_sequence(sequence, available_sequence);
+        Ok(highest_published)
     }
 }
 
