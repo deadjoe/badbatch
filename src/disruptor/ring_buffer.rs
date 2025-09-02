@@ -323,7 +323,7 @@ where
     ///
     /// # Returns
     /// A mapped read guard containing the event
-    pub fn get(&self, sequence: i64) -> parking_lot::MappedRwLockReadGuard<T> {
+    pub fn get(&self, sequence: i64) -> parking_lot::MappedRwLockReadGuard<'_, T> {
         parking_lot::RwLockReadGuard::map(self.inner.read(), |rb| rb.get(sequence))
     }
 
@@ -334,7 +334,7 @@ where
     ///
     /// # Returns
     /// A mapped write guard containing the event
-    pub fn get_mut(&self, sequence: i64) -> parking_lot::MappedRwLockWriteGuard<T> {
+    pub fn get_mut(&self, sequence: i64) -> parking_lot::MappedRwLockWriteGuard<'_, T> {
         parking_lot::RwLockWriteGuard::map(self.inner.write(), |rb| rb.get_mut(sequence))
     }
 
