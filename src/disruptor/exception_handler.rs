@@ -74,15 +74,29 @@ where
     T: Debug + Send + Sync,
 {
     fn handle_event_exception(&self, error: DisruptorError, sequence: i64, event: &T) {
+        // Only log to stderr in debug builds to avoid polluting user output in release
+        #[cfg(debug_assertions)]
         eprintln!("Exception processing event at sequence {sequence}: {error:?}. Event: {event:?}");
+        
+        // In release builds, errors are silently ignored following the original LMAX Disruptor behavior
+        #[cfg(not(debug_assertions))]
+        let _ = (&error, sequence, event); // Suppress unused variable warnings
     }
 
     fn handle_on_start_exception(&self, error: DisruptorError) {
+        #[cfg(debug_assertions)]
         eprintln!("Exception during event processor startup: {error:?}");
+        
+        #[cfg(not(debug_assertions))]
+        let _ = error;
     }
 
     fn handle_on_shutdown_exception(&self, error: DisruptorError) {
+        #[cfg(debug_assertions)]
         eprintln!("Exception during event processor shutdown: {error:?}");
+        
+        #[cfg(not(debug_assertions))]
+        let _ = error;
     }
 }
 

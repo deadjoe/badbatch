@@ -67,10 +67,13 @@ where
         for mut consumer in self.consumers.drain(..) {
             if let Some(handle) = consumer.join_handle.take() {
                 if let Err(e) = handle.join() {
+                    #[cfg(debug_assertions)]
                     eprintln!(
                         "Error joining consumer thread '{thread_name}': {e:?}",
                         thread_name = consumer.thread_name
                     );
+                    #[cfg(not(debug_assertions))]
+                    let _ = e;
                 }
             }
         }
@@ -391,9 +394,12 @@ where
             // Set CPU affinity if specified
             if let Some(core_id) = cpu_affinity {
                 if let Err(e) = set_thread_affinity(core_id) {
+                    #[cfg(debug_assertions)]
                     eprintln!(
                         "Warning: Failed to set CPU affinity for thread '{thread_name}' to core {core_id}: {e}"
                     );
+                    #[cfg(not(debug_assertions))]
+                    let _ = e;
                 }
             }
 
@@ -427,9 +433,12 @@ where
                             {
                                 // Log the error but continue processing
                                 // This follows LMAX Disruptor's approach of not stopping on individual event errors
+                                #[cfg(debug_assertions)]
                                 eprintln!(
                                     "Event processing error in thread '{thread_name}' at sequence {next_sequence}: {e:?}"
                                 );
+                                #[cfg(not(debug_assertions))]
+                                let _ = e;
 
                                 // You could also use an exception handler here if available:
                                 // exception_handler.handle_event_exception(e, next_sequence, event);
