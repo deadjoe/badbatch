@@ -4,6 +4,7 @@
 # 包含代码格式检查、静态分析、测试覆盖率、安全审计和依赖管理检查
 
 set -e  # 遇到错误立即退出
+set -o pipefail
 
 echo "🚀 BadBatch 综合测试开始..."
 echo "================================"
@@ -43,12 +44,17 @@ check_tools() {
         missing_tools+=("cargo-llvm-cov")
     fi
 
-    if ! cargo audit --version >/dev/null 2>&1; then
-        missing_tools+=("cargo-audit")
+    # 在离线或显式跳过时，不强制检查 audit/deny
+    if [ -z "$BB_SKIP_AUDIT" ] && [ -z "$BB_OFFLINE" ]; then
+        if ! cargo audit --version >/dev/null 2>&1; then
+            missing_tools+=("cargo-audit")
+        fi
     fi
 
-    if ! cargo deny --version >/dev/null 2>&1; then
-        missing_tools+=("cargo-deny")
+    if [ -z "$BB_SKIP_DENY" ] && [ -z "$BB_OFFLINE" ]; then
+        if ! cargo deny --version >/dev/null 2>&1; then
+            missing_tools+=("cargo-deny")
+        fi
     fi
 
     if [ ${#missing_tools[@]} -ne 0 ]; then
@@ -100,6 +106,11 @@ unit_tests() {
 # 9. 测试覆盖率
 coverage_test() {
     print_step "9. 测试覆盖率分析 (llvm-cov)"
+
+    if [ -n "$BB_SKIP_COVERAGE" ]; then
+        print_warning "已跳过覆盖率分析 (设置 BB_SKIP_COVERAGE=1)"
+        return 0
+    }
 
     # 检查是否安装了cargo-llvm-cov
     if ! cargo llvm-cov --version >/dev/null 2>&1; then
@@ -183,6 +194,11 @@ coverage_test() {
 security_audit() {
     print_step "4. 安全审计 (cargo-audit)"
 
+    if [ -n "$BB_SKIP_AUDIT" ] || [ -n "$BB_OFFLINE" ]; then
+        print_warning "已跳过安全审计 (设置 BB_SKIP_AUDIT=1 或 BB_OFFLINE=1)"
+        return 0
+    fi
+
     if cargo audit; then
         print_success "安全审计通过"
     else
@@ -194,6 +210,11 @@ security_audit() {
 # 5. 依赖管理检查
 dependency_check() {
     print_step "5. 依赖管理检查 (cargo-deny)"
+
+    if [ -n "$BB_SKIP_DENY" ] || [ -n "$BB_OFFLINE" ]; then
+        print_warning "已跳过依赖管理检查 (设置 BB_SKIP_DENY=1 或 BB_OFFLINE=1)"
+        return 0
+    fi
 
     if cargo deny check; then
         print_success "依赖管理检查通过"
