@@ -237,7 +237,7 @@ where
             let shutdown_flag = Arc::clone(&self.shutdown_flag);
 
             let handle = thread::spawn(move || -> Result<()> {
-                println!("Event processor {index} starting");
+                crate::internal_debug!("Event processor {index} starting");
 
                 // Start the processor's lifecycle
                 processor_clone.on_start();
@@ -275,7 +275,7 @@ where
                         }
                         Err(e) => {
                             // Other errors, log and continue
-                            eprintln!("Event processor {index} error: {e:?}");
+                            crate::internal_error!("Event processor {index} error: {e:?}");
                             thread::sleep(std::time::Duration::from_millis(1));
                         }
                     }
@@ -283,7 +283,7 @@ where
 
                 // Shutdown lifecycle
                 processor_clone.on_shutdown();
-                println!("Event processor {index} shutting down");
+                crate::internal_debug!("Event processor {index} shutting down");
                 Ok(())
             });
 
@@ -329,12 +329,12 @@ where
                 }
                 Ok(Err(e)) => {
                     let err_msg = format!("Event processor thread returned error: {e:?}");
-                    eprintln!("{err_msg}");
+                    crate::internal_error!("{err_msg}");
                     join_errors.push(err_msg);
                 }
                 Err(_) => {
                     let err_msg = "Event processor thread panicked".to_string();
-                    eprintln!("{err_msg}");
+                    crate::internal_error!("{err_msg}");
                     join_errors.push(err_msg);
                 }
             }

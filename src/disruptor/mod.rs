@@ -47,6 +47,9 @@ pub mod wait_strategy;
 // Simplified wait strategies (inspired by disruptor-rs)
 pub mod simple_wait_strategy;
 
+// Internal logging utilities
+pub mod internal_log;
+
 // Event processing
 pub mod event_processor;
 

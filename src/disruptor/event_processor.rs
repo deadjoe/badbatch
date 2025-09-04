@@ -190,11 +190,8 @@ where
                     self.notify_timeout(self.sequence.get());
                 }
                 Err(e) => {
-                    // Other errors, log only in debug builds and continue
-                    #[cfg(debug_assertions)]
-                    eprintln!("Event processor error: {e:?}");
-                    #[cfg(not(debug_assertions))]
-                    let _ = e;
+                    // Other errors, log and continue
+                    crate::internal_error!("Event processor error: {e:?}");
                     thread::sleep(std::time::Duration::from_millis(1));
                 }
             }

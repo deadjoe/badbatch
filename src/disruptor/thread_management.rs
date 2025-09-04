@@ -207,12 +207,12 @@ fn set_affinity_if_defined(affinity: Option<CoreId>, thread_name: &str) {
     if let Some(core_id) = affinity {
         let success = core_affinity::set_for_current(core_id);
         if !success {
-            eprintln!(
+            crate::internal_warn!(
                 "Warning: Could not pin thread '{thread_name}' to CPU core {}",
                 core_id.id
             );
         } else {
-            println!(
+            crate::internal_debug!(
                 "Successfully pinned thread '{thread_name}' to CPU core {}",
                 core_id.id
             );
@@ -313,7 +313,7 @@ mod tests {
         let cores = get_available_cores();
         // Should have at least one core on any system
         assert!(!cores.is_empty());
-        println!("Available CPU cores: {cores:?}");
+        crate::test_log!("Available CPU cores: {cores:?}");
     }
 
     #[test]
