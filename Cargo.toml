@@ -27,7 +27,7 @@ core_affinity = "0.8"
 # Testing and benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
 crossbeam = "0.8"  # For performance comparison benchmarks
-proptest = "1.0"  # Property-based testing
+proptest = "1.7"  # Property-based testing
 
 [features]
 default = []
