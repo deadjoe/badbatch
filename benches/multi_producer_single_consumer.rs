@@ -5,7 +5,7 @@
 
 use criterion::measurement::WallTime;
 use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
+     criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -109,7 +109,7 @@ impl SyncProducer {
                 let result = disruptor.publish_event(ClosureEventTranslator::new(
                     move |event: &mut MPSCEvent, seq: i64| {
                         event.producer_id = producer_id;
-                        event.value = black_box(i as i64);
+                        event.value = std::hint::black_box(i as i64);
                         event.sequence = seq;
                     },
                 ));
@@ -199,7 +199,7 @@ fn baseline_mpsc_measurement(group: &mut BenchmarkGroup<WallTime>, burst_size: u
                         thread::spawn(move || {
                             for i in 1..=burst_size {
                                 counter.fetch_add(1, Ordering::Release);
-                                black_box(i);
+                                std::hint::black_box(i);
                             }
                         })
                     })
