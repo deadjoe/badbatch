@@ -25,7 +25,7 @@ core_affinity = "0.8"
 
 [dev-dependencies]
 # Testing and benchmarking
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.7", features = ["html_reports"] }
 crossbeam = "0.8"  # For performance comparison benchmarks
 proptest = "1.0"  # Property-based testing
 
