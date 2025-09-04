@@ -5,7 +5,7 @@
 
 use criterion::measurement::WallTime;
 use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
+     criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -55,7 +55,7 @@ impl EventHandler<PipelineEvent> for Stage1Handler {
         _end_of_batch: bool,
     ) -> DisruptorResult<()> {
         // Simulate input validation and normalization
-        event.stage1_result = black_box(event.id * 2 + 1);
+        event.stage1_result = std::hint::black_box(event.id * 2 + 1);
         self.processed_count.fetch_add(1, Ordering::Release);
         Ok(())
     }
@@ -86,7 +86,7 @@ impl EventHandler<PipelineEvent> for Stage2Handler {
         _end_of_batch: bool,
     ) -> DisruptorResult<()> {
         // Simulate business logic processing
-        event.stage2_result = black_box(event.stage1_result * 3 + event.id);
+        event.stage2_result = std::hint::black_box(event.stage1_result * 3 + event.id);
         self.processed_count.fetch_add(1, Ordering::Release);
         Ok(())
     }
@@ -117,7 +117,7 @@ impl EventHandler<PipelineEvent> for Stage3Handler {
         _end_of_batch: bool,
     ) -> DisruptorResult<()> {
         // Simulate aggregation and enrichment
-        event.stage3_result = black_box(event.stage2_result + event.stage1_result / 2);
+        event.stage3_result = std::hint::black_box(event.stage2_result + event.stage1_result / 2);
         self.processed_count.fetch_add(1, Ordering::Release);
         Ok(())
     }
@@ -154,7 +154,7 @@ impl EventHandler<PipelineEvent> for FinalHandler {
         _end_of_batch: bool,
     ) -> DisruptorResult<()> {
         // Simulate final processing and output
-        event.final_result = black_box(event.stage3_result + event.stage2_result);
+        event.final_result = std::hint::black_box(event.stage3_result + event.stage2_result);
         self.last_id.store(event.id, Ordering::Release);
         self.processed_count.fetch_add(1, Ordering::Release);
         Ok(())
@@ -225,7 +225,7 @@ fn benchmark_two_stage_pipeline(
                     disruptor
                         .publish_event(ClosureEventTranslator::new(
                             move |event: &mut PipelineEvent, _seq: i64| {
-                                event.id = black_box(i as i64);
+                                event.id = std::hint::black_box(i as i64);
                                 event.stage1_result = 0;
                                 event.stage2_result = 0;
                                 event.stage3_result = 0;
@@ -297,7 +297,7 @@ fn benchmark_three_stage_pipeline(
                     disruptor
                         .publish_event(ClosureEventTranslator::new(
                             move |event: &mut PipelineEvent, _seq: i64| {
-                                event.id = black_box(i as i64);
+                                event.id = std::hint::black_box(i as i64);
                                 event.stage1_result = 0;
                                 event.stage2_result = 0;
                                 event.stage3_result = 0;
@@ -373,7 +373,7 @@ fn benchmark_four_stage_pipeline(
                     disruptor
                         .publish_event(ClosureEventTranslator::new(
                             move |event: &mut PipelineEvent, _seq: i64| {
-                                event.id = black_box(i as i64);
+                                event.id = std::hint::black_box(i as i64);
                                 event.stage1_result = 0;
                                 event.stage2_result = 0;
                                 event.stage3_result = 0;

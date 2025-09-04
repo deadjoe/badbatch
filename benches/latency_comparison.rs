@@ -4,7 +4,7 @@
 //! Disruptor against other concurrency primitives like channels.
 
 use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion,
+     criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion,
 };
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc;
@@ -151,7 +151,7 @@ fn benchmark_disruptor_latency(group: &mut BenchmarkGroup<criterion::measurement
             disruptor
                 .publish_event(ClosureEventTranslator::new(
                     move |event: &mut LatencyEvent, _seq: i64| {
-                        event.id = black_box(1);
+                        event.id = std::hint::black_box(1);
                         event.send_time = send_time;
                     },
                 ))
@@ -162,7 +162,7 @@ fn benchmark_disruptor_latency(group: &mut BenchmarkGroup<criterion::measurement
                 std::hint::spin_loop();
             }
 
-            black_box(())
+            std::hint::black_box(())
         })
     });
 
@@ -204,7 +204,7 @@ fn benchmark_mpsc_latency(group: &mut BenchmarkGroup<criterion::measurement::Wal
 
             // Measure single event latency
             let _send_time = get_timestamp_nanos();
-            if sender.send((black_box(1), _send_time)).is_ok() {
+            if sender.send((std::hint::black_box(1), _send_time)).is_ok() {
                 // Wait for the single event to be processed
                 while counter.load(Ordering::Acquire) < 1 {
                     std::hint::spin_loop();
@@ -215,7 +215,7 @@ fn benchmark_mpsc_latency(group: &mut BenchmarkGroup<criterion::measurement::Wal
             drop(sender);
             receiver_handle.join().unwrap();
 
-            black_box(())
+            std::hint::black_box(())
         })
     });
 
@@ -243,7 +243,7 @@ fn benchmark_crossbeam_latency(group: &mut BenchmarkGroup<criterion::measurement
 
             // Measure single event latency
             let _send_time = get_timestamp_nanos();
-            if sender.send((black_box(1), _send_time)).is_ok() {
+            if sender.send((std::hint::black_box(1), _send_time)).is_ok() {
                 // Wait for the single event to be processed
                 while counter.load(Ordering::Acquire) < 1 {
                     std::hint::spin_loop();
@@ -254,7 +254,7 @@ fn benchmark_crossbeam_latency(group: &mut BenchmarkGroup<criterion::measurement
             drop(sender);
             receiver_handle.join().unwrap();
 
-            black_box(())
+            std::hint::black_box(())
         })
     });
 
