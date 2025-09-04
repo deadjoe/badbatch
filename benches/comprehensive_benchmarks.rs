@@ -8,7 +8,7 @@ use std::time::Duration;
 
 // Import the fixed benchmark modules
 mod fixed_benchmarks {
-    use criterion::{ BenchmarkId, Criterion, Throughput};
+    use criterion::{BenchmarkId, Criterion, Throughput};
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};

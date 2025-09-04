@@ -3,9 +3,7 @@
 //! This benchmark suite compares the latency characteristics of the BadBatch
 //! Disruptor against other concurrency primitives like channels.
 
-use criterion::{
-     criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion,
-};
+use criterion::{criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
