@@ -74,7 +74,9 @@ where
     T: Debug + Send + Sync,
 {
     fn handle_event_exception(&self, error: DisruptorError, sequence: i64, event: &T) {
-        crate::internal_error!("Exception processing event at sequence {sequence}: {error:?}. Event: {event:?}");
+        crate::internal_error!(
+            "Exception processing event at sequence {sequence}: {error:?}. Event: {event:?}"
+        );
     }
 
     fn handle_on_start_exception(&self, error: DisruptorError) {
