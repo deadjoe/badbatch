@@ -8,7 +8,7 @@ use std::time::Duration;
 
 // Import the fixed benchmark modules
 mod fixed_benchmarks {
-    use criterion::{black_box, BenchmarkId, Criterion, Throughput};
+    use criterion::{ BenchmarkId, Criterion, Throughput};
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -109,7 +109,7 @@ mod fixed_benchmarks {
                             if disruptor
                                 .publish_event(ClosureEventTranslator::new(
                                     move |event: &mut SafeEvent, _seq: i64| {
-                                        event.value = black_box(i as i64);
+                                        event.value = std::hint::black_box(i as i64);
                                     },
                                 ))
                                 .is_err()
@@ -172,7 +172,7 @@ mod fixed_benchmarks {
                             if disruptor
                                 .publish_event(ClosureEventTranslator::new(
                                     move |event: &mut SafeEvent, _seq: i64| {
-                                        event.value = black_box(i);
+                                        event.value = std::hint::black_box(i);
                                     },
                                 ))
                                 .is_err()
@@ -227,7 +227,7 @@ mod fixed_benchmarks {
                     if disruptor
                         .publish_event(ClosureEventTranslator::new(
                             move |event: &mut SafeEvent, _seq: i64| {
-                                event.value = black_box(i as i64);
+                                event.value = std::hint::black_box(i as i64);
                             },
                         ))
                         .is_err()

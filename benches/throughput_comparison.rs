@@ -5,7 +5,7 @@
 
 use criterion::measurement::WallTime;
 use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
+     criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{mpsc, Arc};
@@ -55,7 +55,7 @@ impl EventHandler<ThroughputEvent> for ThroughputHandler {
         _end_of_batch: bool,
     ) -> DisruptorResult<()> {
         // Minimal processing - just ensure event is not optimized away
-        black_box(event.data[0]);
+        std::hint::black_box(event.data[0]);
         self.counter.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -106,7 +106,7 @@ fn benchmark_disruptor_throughput(
                     disruptor
                         .publish_event(ClosureEventTranslator::new(
                             move |event: &mut ThroughputEvent, _seq: i64| {
-                                event.id = black_box(i as i64);
+                                event.id = std::hint::black_box(i as i64);
                                 event.data = [i as i64; 4];
                             },
                         ))
@@ -146,7 +146,7 @@ fn benchmark_mpsc_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: 
                         if let Ok(event) = receiver.recv() {
                             // Minimal processing to match Disruptor handler
                             let _event: ThroughputEvent = event;
-                            black_box(_event.data[0]);
+                            std::hint::black_box(_event.data[0]);
 
                             processed += 1;
                             counter_clone.store(processed as i64, Ordering::Relaxed);
@@ -159,7 +159,7 @@ fn benchmark_mpsc_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: 
 
                 for i in 0..THROUGHPUT_EVENTS {
                     let event = ThroughputEvent {
-                        id: black_box(i as i64),
+                        id: std::hint::black_box(i as i64),
                         data: [i as i64; 4],
                     };
                     if sender.send(event).is_err() {
@@ -203,7 +203,7 @@ fn benchmark_crossbeam_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_s
                         if let Ok(event) = receiver.recv() {
                             // Minimal processing to match Disruptor handler
                             let _event: ThroughputEvent = event;
-                            black_box(_event.data[0]);
+                            std::hint::black_box(_event.data[0]);
 
                             processed += 1;
                             counter_clone.store(processed as i64, Ordering::Relaxed);
@@ -216,7 +216,7 @@ fn benchmark_crossbeam_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_s
 
                 for i in 0..THROUGHPUT_EVENTS {
                     let event = ThroughputEvent {
-                        id: black_box(i as i64),
+                        id: std::hint::black_box(i as i64),
                         data: [i as i64; 4],
                     };
                     if sender.send(event).is_err() {
@@ -271,7 +271,7 @@ fn benchmark_try_publish_throughput(group: &mut BenchmarkGroup<WallTime>, buffer
                 while published < THROUGHPUT_EVENTS {
                     let success = disruptor.try_publish_event(ClosureEventTranslator::new(
                         move |event: &mut ThroughputEvent, _seq: i64| {
-                            event.id = black_box(published as i64);
+                            event.id = std::hint::black_box(published as i64);
                             event.data = [published as i64; 4];
                         },
                     ));

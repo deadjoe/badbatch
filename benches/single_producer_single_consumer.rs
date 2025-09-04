@@ -5,7 +5,7 @@
 
 use criterion::measurement::WallTime;
 use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
+     criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -52,7 +52,7 @@ impl EventHandler<BenchmarkEvent> for CountingSink {
         _end_of_batch: bool,
     ) -> DisruptorResult<()> {
         // Minimal processing - just increment counter
-        black_box(event.value);
+        std::hint::black_box(event.value);
         self.counter.fetch_add(1, Ordering::Release);
         Ok(())
     }
@@ -124,7 +124,7 @@ fn baseline_measurement(group: &mut BenchmarkGroup<WallTime>, burst_size: u64) {
             for _ in 0..iters {
                 counter.store(0, Ordering::Release);
                 for i in 1..=burst_size {
-                    counter.store(black_box(i as i64), Ordering::Release);
+                    counter.store(std::hint::black_box(i as i64), Ordering::Release);
                 }
                 // Simple verification
                 assert_eq!(counter.load(Ordering::Acquire), burst_size as i64);
@@ -171,7 +171,7 @@ fn benchmark_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pa
                     disruptor
                         .publish_event(ClosureEventTranslator::new(
                             move |event: &mut BenchmarkEvent, seq: i64| {
-                                event.value = black_box(i as i64);
+                                event.value = std::hint::black_box(i as i64);
                                 event.sequence = seq;
                             },
                         ))
@@ -229,7 +229,7 @@ fn benchmark_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
                     disruptor
                         .publish_event(ClosureEventTranslator::new(
                             move |event: &mut BenchmarkEvent, seq: i64| {
-                                event.value = black_box(i as i64);
+                                event.value = std::hint::black_box(i as i64);
                                 event.sequence = seq;
                             },
                         ))
@@ -287,7 +287,7 @@ fn benchmark_blocking(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
                     disruptor
                         .publish_event(ClosureEventTranslator::new(
                             move |event: &mut BenchmarkEvent, seq: i64| {
-                                event.value = black_box(i as i64);
+                                event.value = std::hint::black_box(i as i64);
                                 event.sequence = seq;
                             },
                         ))
@@ -345,7 +345,7 @@ fn benchmark_sleeping(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
                     disruptor
                         .publish_event(ClosureEventTranslator::new(
                             move |event: &mut BenchmarkEvent, seq: i64| {
-                                event.value = black_box(i as i64);
+                                event.value = std::hint::black_box(i as i64);
                                 event.sequence = seq;
                             },
                         ))

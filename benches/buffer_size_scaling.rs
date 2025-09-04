@@ -5,7 +5,7 @@
 
 use criterion::measurement::WallTime;
 use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
+     criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -71,7 +71,7 @@ impl EventHandler<ScalingEvent> for ScalingHandler {
 
         // Process the event data
         let sum: i64 = event.data.iter().sum();
-        black_box(sum);
+        std::hint::black_box(sum);
 
         self.last_id.store(event.id, Ordering::Release);
         self.counter.fetch_add(1, Ordering::Release);
@@ -190,7 +190,7 @@ fn benchmark_fast_processing_scaling(
                 disruptor
                     .publish_event(ClosureEventTranslator::new(
                         move |event: &mut ScalingEvent, _seq: i64| {
-                            event.id = black_box(i as i64);
+                            event.id = std::hint::black_box(i as i64);
                             event.data = vec![i as i64; 4]; // Small payload
                         },
                     ))
@@ -241,7 +241,7 @@ fn benchmark_medium_processing_scaling(
                 disruptor
                     .publish_event(ClosureEventTranslator::new(
                         move |event: &mut ScalingEvent, _seq: i64| {
-                            event.id = black_box(i as i64);
+                            event.id = std::hint::black_box(i as i64);
                             event.data = vec![i as i64; 16]; // Medium payload
                         },
                     ))
@@ -292,7 +292,7 @@ fn benchmark_slow_processing_scaling(
                 disruptor
                     .publish_event(ClosureEventTranslator::new(
                         move |event: &mut ScalingEvent, _seq: i64| {
-                            event.id = black_box(i as i64);
+                            event.id = std::hint::black_box(i as i64);
                             event.data = vec![i as i64; 64]; // Large payload
                         },
                     ))
@@ -336,7 +336,7 @@ fn benchmark_memory_scaling(group: &mut BenchmarkGroup<WallTime>, buffer_size: u
             for payload_size in [1, 10, 100] {
                 let success = disruptor.try_publish_event(ClosureEventTranslator::new(
                     move |event: &mut ScalingEvent, _seq: i64| {
-                        event.id = black_box(1);
+                        event.id = std::hint::black_box(1);
                         event.data = vec![1; payload_size];
                     },
                 ));
@@ -394,7 +394,7 @@ fn benchmark_buffer_utilization(
                 loop {
                     let success = disruptor.try_publish_event(ClosureEventTranslator::new(
                         move |event: &mut ScalingEvent, _seq: i64| {
-                            event.id = black_box(i as i64);
+                            event.id = std::hint::black_box(i as i64);
                             event.data = vec![i as i64; 8];
                         },
                     ));
