@@ -5,7 +5,7 @@
 
 use criterion::measurement::WallTime;
 use criterion::{
-     criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
+    criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{mpsc, Arc};
