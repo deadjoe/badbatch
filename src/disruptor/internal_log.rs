@@ -1,5 +1,5 @@
 //! Internal logging utilities for BadBatch Disruptor
-//! 
+//!
 //! This module provides controlled logging that doesn't pollute user output
 //! by default. Logging can be enabled via the BADBATCH_LOG environment variable.
 
@@ -41,7 +41,7 @@ macro_rules! internal_warn {
 
 /// Internal error logging macro
 /// Always outputs to stderr in debug builds, controlled by BADBATCH_LOG in release
-#[macro_export]  
+#[macro_export]
 macro_rules! internal_error {
     ($($arg:tt)*) => {
         #[cfg(debug_assertions)]
