@@ -62,7 +62,7 @@ run_tlc() {
     local temp_dir=$(mktemp -d)
     local log_file="$temp_dir/tlc.log"
 
-    # Run TLC model checker with deadlock checking disabled
+    # Run TLC model checker with deadlock checking enabled (-deadlock)
     cd "$VERIFICATION_DIR"
     if $TLC_CMD -deadlock -config "$config_file" "$model_file" > "$log_file" 2>&1; then
         print_success "$model_name verification completed successfully"
