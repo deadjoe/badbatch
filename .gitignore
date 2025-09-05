@@ -8,6 +8,9 @@
 # Development process documents
 review_report.md
 
+# AI assistant configuration files
+CLAUDE.md
+
 # Cargo
 # Keep Cargo.lock for applications, ignore for libraries
 # Since BadBatch is an application, we keep Cargo.lock tracked
