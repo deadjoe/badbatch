@@ -260,7 +260,13 @@ where
         F: FnOnce(&mut T),
     {
         // Claim the next sequence from the sequencer (blocking)
-        let sequence = self.sequencer.next().expect("Failed to claim sequence");
+        let sequence = match self.sequencer.next() {
+            Ok(seq) => seq,
+            Err(e) => {
+                crate::internal_error!("Failed to claim sequence: {e:?}");
+                return;
+            }
+        };
 
         // Get the event at the claimed sequence and update it
         // SAFETY: We have exclusive access to this sequence from the sequencer
@@ -277,10 +283,13 @@ where
         F: FnOnce(BatchIterMut<'a, T>),
     {
         // Claim n sequences from the sequencer (blocking)
-        let end_sequence = self
-            .sequencer
-            .next_n(n as i64)
-            .expect("Failed to claim sequences");
+        let end_sequence = match self.sequencer.next_n(n as i64) {
+            Ok(seq) => seq,
+            Err(e) => {
+                crate::internal_error!("Failed to claim batch sequences: {e:?}");
+                return;
+            }
+        };
         let start_sequence = end_sequence - (n as i64 - 1);
 
         // SAFETY: We have exclusive access to this sequence range from the sequencer
