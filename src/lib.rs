@@ -84,6 +84,13 @@
 //! - Batch processing to amortize coordination costs
 //! - Mechanical sympathy with modern CPU architectures
 
+#![allow(
+    clippy::doc_markdown,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::must_use_candidate
+)]
+
 pub mod disruptor;
 
 // Re-export the main types for convenience

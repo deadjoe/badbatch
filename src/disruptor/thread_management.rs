@@ -33,6 +33,7 @@ impl ThreadContext {
     ///
     /// # Panics
     /// Panics if the specified core ID is not available on the system
+    #[must_use]
     pub fn pin_at_core(mut self, core_id: usize) -> Self {
         validate_core_id(core_id);
         self.affinity = Some(CoreId { id: core_id });
@@ -43,6 +44,7 @@ impl ThreadContext {
     ///
     /// # Arguments
     /// * `name` - The name for the thread
+    #[must_use]
     pub fn thread_name<S: Into<String>>(mut self, name: S) -> Self {
         self.name = Some(name.into());
         self
@@ -131,6 +133,7 @@ impl ThreadBuilder {
     ///
     /// # Arguments
     /// * `core_id` - The CPU core ID to pin the thread to
+    #[must_use]
     pub fn pin_at_core(mut self, core_id: usize) -> Self {
         self.context = self.context.pin_at_core(core_id);
         self
@@ -140,6 +143,7 @@ impl ThreadBuilder {
     ///
     /// # Arguments
     /// * `name` - The name for the thread
+    #[must_use]
     pub fn thread_name<S: Into<String>>(mut self, name: S) -> Self {
         self.context = self.context.thread_name(name);
         self
@@ -193,9 +197,10 @@ fn validate_core_id(core_id: usize) {
         .map(|core| core.id)
         .collect();
 
-    if !available_cores.contains(&core_id) {
-        panic!("CPU core {core_id} is not available. Available cores: {available_cores:?}");
-    }
+    assert!(
+        available_cores.contains(&core_id),
+        "CPU core {core_id} is not available. Available cores: {available_cores:?}"
+    );
 }
 
 /// Set CPU affinity for the current thread if specified
@@ -206,14 +211,14 @@ fn validate_core_id(core_id: usize) {
 fn set_affinity_if_defined(affinity: Option<CoreId>, thread_name: &str) {
     if let Some(core_id) = affinity {
         let success = core_affinity::set_for_current(core_id);
-        if !success {
-            crate::internal_warn!(
-                "Warning: Could not pin thread '{thread_name}' to CPU core {}",
+        if success {
+            crate::internal_debug!(
+                "Successfully pinned thread '{thread_name}' to CPU core {}",
                 core_id.id
             );
         } else {
-            crate::internal_debug!(
-                "Successfully pinned thread '{thread_name}' to CPU core {}",
+            crate::internal_warn!(
+                "Warning: Could not pin thread '{thread_name}' to CPU core {}",
                 core_id.id
             );
         }
@@ -224,6 +229,7 @@ fn set_affinity_if_defined(affinity: Option<CoreId>, thread_name: &str) {
 ///
 /// # Returns
 /// A vector of available CPU core IDs
+#[must_use]
 pub fn get_available_cores() -> Vec<usize> {
     core_affinity::get_core_ids()
         .unwrap_or_default()
@@ -239,6 +245,7 @@ pub fn get_available_cores() -> Vec<usize> {
 ///
 /// # Returns
 /// The first available CPU core ID, if any cores are available
+#[must_use]
 pub fn get_first_available_core() -> Option<usize> {
     core_affinity::get_core_ids()
         .unwrap_or_default()

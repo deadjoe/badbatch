@@ -1,3 +1,11 @@
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+
 //! MPMC End-to-End Continuity Tests
 //!
 //! This module tests the critical MPMC (Multi-Producer Multi-Consumer) continuity
@@ -57,7 +65,7 @@ fn test_mpmc_basic_functionality() {
         "Single-threaded: Should process exactly 5 events"
     );
 
-    println!("✅ MPMC single-threaded functionality test passed");
+    badbatch::test_log!("✅ MPMC single-threaded functionality test passed");
 }
 
 /// Test multi-producer scenario with proper synchronization
@@ -120,8 +128,8 @@ fn test_mpmc_multi_producer() {
         "Multi-producer: Should process all {total_events} events, got {final_count}"
     );
 
-    println!("✅ MPMC multi-producer test passed");
-    println!("   Processed {final_count} events from {num_producers} producers");
+    badbatch::test_log!("✅ MPMC multi-producer test passed");
+    badbatch::test_log!("   Processed {final_count} events from {num_producers} producers");
 
     disruptor.shutdown();
 }
@@ -169,8 +177,8 @@ fn test_mpmc_sequence_continuity() {
     // First sequence should be 0
     assert_eq!(final_sequences[0], 0, "First sequence should be 0");
 
-    println!("✅ MPMC sequence continuity test passed");
-    println!("   Processed sequences in order: {:?}", &*final_sequences);
+    badbatch::test_log!("✅ MPMC sequence continuity test passed");
+    badbatch::test_log!("   Processed sequences in order: {:?}", &*final_sequences);
 }
 
 /// Test that verifies the P0 fixes work under realistic conditions
@@ -229,8 +237,8 @@ fn test_mpmc_continuity_under_load() {
 
     assert_eq!(final_sequences[0], 0, "First sequence should be 0");
 
-    println!("✅ MPMC continuity under load test passed");
-    println!("   Perfect sequence continuity maintained for {num_events} events");
+    badbatch::test_log!("✅ MPMC continuity under load test passed");
+    badbatch::test_log!("   Perfect sequence continuity maintained for {num_events} events");
 }
 
 /// Regression: ensure that the first-stage consumer in a multi-producer disruptor
@@ -364,5 +372,5 @@ fn test_mpmc_builder_api() {
         "Builder API should process all 3 events"
     );
 
-    println!("✅ MPMC builder API test passed");
+    badbatch::test_log!("✅ MPMC builder API test passed");
 }

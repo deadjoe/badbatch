@@ -1,3 +1,11 @@
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+
 //! Buffer Size Scaling Benchmarks
 //!
 //! This benchmark suite tests how performance scales with different buffer sizes

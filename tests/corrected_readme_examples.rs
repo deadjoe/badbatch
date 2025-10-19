@@ -1,3 +1,11 @@
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+
 //! Corrected README examples that actually compile and work
 //!
 //! This file contains the exact examples from README.md but with corrections
@@ -29,9 +37,11 @@ fn corrected_traditional_lmax_example() {
             sequence: i64,
             end_of_batch: bool,
         ) -> badbatch::disruptor::Result<()> {
-            println!(
+            badbatch::test_log!(
                 "Processing event {} with value {} (end_of_batch: {})",
-                sequence, event.value, end_of_batch
+                sequence,
+                event.value,
+                end_of_batch
             );
             Ok(())
         }
@@ -93,9 +103,11 @@ fn corrected_modern_disruptor_rs_example() {
     // The README showed BusySpin but the builder requires a WaitStrategy trait implementor
     let mut producer = build_single_producer(1024, MyEvent::default, BusySpinWaitStrategy)
         .handle_events_with(|event, sequence, end_of_batch| {
-            println!(
+            badbatch::test_log!(
                 "Processing event {} with value {} (batch_end: {})",
-                sequence, event.value, end_of_batch
+                sequence,
+                event.value,
+                end_of_batch
             );
         })
         .build();
@@ -120,7 +132,7 @@ fn corrected_modern_disruptor_rs_example() {
     let consumer = ElegantConsumer::with_affinity(
         ring_buffer,
         |event, sequence, _end_of_batch| {
-            println!("Processing: {} at {}", event.value, sequence);
+            badbatch::test_log!("Processing: {} at {}", event.value, sequence);
         },
         BusySpin, // This works correctly as ElegantConsumer uses SimpleWaitStrategy
         1,        // Pin to CPU core 1
@@ -149,9 +161,11 @@ fn alternative_modern_api_with_adapter() {
         simple_wait_strategy::busy_spin(), // Returns SimpleWaitStrategyAdapter<BusySpin>
     )
     .handle_events_with(|event, sequence, end_of_batch| {
-        println!(
+        badbatch::test_log!(
             "Processing event {} with value {} (batch_end: {})",
-            sequence, event.value, end_of_batch
+            sequence,
+            event.value,
+            end_of_batch
         );
     })
     .build();

@@ -144,20 +144,20 @@ where
     fn wait_for(
         &self,
         sequence: i64,
-        _cursor: Arc<Sequence>,
-        _dependent_sequences: &[Arc<Sequence>],
+        cursor: Arc<Sequence>,
+        dependent_sequences: &[Arc<Sequence>],
     ) -> crate::disruptor::Result<i64> {
         // Conservatively wait until the producer cursor reaches the requested sequence
         // and all dependent sequences也达到要求，避免虚假的可用位置。
-        let mut available = _cursor.get();
+        let mut available = cursor.get();
         while available < sequence {
             self.strategy.wait_for(sequence);
-            available = _cursor.get();
+            available = cursor.get();
         }
 
-        if !_dependent_sequences.is_empty() {
+        if !dependent_sequences.is_empty() {
             loop {
-                let min_dep = Sequence::get_minimum_sequence(_dependent_sequences);
+                let min_dep = Sequence::get_minimum_sequence(dependent_sequences);
                 if min_dep >= sequence {
                     break;
                 }
@@ -166,10 +166,10 @@ where
         }
 
         // 返回当前可见的可用上界（与 Blocking/Yielding 等策略行为保持一致）
-        let dep_min = if _dependent_sequences.is_empty() {
+        let dep_min = if dependent_sequences.is_empty() {
             available
         } else {
-            Sequence::get_minimum_sequence(_dependent_sequences)
+            Sequence::get_minimum_sequence(dependent_sequences)
         };
         Ok(std::cmp::min(available, dep_min))
     }
@@ -177,17 +177,17 @@ where
     fn wait_for_with_timeout(
         &self,
         sequence: i64,
-        _cursor: Arc<Sequence>,
-        _dependent_sequences: &[Arc<Sequence>],
+        cursor: Arc<Sequence>,
+        dependent_sequences: &[Arc<Sequence>],
         timeout: std::time::Duration,
     ) -> crate::disruptor::Result<i64> {
         let start = std::time::Instant::now();
         loop {
-            let cursor_val = _cursor.get();
-            let dep_min = if _dependent_sequences.is_empty() {
+            let cursor_val = cursor.get();
+            let dep_min = if dependent_sequences.is_empty() {
                 cursor_val
             } else {
-                Sequence::get_minimum_sequence(_dependent_sequences)
+                Sequence::get_minimum_sequence(dependent_sequences)
             };
             let available = std::cmp::min(cursor_val, dep_min);
             if available >= sequence {
@@ -204,19 +204,19 @@ where
     fn wait_for_with_shutdown(
         &self,
         sequence: i64,
-        _cursor: Arc<Sequence>,
-        _dependent_sequences: &[Arc<Sequence>],
+        cursor: Arc<Sequence>,
+        dependent_sequences: &[Arc<Sequence>],
         shutdown_flag: &std::sync::atomic::AtomicBool,
     ) -> crate::disruptor::Result<i64> {
         loop {
             if shutdown_flag.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(crate::disruptor::DisruptorError::Alert);
             }
-            let cursor_val = _cursor.get();
-            let dep_min = if _dependent_sequences.is_empty() {
+            let cursor_val = cursor.get();
+            let dep_min = if dependent_sequences.is_empty() {
                 cursor_val
             } else {
-                Sequence::get_minimum_sequence(_dependent_sequences)
+                Sequence::get_minimum_sequence(dependent_sequences)
             };
             let available = std::cmp::min(cursor_val, dep_min);
             if available >= sequence {

@@ -1,3 +1,11 @@
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+
 // MPSC debugging integration test
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -38,9 +46,11 @@ impl EventHandler<DebugEvent> for DebugHandler {
         sequence: i64,
         _end_of_batch: bool,
     ) -> DisruptorResult<()> {
-        println!(
+        badbatch::test_log!(
             "DEBUG: Handler processed event value={}, producer_id={}, sequence={}",
-            event.value, event.producer_id, sequence
+            event.value,
+            event.producer_id,
+            sequence
         );
         self.count.fetch_add(1, Ordering::Release);
         Ok(())
@@ -49,7 +59,7 @@ impl EventHandler<DebugEvent> for DebugHandler {
 
 #[test]
 fn test_mpsc_simple_case() {
-    println!("=== MPSC Simple Debug Test ===");
+    badbatch::test_log!("=== MPSC Simple Debug Test ===");
 
     // Use small buffer to avoid bitmap complexity
     let factory = DefaultEventFactory::<DebugEvent>::new();
@@ -66,11 +76,11 @@ fn test_mpsc_simple_case() {
     .handle_events_with(handler)
     .build();
 
-    println!("DEBUG: Starting disruptor");
+    badbatch::test_log!("DEBUG: Starting disruptor");
     disruptor.start().unwrap();
 
     // Test 1: Single event
-    println!("DEBUG: Publishing single event");
+    badbatch::test_log!("DEBUG: Publishing single event");
     let result = disruptor.publish_event(ClosureEventTranslator::new(
         |event: &mut DebugEvent, _seq: i64| {
             event.value = 42;
@@ -83,12 +93,12 @@ fn test_mpsc_simple_case() {
     // Wait for processing
     thread::sleep(Duration::from_millis(100));
     let count = counter.load(Ordering::Acquire);
-    println!("DEBUG: Events processed: {count}");
+    badbatch::test_log!("DEBUG: Events processed: {count}");
 
     assert_eq!(count, 1, "Single event should be processed");
 
     // Test 2: Multiple sequential events from one producer
-    println!("DEBUG: Publishing 3 sequential events");
+    badbatch::test_log!("DEBUG: Publishing 3 sequential events");
     for i in 1..=3 {
         let result = disruptor.publish_event(ClosureEventTranslator::new(
             move |event: &mut DebugEvent, _seq: i64| {
@@ -101,16 +111,16 @@ fn test_mpsc_simple_case() {
 
     thread::sleep(Duration::from_millis(100));
     let count = counter.load(Ordering::Acquire);
-    println!("DEBUG: Events processed after sequential: {count}");
+    badbatch::test_log!("DEBUG: Events processed after sequential: {count}");
     assert_eq!(count, 4, "Should have processed 4 events total");
 
-    println!("DEBUG: Basic single-producer tests PASSED");
+    badbatch::test_log!("DEBUG: Basic single-producer tests PASSED");
     disruptor.shutdown().unwrap();
 }
 
 #[test]
 fn test_mpsc_concurrent_producers() {
-    println!("=== MPSC Concurrent Producers Test ===");
+    badbatch::test_log!("=== MPSC Concurrent Producers Test ===");
 
     let factory = DefaultEventFactory::<DebugEvent>::new();
     let handler = DebugHandler::new();
@@ -130,13 +140,13 @@ fn test_mpsc_concurrent_producers() {
     let disruptor_arc = Arc::new(disruptor);
 
     // Test concurrent producers
-    println!("DEBUG: Starting 2 concurrent producers");
+    badbatch::test_log!("DEBUG: Starting 2 concurrent producers");
     let mut handles = Vec::new();
 
     for producer_id in 0..2 {
         let disruptor_clone = disruptor_arc.clone();
         let handle = thread::spawn(move || {
-            println!("DEBUG: Producer {producer_id} starting");
+            badbatch::test_log!("DEBUG: Producer {producer_id} starting");
             for i in 1..=2 {
                 let result = disruptor_clone.publish_event(ClosureEventTranslator::new(
                     move |event: &mut DebugEvent, _seq: i64| {
@@ -145,9 +155,11 @@ fn test_mpsc_concurrent_producers() {
                     },
                 ));
                 match result {
-                    Ok(_) => println!("DEBUG: Producer {producer_id} published event {i}"),
+                    Ok(_) => {
+                        badbatch::test_log!("DEBUG: Producer {producer_id} published event {i}")
+                    }
                     Err(e) => {
-                        println!(
+                        badbatch::test_log!(
                             "ERROR: Producer {producer_id} failed to publish event {i}: {e:?}"
                         );
                         return false;
@@ -156,7 +168,7 @@ fn test_mpsc_concurrent_producers() {
                 // Small delay between events
                 thread::sleep(Duration::from_millis(10));
             }
-            println!("DEBUG: Producer {producer_id} finished");
+            badbatch::test_log!("DEBUG: Producer {producer_id} finished");
             true
         });
         handles.push(handle);
@@ -168,12 +180,12 @@ fn test_mpsc_concurrent_producers() {
         match handle.join() {
             Ok(success) => {
                 if !success {
-                    println!("ERROR: Producer {i} failed");
+                    badbatch::test_log!("ERROR: Producer {i} failed");
                     all_success = false;
                 }
             }
             Err(_) => {
-                println!("ERROR: Producer {i} thread panicked");
+                badbatch::test_log!("ERROR: Producer {i} thread panicked");
                 all_success = false;
             }
         }
@@ -184,7 +196,7 @@ fn test_mpsc_concurrent_producers() {
     // Wait for event processing
     thread::sleep(Duration::from_millis(200));
     let final_count = counter.load(Ordering::Acquire);
-    println!("DEBUG: Final event count: {final_count}");
+    badbatch::test_log!("DEBUG: Final event count: {final_count}");
 
     assert_eq!(
         final_count, 4,

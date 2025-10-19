@@ -64,13 +64,12 @@ where
         let thread = ThreadBuilder::new()
             .thread_name("elegant-consumer")
             .spawn(move || {
-                Self::consumer_loop(
-                    ring_buffer,
-                    event_handler,
-                    wait_strategy,
-                    sequence_clone,
-                    shutdown_clone,
-                );
+                let mut handler = event_handler;
+                let strategy = wait_strategy;
+                let ring = ring_buffer;
+                let seq = sequence_clone;
+                let shutdown_flag = shutdown_clone;
+                Self::consumer_loop(&ring, &mut handler, &strategy, &seq, &shutdown_flag);
             })?;
 
         Ok(Self {
@@ -112,13 +111,18 @@ where
         let thread = ThreadBuilder::new()
             .thread_name("elegant-consumer-with-state")
             .spawn(move || {
+                let mut handler = event_handler;
+                let strategy = wait_strategy;
+                let ring = ring_buffer;
+                let seq = sequence_clone;
+                let shutdown_flag = shutdown_clone;
                 Self::consumer_loop_with_state(
-                    ring_buffer,
-                    event_handler,
+                    &ring,
+                    &mut handler,
                     initialize_state,
-                    wait_strategy,
-                    sequence_clone,
-                    shutdown_clone,
+                    &strategy,
+                    &seq,
+                    &shutdown_flag,
                 );
             })?;
 
@@ -160,13 +164,12 @@ where
             .pin_at_core(core_id)
             .thread_name(format!("elegant-consumer-core-{core_id}"))
             .spawn(move || {
-                Self::consumer_loop(
-                    ring_buffer,
-                    event_handler,
-                    wait_strategy,
-                    sequence_clone,
-                    shutdown_clone,
-                );
+                let mut handler = event_handler;
+                let strategy = wait_strategy;
+                let ring = ring_buffer;
+                let seq = sequence_clone;
+                let shutdown_flag = shutdown_clone;
+                Self::consumer_loop(&ring, &mut handler, &strategy, &seq, &shutdown_flag);
             })?;
 
         Ok(Self {
@@ -185,7 +188,7 @@ where
     /// Check if the consumer is still running
     pub fn is_running(&self) -> bool {
         !self.shutdown.load(Ordering::Acquire)
-            && self.thread.as_ref().is_some_and(|t| t.is_running())
+            && self.thread.as_ref().is_some_and(ManagedThread::is_running)
     }
 
     /// Gracefully shutdown the consumer
@@ -205,11 +208,11 @@ where
 
     /// Main consumer loop for processing events
     fn consumer_loop<H, W>(
-        ring_buffer: Arc<RingBuffer<T>>,
-        mut event_handler: H,
-        wait_strategy: W,
-        sequence: Arc<CachePadded<AtomicI64>>,
-        shutdown: Arc<AtomicBool>,
+        ring_buffer: &Arc<RingBuffer<T>>,
+        event_handler: &mut H,
+        wait_strategy: &W,
+        sequence: &Arc<CachePadded<AtomicI64>>,
+        shutdown: &Arc<AtomicBool>,
     ) where
         H: FnMut(&T, i64, bool),
         W: SimpleWaitStrategy,
@@ -218,8 +221,12 @@ where
 
         while !shutdown.load(Ordering::Acquire) {
             // Wait for events to become available
-            let available_sequence =
-                Self::wait_for_events(next_sequence, &ring_buffer, &wait_strategy, &shutdown);
+            let available_sequence = Self::wait_for_events(
+                next_sequence,
+                ring_buffer.as_ref(),
+                wait_strategy,
+                shutdown.as_ref(),
+            );
 
             if let Some(available) = available_sequence {
                 // Process all available events (automatic batch processing)
@@ -244,12 +251,12 @@ where
 
     /// Main consumer loop with state for processing events
     fn consumer_loop_with_state<H, S, I, W>(
-        ring_buffer: Arc<RingBuffer<T>>,
-        mut event_handler: H,
+        ring_buffer: &Arc<RingBuffer<T>>,
+        event_handler: &mut H,
         initialize_state: I,
-        wait_strategy: W,
-        sequence: Arc<CachePadded<AtomicI64>>,
-        shutdown: Arc<AtomicBool>,
+        wait_strategy: &W,
+        sequence: &Arc<CachePadded<AtomicI64>>,
+        shutdown: &Arc<AtomicBool>,
     ) where
         H: FnMut(&mut S, &T, i64, bool),
         I: FnOnce() -> S,
@@ -260,8 +267,12 @@ where
 
         while !shutdown.load(Ordering::Acquire) {
             // Wait for events to become available
-            let available_sequence =
-                Self::wait_for_events(next_sequence, &ring_buffer, &wait_strategy, &shutdown);
+            let available_sequence = Self::wait_for_events(
+                next_sequence,
+                ring_buffer.as_ref(),
+                wait_strategy,
+                shutdown.as_ref(),
+            );
 
             if let Some(available) = available_sequence {
                 // Process all available events (automatic batch processing)

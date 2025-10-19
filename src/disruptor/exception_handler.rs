@@ -263,10 +263,6 @@ mod tests {
 
     #[test]
     fn test_closure_exception_handler() {
-        let _event_called = false;
-        let _start_called = false;
-        let _shutdown_called = false;
-
         let handler = ClosureExceptionHandler::new(
             |_error, _sequence, _event| {
                 // In a real test, we'd use a shared state mechanism

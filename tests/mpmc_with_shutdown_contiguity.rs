@@ -1,3 +1,11 @@
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+
 //! End-to-end test for MPMC contiguity with shutdown-aware barrier
 //!
 //! This test verifies that in a multi-producer setup using the builder pipeline

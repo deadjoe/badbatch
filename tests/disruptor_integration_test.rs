@@ -1,3 +1,11 @@
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+
 //! Integration tests for the fixed LMAX Disruptor implementation
 //!
 //! These tests verify that the core issues identified in the evaluation report
