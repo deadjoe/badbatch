@@ -3,6 +3,7 @@
 //! This benchmark suite compares the latency characteristics of the BadBatch
 //! Disruptor against other concurrency primitives like channels.
 
+use criterion::Throughput;
 use criterion::{criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc;
@@ -30,7 +31,8 @@ struct LatencyEvent {
 /// Event handler that measures processing latency
 struct LatencyHandler {
     latencies: Arc<Vec<AtomicI64>>,
-    counter: Arc<AtomicI64>,
+    processed: Arc<AtomicI64>,
+    write_index: Arc<AtomicI64>,
 }
 
 impl LatencyHandler {
@@ -39,24 +41,25 @@ impl LatencyHandler {
 
         Self {
             latencies: Arc::new(latencies),
-            counter: Arc::new(AtomicI64::new(0)),
+            processed: Arc::new(AtomicI64::new(0)),
+            write_index: Arc::new(AtomicI64::new(0)),
         }
     }
 
-    fn get_latencies(&self) -> Arc<Vec<AtomicI64>> {
-        self.latencies.clone()
+    fn latencies(&self) -> Arc<Vec<AtomicI64>> {
+        Arc::clone(&self.latencies)
     }
 
-    fn get_counter(&self) -> Arc<AtomicI64> {
-        self.counter.clone()
+    fn processed_counter(&self) -> Arc<AtomicI64> {
+        Arc::clone(&self.processed)
     }
 
-    #[allow(dead_code)]
-    fn reset(&self) {
-        self.counter.store(0, Ordering::Release);
-        for latency in self.latencies.iter() {
-            latency.store(0, Ordering::Release);
-        }
+    fn write_index(&self) -> Arc<AtomicI64> {
+        Arc::clone(&self.write_index)
+    }
+
+    fn capacity(&self) -> i64 {
+        self.latencies.len() as i64
     }
 }
 
@@ -70,11 +73,17 @@ impl EventHandler<LatencyEvent> for LatencyHandler {
         let process_time = get_timestamp_nanos();
         let latency = process_time - event.send_time;
 
-        let index = self.counter.fetch_add(1, Ordering::Release) as usize;
-        if index < self.latencies.len() {
-            self.latencies[index].store(latency as i64, Ordering::Release);
+        let capacity = self.capacity();
+        if capacity == 0 {
+            return Ok(());
         }
 
+        let index = self.write_index.fetch_add(1, Ordering::Release) % capacity;
+        if index >= 0 {
+            self.latencies[index as usize].store(latency as i64, Ordering::Release);
+        }
+
+        self.processed.fetch_add(1, Ordering::Release);
         Ok(())
     }
 }
@@ -122,8 +131,9 @@ fn calculate_latency_stats(latencies: &[i64]) -> (f64, f64, f64, f64, f64) {
 fn benchmark_disruptor_latency(group: &mut BenchmarkGroup<criterion::measurement::WallTime>) {
     let factory = DefaultEventFactory::<LatencyEvent>::new();
     let handler = LatencyHandler::new(SAMPLE_COUNT);
-    let latencies = handler.get_latencies();
-    let counter = handler.get_counter();
+    let latencies = handler.latencies();
+    let processed = handler.processed_counter();
+    let write_index = handler.write_index();
 
     let mut disruptor = Disruptor::new(
         factory,
@@ -139,29 +149,40 @@ fn benchmark_disruptor_latency(group: &mut BenchmarkGroup<criterion::measurement
 
     let benchmark_id = BenchmarkId::new("Disruptor", "BusySpin");
 
+    group.throughput(Throughput::Elements(SAMPLE_COUNT as u64));
     group.bench_function(benchmark_id, |b| {
-        b.iter(|| {
-            counter.store(0, Ordering::Release);
+        b.iter_custom(|iters| {
+            use std::time::Instant;
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                processed.store(0, Ordering::Release);
+                write_index.store(0, Ordering::Release);
+                for latency in latencies.iter() {
+                    latency.store(0, Ordering::Release);
+                }
 
-            // Measure single event latency
-            let send_time = get_timestamp_nanos();
+                let iter_start = Instant::now();
+                for sample in 0..SAMPLE_COUNT {
+                    let send_time = get_timestamp_nanos();
+                    let sample_id = sample as i64;
+                    disruptor
+                        .publish_event(ClosureEventTranslator::new(
+                            move |event: &mut LatencyEvent, _seq: i64| {
+                                event.id = std::hint::black_box(sample_id);
+                                event.send_time = send_time;
+                            },
+                        ))
+                        .unwrap();
+                }
 
-            disruptor
-                .publish_event(ClosureEventTranslator::new(
-                    move |event: &mut LatencyEvent, _seq: i64| {
-                        event.id = std::hint::black_box(1);
-                        event.send_time = send_time;
-                    },
-                ))
-                .unwrap();
+                while processed.load(Ordering::Acquire) < SAMPLE_COUNT as i64 {
+                    std::hint::spin_loop();
+                }
 
-            // Wait for the single event to be processed
-            while counter.load(Ordering::Acquire) < 1 {
-                std::hint::spin_loop();
+                total += iter_start.elapsed();
             }
-
-            std::hint::black_box(())
-        })
+            total
+        });
     });
 
     // Print latency statistics
