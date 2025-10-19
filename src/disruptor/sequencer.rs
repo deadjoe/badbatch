@@ -9,6 +9,7 @@ use crate::disruptor::{
     is_power_of_two, DisruptorError, Result, Sequence, SequenceBarrier, WaitStrategy,
 };
 use crossbeam_utils::CachePadded;
+use std::convert::TryFrom;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -138,7 +139,7 @@ impl Sequencer for SequencerWrapper {
     }
 
     fn remaining_capacity(&self) -> i64 {
-        self.buffer_size as i64
+        i64::try_from(self.buffer_size).expect("buffer size must fit into i64")
     }
 }
 
@@ -287,6 +288,7 @@ pub trait Sequencer: Send + Sync + std::fmt::Debug {
 #[derive(Debug)]
 pub struct SingleProducerSequencer {
     buffer_size: usize,
+    buffer_size_i64: i64,
     wait_strategy: Arc<dyn WaitStrategy>,
     cursor: Arc<Sequence>,
     gating_sequences: parking_lot::RwLock<Vec<Arc<Sequence>>>,
@@ -308,8 +310,10 @@ impl SingleProducerSequencer {
     /// # Returns
     /// A new SingleProducerSequencer instance
     pub fn new(buffer_size: usize, wait_strategy: Arc<dyn WaitStrategy>) -> Self {
+        let buffer_size_i64 = i64::try_from(buffer_size).expect("buffer size must fit into i64");
         Self {
             buffer_size,
+            buffer_size_i64,
             wait_strategy,
             cursor: Arc::new(Sequence::new_with_initial_value()),
             gating_sequences: parking_lot::RwLock::new(Vec::new()),
@@ -322,7 +326,9 @@ impl SingleProducerSequencer {
     /// This matches the LMAX Disruptor SingleProducerSequencer.hasAvailableCapacity method
     fn has_available_capacity_internal(&self, required_capacity: usize, do_store: bool) -> bool {
         let next_value = self.next_value.load(Ordering::Relaxed);
-        let wrap_point = (next_value + required_capacity as i64) - self.buffer_size as i64;
+        let required_capacity_i64 =
+            i64::try_from(required_capacity).expect("required capacity must fit into i64");
+        let wrap_point = (next_value + required_capacity_i64) - self.buffer_size_i64;
         let cached_gating_sequence = self.cached_value.load(Ordering::Relaxed);
 
         if wrap_point > cached_gating_sequence || cached_gating_sequence > next_value {
@@ -357,14 +363,14 @@ impl Sequencer for SingleProducerSequencer {
     }
 
     fn next_n(&self, n: i64) -> Result<i64> {
-        if n < 1 || n > self.buffer_size as i64 {
+        if n < 1 || n > self.buffer_size_i64 {
             return Err(DisruptorError::InvalidSequence(n));
         }
 
         // This follows the exact LMAX Disruptor SingleProducerSequencer.next(int n) logic
         let next_value = self.next_value.load(Ordering::Relaxed);
         let next_sequence = next_value + n;
-        let wrap_point = next_sequence - self.buffer_size as i64;
+        let wrap_point = next_sequence - self.buffer_size_i64;
         let cached_gating_sequence = self.cached_value.load(Ordering::Relaxed);
 
         if wrap_point > cached_gating_sequence || cached_gating_sequence > next_value {
@@ -401,7 +407,11 @@ impl Sequencer for SingleProducerSequencer {
         }
 
         // This follows the exact LMAX Disruptor SingleProducerSequencer.tryNext(int n) logic
-        if !self.has_available_capacity_internal(n as usize, true) {
+        let Ok(required) = usize::try_from(n) else {
+            return None;
+        };
+
+        if !self.has_available_capacity_internal(required, true) {
             return None; // Insufficient capacity
         }
 
@@ -473,11 +483,11 @@ impl Sequencer for SingleProducerSequencer {
         // If no consumers are registered, consumed will be i64::MAX
         // In this case, we have full capacity available
         if consumed == i64::MAX {
-            return self.buffer_size as i64;
+            return self.buffer_size_i64;
         }
 
         let used_capacity = next_value.saturating_sub(consumed);
-        (self.buffer_size as i64).saturating_sub(used_capacity)
+        self.buffer_size_i64.saturating_sub(used_capacity)
     }
 
     fn has_available_capacity(&self, required_capacity: usize) -> bool {
@@ -510,6 +520,7 @@ impl Sequencer for SingleProducerSequencer {
 #[derive(Debug)]
 pub struct MultiProducerSequencer {
     buffer_size: usize,
+    buffer_size_i64: i64,
     wait_strategy: Arc<dyn WaitStrategy>,
     /// Cursor tracks the highest **claimed** sequence number by any producer.
     ///
@@ -528,9 +539,6 @@ pub struct MultiProducerSequencer {
     available_bitmap: Box<[AtomicU64]>,
     /// Index mask for fast modulo operations (buffer_size - 1)
     index_mask: usize,
-    /// Precomputed buffer shift for efficient round calculation
-    /// This is log2(buffer_size) for fast round flag computation
-    buffer_shift: u8,
 
     /// Cached minimum gating sequence to reduce lock contention
     /// This is an optimization from the LMAX Disruptor to avoid frequent reads of gating sequences
@@ -565,7 +573,7 @@ impl MultiProducerSequencer {
         // Initialize bitmap for availability tracking if buffer is large enough
         // For smaller buffers, we'll use an empty bitmap and fall back to legacy method
         let available_bitmap = if buffer_size >= 64 {
-            let bitmap_size = (buffer_size + 63) / 64; // Each AtomicU64 tracks 64 slots, round up
+            let bitmap_size = buffer_size.div_ceil(64); // Each AtomicU64 tracks 64 slots, round up
             let bitmap: Box<[AtomicU64]> = (0..bitmap_size)
                 .map(|_| AtomicU64::new(!0_u64)) // Initialize with all 1's (nothing published initially, matching disruptor-rs)
                 .collect();
@@ -576,17 +584,16 @@ impl MultiProducerSequencer {
             empty_bitmap
         };
 
-        // Precompute buffer shift for efficient round calculation
-        let buffer_shift = buffer_size.trailing_zeros() as u8;
+        let buffer_size_i64 = i64::try_from(buffer_size).expect("buffer size must fit into i64");
 
         Self {
             buffer_size,
+            buffer_size_i64,
             wait_strategy,
             cursor: Arc::new(Sequence::new_with_initial_value()),
             gating_sequences: parking_lot::RwLock::new(Vec::new()),
             available_bitmap,
             index_mask: buffer_size - 1,
-            buffer_shift,
             cached_gating_sequence: CachePadded::new(AtomicI64::new(-1)),
             available_buffer,
         }
@@ -595,26 +602,34 @@ impl MultiProducerSequencer {
     /// Calculate the index in the available buffer for a given sequence
     /// This matches the LMAX Disruptor calculateIndex method
     fn calculate_index(&self, sequence: i64) -> usize {
-        (sequence as usize) & self.index_mask
+        let normalized = sequence.rem_euclid(self.buffer_size_i64);
+        let seq = usize::try_from(normalized).expect("normalized sequence must fit");
+        seq & self.index_mask
     }
 
     /// Calculate the availability flag for a given sequence
     /// This matches the LMAX Disruptor calculateAvailabilityFlag method
     /// Returns 0 for even rounds, 1 for odd rounds
     fn calculate_availability_flag(&self, sequence: i64) -> i32 {
-        ((sequence >> self.buffer_shift) & 1) as i32
+        let round = sequence.div_euclid(self.buffer_size_i64);
+        let flag = round & 1;
+        i32::try_from(flag).expect("flag must fit in i32")
     }
 
     /// Calculate the round flag for bitmap availability checking (inspired by disruptor-rs)
     /// Returns 0 for even rounds, 1 for odd rounds
     #[inline]
     fn calculate_round_flag(&self, sequence: i64) -> u64 {
-        ((sequence as u64) >> self.buffer_shift) & 1
+        let round = sequence.div_euclid(self.buffer_size_i64);
+        let flag = u8::try_from(round & 1).expect("round flag must be 0 or 1");
+        u64::from(flag)
     }
 
     /// Calculate availability indices for bitmap (inspired by disruptor-rs)
     fn calculate_availability_indices(&self, sequence: i64) -> (usize, usize) {
-        let slot_index = (sequence as usize) & self.index_mask;
+        let normalized = sequence.rem_euclid(self.buffer_size_i64);
+        let slot_index =
+            usize::try_from(normalized).expect("normalized sequence must fit") & self.index_mask;
         let availability_index = slot_index >> 6; // Divide by 64
         let bit_index = slot_index - availability_index * 64;
         (availability_index, bit_index)
@@ -785,7 +800,9 @@ impl MultiProducerSequencer {
         required_capacity: usize,
         cursor_value: i64,
     ) -> bool {
-        let wrap_point = (cursor_value + required_capacity as i64) - self.buffer_size as i64;
+        let required_capacity_i64 =
+            i64::try_from(required_capacity).expect("required capacity must fit into i64");
+        let wrap_point = (cursor_value + required_capacity_i64) - self.buffer_size_i64;
         let cached_gating_sequence = self.cached_gating_sequence.load(Ordering::Acquire);
 
         if wrap_point > cached_gating_sequence || cached_gating_sequence > cursor_value {
@@ -816,7 +833,7 @@ impl Sequencer for MultiProducerSequencer {
     }
 
     fn next_n(&self, n: i64) -> Result<i64> {
-        if n < 1 || n > self.buffer_size as i64 {
+        if n < 1 || n > self.buffer_size_i64 {
             return Err(DisruptorError::InvalidSequence(n));
         }
 
@@ -831,7 +848,7 @@ impl Sequencer for MultiProducerSequencer {
             next = current + n;
 
             // Check if we have available capacity
-            let wrap_point = next - self.buffer_size as i64;
+            let wrap_point = next - self.buffer_size_i64;
             let cached_gating_sequence = self.cached_gating_sequence.load(Ordering::Acquire);
 
             if wrap_point > cached_gating_sequence || cached_gating_sequence > current {
@@ -875,9 +892,13 @@ impl Sequencer for MultiProducerSequencer {
             let next = current + n;
 
             // Check if we have available capacity
+            let Ok(required) = usize::try_from(n) else {
+                return None;
+            };
+
             if !self.has_available_capacity_internal(
                 &self.gating_sequences.read(),
-                n as usize,
+                required,
                 current,
             ) {
                 return None; // Insufficient capacity
@@ -971,11 +992,11 @@ impl Sequencer for MultiProducerSequencer {
         // If no consumers are registered, consumed will be i64::MAX
         // In this case, we have full capacity available
         if consumed == i64::MAX {
-            return self.buffer_size as i64;
+            return self.buffer_size_i64;
         }
 
         let used_capacity = next_value.saturating_sub(consumed);
-        (self.buffer_size as i64).saturating_sub(used_capacity)
+        self.buffer_size_i64.saturating_sub(used_capacity)
     }
 
     fn has_available_capacity(&self, required_capacity: usize) -> bool {

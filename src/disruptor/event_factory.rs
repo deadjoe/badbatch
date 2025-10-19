@@ -1,8 +1,8 @@
 //! Event Factory Implementation
 //!
-//! This module provides the EventFactory trait and implementations for creating events
+//! This module provides the `EventFactory` trait and implementations for creating events
 //! in the Disruptor pattern. This follows the exact interface design from the original
-//! LMAX Disruptor EventFactory for event pre-allocation.
+//! LMAX Disruptor `EventFactory` for event pre-allocation.
 
 /// Factory for creating events in the Disruptor
 ///
@@ -44,7 +44,7 @@ pub trait EventFactory<T>: Send + Sync {
 /// Event factory that uses the Default trait
 ///
 /// This is a convenient factory for events that implement Default.
-/// It simply calls T::default() to create new instances.
+/// It simply calls `T::default()` to create new instances.
 ///
 /// # Type Parameters
 /// * `T` - The event type (must implement Default)
@@ -54,6 +54,7 @@ pub struct DefaultEventFactory<T: Default> {
 
 impl<T: Default> DefaultEventFactory<T> {
     /// Create a new default event factory
+    #[must_use]
     pub fn new() -> Self {
         Self {
             _phantom: std::marker::PhantomData,
@@ -99,7 +100,8 @@ where
     /// * `factory_fn` - The closure that creates new event instances
     ///
     /// # Returns
-    /// A new ClosureEventFactory instance
+    /// A new `ClosureEventFactory` instance
+    #[must_use]
     pub fn new(factory_fn: F) -> Self {
         Self {
             factory_fn,
@@ -136,7 +138,8 @@ impl<T: Clone> CloneEventFactory<T> {
     /// * `prototype` - The prototype event to clone
     ///
     /// # Returns
-    /// A new CloneEventFactory instance
+    /// A new `CloneEventFactory` instance
+    #[must_use]
     pub fn new(prototype: T) -> Self {
         Self { prototype }
     }
@@ -150,13 +153,13 @@ impl<T: Clone + Send + Sync> EventFactory<T> for CloneEventFactory<T> {
 
 /// Convenience function to create an event factory from a closure
 ///
-/// This is a shorthand for creating a ClosureEventFactory.
+/// This is a shorthand for creating a `ClosureEventFactory`.
 ///
 /// # Arguments
 /// * `factory_fn` - The closure that creates new event instances
 ///
 /// # Returns
-/// A new ClosureEventFactory instance
+/// A new `ClosureEventFactory` instance
 ///
 /// # Examples
 /// ```

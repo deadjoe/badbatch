@@ -167,7 +167,7 @@ where
     /// Process events in a batch
     ///
     /// This follows the exact LMAX Disruptor BatchEventProcessor.processEvents logic
-    fn process_events(&mut self) -> Result<()> {
+    fn process_events(&mut self) {
         // Start lifecycle
         self.on_start();
 
@@ -199,7 +199,6 @@ where
 
         // Shutdown lifecycle
         self.on_shutdown();
-        Ok(())
     }
 }
 
@@ -234,7 +233,8 @@ where
         self.sequence_barrier.clear_alert();
 
         // Run the main processing loop
-        self.process_events()
+        self.process_events();
+        Ok(())
     }
 
     fn try_run_once(&self) -> Result<bool> {
@@ -272,7 +272,7 @@ where
 
         // Process all available events in this batch
         let mut current_sequence = next_sequence;
-        let batch_size = (available_sequence - next_sequence + 1) as usize;
+        let batch_span = available_sequence - next_sequence + 1;
 
         // Notify batch start
         // SAFETY: We have exclusive access to the event handler through UnsafeCell.
@@ -280,7 +280,7 @@ where
         // no concurrent access to the handler.
         unsafe {
             let handler = &mut *self.event_handler.get();
-            let _ = handler.on_batch_start(batch_size as i64, batch_size as i64);
+            let _ = handler.on_batch_start(batch_span, batch_span);
         }
 
         while current_sequence <= available_sequence {
@@ -346,7 +346,7 @@ where
         f.debug_struct("BatchEventProcessor")
             .field("sequence", &self.sequence)
             .field("running", &self.running)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -374,6 +374,7 @@ mod tests {
         BlockingWaitStrategy, DefaultExceptionHandler, NoOpEventHandler, ProcessingSequenceBarrier,
         INITIAL_CURSOR_VALUE,
     };
+    use std::convert::TryFrom;
     use std::sync::atomic::AtomicI64;
 
     // Helper function to create a test sequence barrier
@@ -406,7 +407,7 @@ mod tests {
             let mut events = Vec::with_capacity(size);
             for i in 0..size {
                 events.push(TestEvent {
-                    value: AtomicI64::new(i as i64),
+                    value: AtomicI64::new(i64::try_from(i).expect("test index fits in i64")),
                 });
             }
             Self { events }
@@ -415,14 +416,20 @@ mod tests {
 
     impl DataProvider<TestEvent> for TestDataProvider {
         fn get(&self, sequence: i64) -> &TestEvent {
-            let index = (sequence as usize) % self.events.len();
+            let len = self.events.len();
+            let len_i64 = i64::try_from(len).expect("events length fits in i64");
+            let normalized = sequence.rem_euclid(len_i64);
+            let index = usize::try_from(normalized).expect("normalized index must fit");
             &self.events[index]
         }
 
         unsafe fn get_mut(&self, sequence: i64) -> &mut TestEvent {
-            let index = (sequence as usize) % self.events.len();
+            let len = self.events.len();
+            let len_i64 = i64::try_from(len).expect("events length fits in i64");
+            let normalized = sequence.rem_euclid(len_i64);
+            let index = usize::try_from(normalized).expect("normalized index must fit");
             // This is unsafe but acceptable for testing
-            &mut *(self.events.as_ptr().add(index) as *mut TestEvent)
+            &mut *self.events.as_ptr().add(index).cast_mut()
         }
     }
 

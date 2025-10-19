@@ -1,3 +1,11 @@
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+
 //! Fixed Multi Producer Single Consumer (MPSC) Benchmarks
 //!
 //! This benchmark suite tests the performance of the BadBatch Disruptor

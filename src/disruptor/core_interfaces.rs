@@ -183,6 +183,7 @@ pub trait EventSink<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::convert::TryFrom;
 
     // Test implementations for the traits
     struct TestCursored {
@@ -201,14 +202,22 @@ mod tests {
 
     impl DataProvider<i32> for TestDataProvider {
         fn get(&self, sequence: i64) -> &i32 {
-            &self.data[sequence as usize % self.data.len()]
+            let len = self.data.len();
+            let len_i64 = i64::try_from(len).expect("data length fits in i64");
+            let normalized = sequence.rem_euclid(len_i64);
+            let index = usize::try_from(normalized).expect("normalized index must fit");
+            &self.data[index]
         }
 
         #[allow(clippy::mut_from_ref)]
         unsafe fn get_mut(&self, sequence: i64) -> &mut i32 {
             // SAFETY: This is only used in tests where we control access
-            let ptr = self.data.as_ptr() as *mut i32;
-            &mut *ptr.add(sequence as usize % self.data.len())
+            let len = self.data.len();
+            let len_i64 = i64::try_from(len).expect("data length fits in i64");
+            let normalized = sequence.rem_euclid(len_i64);
+            let index = usize::try_from(normalized).expect("normalized index must fit");
+            let ptr = self.data.as_ptr().cast_mut();
+            &mut *ptr.add(index)
         }
     }
 

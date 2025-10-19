@@ -1,3 +1,11 @@
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+
 // Exact reproduction of MPSC benchmark issue
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -39,9 +47,11 @@ impl EventHandler<ReproEvent> for ReproHandler {
         sequence: i64,
         _end_of_batch: bool,
     ) -> DisruptorResult<()> {
-        println!(
+        badbatch::test_log!(
             "REPRO: Handler processed producer_id={}, value={}, sequence={}",
-            event.producer_id, event.value, sequence
+            event.producer_id,
+            event.value,
+            sequence
         );
         self.count.fetch_add(1, Ordering::Release);
         Ok(())
@@ -65,17 +75,19 @@ impl ReproProducer {
         let stop_flag_clone = stop_flag.clone();
 
         let join_handle = thread::spawn(move || {
-            println!("REPRO: Producer {producer_id} waiting at barrier");
+            badbatch::test_log!("REPRO: Producer {producer_id} waiting at barrier");
             start_barrier.wait();
-            println!("REPRO: Producer {producer_id} starting burst of {burst_size} events");
+            badbatch::test_log!(
+                "REPRO: Producer {producer_id} starting burst of {burst_size} events"
+            );
 
             for i in 1..=burst_size {
                 if stop_flag_clone.load(Ordering::Acquire) {
-                    println!("REPRO: Producer {producer_id} stopping due to stop flag");
+                    badbatch::test_log!("REPRO: Producer {producer_id} stopping due to stop flag");
                     return false;
                 }
 
-                println!("REPRO: Producer {producer_id} publishing event {i}");
+                badbatch::test_log!("REPRO: Producer {producer_id} publishing event {i}");
                 let result = disruptor.publish_event(ClosureEventTranslator::new(
                     move |event: &mut ReproEvent, seq: i64| {
                         event.producer_id = producer_id;
@@ -86,17 +98,19 @@ impl ReproProducer {
 
                 match result {
                     Ok(_) => {
-                        println!("REPRO: Producer {producer_id} successfully published event {i}")
+                        badbatch::test_log!(
+                            "REPRO: Producer {producer_id} successfully published event {i}"
+                        )
                     }
                     Err(e) => {
-                        println!(
+                        badbatch::test_log!(
                             "REPRO: Producer {producer_id} failed to publish event {i}: {e:?}"
                         );
                         return false;
                     }
                 }
             }
-            println!("REPRO: Producer {producer_id} finished all {burst_size} events");
+            badbatch::test_log!("REPRO: Producer {producer_id} finished all {burst_size} events");
             true
         });
 
@@ -118,7 +132,7 @@ impl ReproProducer {
 
 #[test]
 fn test_mpsc_exact_repro() {
-    println!("=== MPSC Exact Reproduction Test ===");
+    badbatch::test_log!("=== MPSC Exact Reproduction Test ===");
 
     // Exact same config as MPSC benchmark
     const PRODUCER_COUNT: usize = 3;
@@ -130,7 +144,7 @@ fn test_mpsc_exact_repro() {
     let handler = ReproHandler::new();
     let counter = handler.get_count();
 
-    println!("REPRO: Creating disruptor with buffer size {BUFFER_SIZE}");
+    badbatch::test_log!("REPRO: Creating disruptor with buffer size {BUFFER_SIZE}");
     let mut disruptor = Disruptor::new(
         factory,
         BUFFER_SIZE, // This triggers bitmap path!
@@ -141,11 +155,11 @@ fn test_mpsc_exact_repro() {
     .handle_events_with(handler)
     .build();
 
-    println!("REPRO: Starting disruptor");
+    badbatch::test_log!("REPRO: Starting disruptor");
     disruptor.start().unwrap();
     let disruptor_arc = Arc::new(disruptor);
 
-    println!("REPRO: Creating {PRODUCER_COUNT} producers with barrier synchronization");
+    badbatch::test_log!("REPRO: Creating {PRODUCER_COUNT} producers with barrier synchronization");
     let start_barrier = Arc::new(Barrier::new(PRODUCER_COUNT));
     let stop_flag = Arc::new(AtomicBool::new(false));
 
@@ -161,7 +175,7 @@ fn test_mpsc_exact_repro() {
         })
         .collect();
 
-    println!("REPRO: All producers created, waiting for completion...");
+    badbatch::test_log!("REPRO: All producers created, waiting for completion...");
 
     // Wait for completion with timeout
     let start_time = Instant::now();
@@ -172,12 +186,12 @@ fn test_mpsc_exact_repro() {
     loop {
         let current_count = counter.load(Ordering::Acquire);
         if current_count >= EXPECTED_EVENTS {
-            println!("REPRO: ✓ All {current_count} events processed successfully!");
+            badbatch::test_log!("REPRO: ✓ All {current_count} events processed successfully!");
             break;
         }
 
         if start_time.elapsed() > timeout {
-            println!("REPRO: ✗ Test timed out - {current_count} events processed, expected {EXPECTED_EVENTS}");
+            badbatch::test_log!("REPRO: ✗ Test timed out - {current_count} events processed, expected {EXPECTED_EVENTS}");
             break;
         }
 
@@ -185,7 +199,7 @@ fn test_mpsc_exact_repro() {
         if current_count == last_count {
             stall_count += 1;
             if stall_count > 1000 {
-                println!("REPRO: WARNING - Test appears stalled at {current_count} events (expected {EXPECTED_EVENTS})");
+                badbatch::test_log!("REPRO: WARNING - Test appears stalled at {current_count} events (expected {EXPECTED_EVENTS})");
                 stall_count = 0;
             }
         } else {
@@ -197,18 +211,20 @@ fn test_mpsc_exact_repro() {
     }
 
     // Stop all producers
-    println!("REPRO: Stopping all producers");
+    badbatch::test_log!("REPRO: Stopping all producers");
     let mut all_success = true;
     for (i, producer) in producers.iter_mut().enumerate() {
         let success = producer.stop_and_join();
         if !success {
-            println!("REPRO: Producer {i} failed");
+            badbatch::test_log!("REPRO: Producer {i} failed");
             all_success = false;
         }
     }
 
     let final_count = counter.load(Ordering::Acquire);
-    println!("REPRO: Final result - {final_count} events processed (expected {EXPECTED_EVENTS})");
+    badbatch::test_log!(
+        "REPRO: Final result - {final_count} events processed (expected {EXPECTED_EVENTS})"
+    );
 
     // Cleanup
     if let Ok(mut disruptor) = Arc::try_unwrap(disruptor_arc) {

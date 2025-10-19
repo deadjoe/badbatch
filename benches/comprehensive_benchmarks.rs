@@ -1,3 +1,11 @@
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+
 //! Safe Comprehensive Benchmark Suite
 //!
 //! This is a robust benchmark suite that runs comprehensive performance
