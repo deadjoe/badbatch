@@ -1047,7 +1047,7 @@ where
 
     /// Build the Disruptor and return a DisruptorHandle
     ///
-    /// This creates the RingBuffer, Sequencer, and starts all event processors.
+    /// This creates the `RingBuffer`, `Sequencer`, and starts all event processors.
     pub fn build(self) -> DisruptorHandle<E> {
         // Use the unified factory function
         let core = create_disruptor_core(
@@ -1167,7 +1167,7 @@ where
 
     /// Build the Disruptor and return a DisruptorHandle
     ///
-    /// This creates the RingBuffer, MultiProducerSequencer, and starts all event processors.
+    /// This creates the `RingBuffer`, `MultiProducerSequencer`, and starts all event processors.
     pub fn build(self) -> DisruptorHandle<E> {
         // Use the unified factory function to create the core components and start consumer threads
         let core = create_disruptor_core(
