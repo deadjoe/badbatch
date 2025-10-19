@@ -1,3 +1,11 @@
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+
 //! Fixed Single Producer Single Consumer (SPSC) Benchmarks
 //!
 //! This benchmark suite tests the performance of the BadBatch Disruptor

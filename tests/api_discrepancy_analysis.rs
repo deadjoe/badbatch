@@ -1,3 +1,11 @@
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+
 //! Analysis of API discrepancies between documentation and implementation
 //!
 //! This test file specifically checks for discrepancies between what's documented
@@ -25,7 +33,7 @@ mod api_discrepancy_tests {
         // This is what actually works:
         let mut producer = build_single_producer(1024, MyEvent::default, BusySpinWaitStrategy)
             .handle_events_with(|event, _sequence, _end_of_batch| {
-                println!("Processing event with value {}", event.value);
+                badbatch::test_log!("Processing event with value {}", event.value);
             })
             .build();
 
@@ -42,7 +50,7 @@ mod api_discrepancy_tests {
             simple_wait_strategy::busy_spin(), // This should work as it returns SimpleWaitStrategyAdapter
         )
         .handle_events_with(|event, _sequence, _end_of_batch| {
-            println!("Processing event with value {}", event.value);
+            badbatch::test_log!("Processing event with value {}", event.value);
         })
         .build();
     }
@@ -64,7 +72,7 @@ mod api_discrepancy_tests {
         let consumer = ElegantConsumer::with_affinity(
             ring_buffer,
             |event, _sequence, _end_of_batch| {
-                println!("Processing: {}", event.value);
+                badbatch::test_log!("Processing: {}", event.value);
             },
             simple_wait_strategy::BusySpin, // This works because ElegantConsumer uses SimpleWaitStrategy
             1,                              // Pin to CPU core 1
@@ -94,9 +102,11 @@ mod api_discrepancy_tests {
                 sequence: i64,
                 end_of_batch: bool,
             ) -> Result<()> {
-                println!(
+                badbatch::test_log!(
                     "Processing event {} with value {} (end_of_batch: {})",
-                    sequence, event.value, end_of_batch
+                    sequence,
+                    event.value,
+                    end_of_batch
                 );
                 Ok(())
             }

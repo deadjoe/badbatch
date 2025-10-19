@@ -55,8 +55,8 @@ where
             return Err(DisruptorError::InvalidBufferSize(buffer_size));
         }
 
-        let buffer_size_i64 =
-            i64::try_from(buffer_size).map_err(|_| DisruptorError::InvalidBufferSize(buffer_size))?;
+        let buffer_size_i64 = i64::try_from(buffer_size)
+            .map_err(|_| DisruptorError::InvalidBufferSize(buffer_size))?;
 
         let factory_ref = &event_factory;
 
@@ -79,6 +79,9 @@ where
     ///
     /// # Returns
     /// A reference to the event at the specified sequence
+    ///
+    /// # Panics
+    /// Panics if the masked sequence cannot be converted into a valid `usize`.
     #[must_use]
     pub fn get(&self, sequence: i64) -> &T {
         let masked = sequence & self.index_mask;
@@ -95,6 +98,10 @@ where
     ///
     /// # Returns
     /// A mutable reference to the event at the specified sequence
+    ///
+    /// # Panics
+    /// Panics if the masked sequence cannot be converted into a valid `usize`.
+    #[must_use]
     pub fn get_mut(&mut self, sequence: i64) -> &mut T {
         let masked = sequence & self.index_mask;
         let index = usize::try_from(masked).expect("sequence mask should fit into usize");
@@ -119,6 +126,10 @@ where
     /// This method is unsafe because it allows mutable access without checking
     /// for exclusive access. The caller must ensure that only one thread
     /// accesses the event mutably at a time.
+    ///
+    /// # Panics
+    /// Panics if the masked sequence cannot be converted into a valid `usize`.
+    #[must_use]
     pub unsafe fn get_mut_unchecked(&self, sequence: i64) -> *mut T {
         let masked = sequence & self.index_mask;
         let index = usize::try_from(masked).expect("sequence mask should fit into usize");
@@ -131,6 +142,7 @@ where
     ///
     /// # Returns
     /// The size of the ring buffer
+    #[must_use]
     pub fn buffer_size(&self) -> usize {
         self.slots.len()
     }
@@ -139,8 +151,12 @@ where
     ///
     /// # Returns
     /// The size of the ring buffer as i64 (matching disruptor-rs pattern)
+    ///
+    /// # Panics
+    /// Panics if the buffer length exceeds `i64::MAX`.
+    #[must_use]
     pub fn size(&self) -> i64 {
-        self.slots.len() as i64
+        i64::try_from(self.slots.len()).expect("ring buffer length must fit into i64")
     }
 
     /// Check if the buffer has available capacity
@@ -154,6 +170,7 @@ where
     ///
     /// # Returns
     /// True if there is sufficient capacity, false otherwise
+    #[must_use]
     pub fn has_available_capacity(&self, required_capacity: i64, available_capacity: i64) -> bool {
         available_capacity >= required_capacity
     }
@@ -166,6 +183,7 @@ where
     ///
     /// # Returns
     /// The remaining capacity in the buffer
+    #[must_use]
     pub fn remaining_capacity(&self, current_sequence: i64, next_sequence: i64) -> i64 {
         let buffer_size = self.size();
         buffer_size - (next_sequence - current_sequence)
@@ -181,6 +199,7 @@ where
     ///
     /// # Returns
     /// The number of free slots available
+    #[must_use]
     pub fn free_slots(&self, producer_sequence: i64, consumer_sequence: i64) -> i64 {
         self.size() - (producer_sequence - consumer_sequence)
     }
@@ -198,6 +217,7 @@ where
     ///
     /// # Safety
     /// The caller must ensure exclusive access to the specified range
+    #[must_use]
     pub unsafe fn batch_iter_mut(&self, start: i64, end: i64) -> BatchIterMut<'_, T>
     where
         T: Send + Sync,
@@ -229,7 +249,12 @@ where
     }
 
     fn remaining(&self) -> usize {
-        (self.last - self.current + 1) as usize
+        if self.current > self.last {
+            0
+        } else {
+            usize::try_from(self.last - self.current + 1)
+                .expect("batch iterator range must fit into usize")
+        }
     }
 }
 
@@ -326,7 +351,7 @@ where
     /// A new `SharedRingBuffer` instance
     ///
     /// # Errors
-    /// Returns `DisruptorError::InvalidBufferSize` if buffer_size is not a power of 2
+    /// Returns `DisruptorError::InvalidBufferSize` if `buffer_size` is not a power of 2
     pub fn new<F>(buffer_size: usize, event_factory: F) -> Result<Self>
     where
         F: EventFactory<T>,
@@ -363,6 +388,7 @@ where
     ///
     /// # Returns
     /// The size of the ring buffer
+    #[must_use]
     pub fn buffer_size(&self) -> usize {
         self.inner.read().buffer_size()
     }
@@ -375,6 +401,7 @@ where
     ///
     /// # Returns
     /// True if there is sufficient capacity, false otherwise
+    #[must_use]
     pub fn has_available_capacity(&self, required_capacity: i64, available_capacity: i64) -> bool {
         self.inner
             .read()
@@ -389,6 +416,7 @@ where
     ///
     /// # Returns
     /// The remaining capacity in the buffer
+    #[must_use]
     pub fn remaining_capacity(&self, current_sequence: i64, next_sequence: i64) -> i64 {
         self.inner
             .read()
@@ -559,7 +587,7 @@ mod tests {
             let mut values = Vec::new();
 
             for event in iter {
-                event.value = values.len() as i64;
+                event.value = i64::try_from(values.len()).expect("length fits in i64");
                 values.push(event.value);
             }
 

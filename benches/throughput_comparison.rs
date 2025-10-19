@@ -1,3 +1,11 @@
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+
 //! Throughput Comparison Benchmarks
 //!
 //! This benchmark suite compares the raw throughput performance of different

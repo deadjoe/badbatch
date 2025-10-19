@@ -7,6 +7,7 @@
 //! component, following the LMAX Disruptor design principles.
 
 use crate::disruptor::{ring_buffer::BatchIterMut, RingBuffer, Sequencer};
+use std::convert::TryFrom;
 use std::sync::Arc;
 
 /// Error indicating that the ring buffer is full
@@ -208,9 +209,8 @@ where
         F: FnOnce(&mut T),
     {
         // Try to claim the next sequence from the sequencer
-        let sequence = match self.sequencer.try_next() {
-            Some(seq) => seq,
-            None => return Err(RingBufferFull),
+        let Some(sequence) = self.sequencer.try_next() else {
+            return Err(RingBufferFull);
         };
 
         // Get the event at the claimed sequence and update it
@@ -233,15 +233,15 @@ where
         F: FnOnce(BatchIterMut<'a, T>),
     {
         // Try to claim n sequences from the sequencer
-        let end_sequence = match self.sequencer.try_next_n(n as i64) {
-            Some(seq) => seq,
-            None => {
-                let missing = n; // We don't know exactly how many are missing
-                return Err(MissingFreeSlots(missing as u64));
-            }
+        let batch_size = i64::try_from(n).expect("batch size must fit in i64");
+        let Some(end_sequence) = self.sequencer.try_next_n(batch_size) else {
+            let missing = n; // We don't know exactly how many are missing
+            return Err(MissingFreeSlots(
+                u64::try_from(missing).expect("missing slots must fit in u64"),
+            ));
         };
 
-        let start_sequence = end_sequence - (n as i64 - 1);
+        let start_sequence = end_sequence - (batch_size - 1);
 
         // SAFETY: We have exclusive access to this sequence range from the sequencer
         let iter = unsafe {
@@ -283,14 +283,15 @@ where
         F: FnOnce(BatchIterMut<'a, T>),
     {
         // Claim n sequences from the sequencer (blocking)
-        let end_sequence = match self.sequencer.next_n(n as i64) {
+        let batch_size = i64::try_from(n).expect("batch size must fit in i64");
+        let end_sequence = match self.sequencer.next_n(batch_size) {
             Ok(seq) => seq,
             Err(e) => {
                 crate::internal_error!("Failed to claim batch sequences: {e:?}");
                 return;
             }
         };
-        let start_sequence = end_sequence - (n as i64 - 1);
+        let start_sequence = end_sequence - (batch_size - 1);
 
         // SAFETY: We have exclusive access to this sequence range from the sequencer
         let iter = unsafe {
@@ -410,7 +411,7 @@ mod tests {
 
         let result = producer.try_batch_publish(3, |iter| {
             for (i, event) in iter.enumerate() {
-                event.value = i as i64;
+                event.value = i64::try_from(i).expect("index fits in i64");
                 event.data = format!("batch_{i}");
             }
         });
@@ -447,7 +448,7 @@ mod tests {
         // Publish a batch (should not block for first batch)
         producer.batch_publish(2, |iter| {
             for (i, event) in iter.enumerate() {
-                event.value = (i + 10) as i64;
+                event.value = i64::try_from(i + 10).expect("index fits in i64");
                 event.data = format!("blocking_batch_{i}");
             }
         });
@@ -506,7 +507,7 @@ mod tests {
         // try_batch_publish - publishes 2 events to sequences 2, 3
         let result2 = Producer::try_batch_publish(&mut producer, 2, |iter| {
             for (i, event) in iter.enumerate() {
-                event.value = (i + 10) as i64;
+                event.value = i64::try_from(i + 10).expect("index fits in i64");
             }
         });
         assert!(result2.is_ok());
@@ -564,14 +565,15 @@ mod tests {
         let batch_size = 100;
         let result = producer.try_batch_publish(batch_size, |iter| {
             for (i, event) in iter.enumerate() {
-                event.value = i as i64;
+                event.value = i64::try_from(i).expect("index fits in i64");
                 event.data = format!("large_batch_{i}");
             }
         });
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), (batch_size - 1) as i64);
-        assert_eq!(producer.current_sequence(), (batch_size - 1) as i64);
+        let expected = i64::try_from(batch_size - 1).expect("batch size fits in i64");
+        assert_eq!(result.unwrap(), expected);
+        assert_eq!(producer.current_sequence(), expected);
     }
 
     #[test]
@@ -580,7 +582,7 @@ mod tests {
         let mut expected_sequence = 0i64;
 
         // Mix single and batch publishes
-        for i in 0..5 {
+        for i in 0_i64..5 {
             if i % 2 == 0 {
                 // Single publish
                 let result = producer.try_publish(|event| {
@@ -592,7 +594,7 @@ mod tests {
                 // Batch publish of 2
                 let result = producer.try_batch_publish(2, |iter| {
                     for (j, event) in iter.enumerate() {
-                        event.value = i * 10 + j as i64;
+                        event.value = i * 10 + i64::try_from(j).expect("index fits in i64");
                     }
                 });
                 expected_sequence += 1; // End sequence of batch

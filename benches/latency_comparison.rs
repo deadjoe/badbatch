@@ -1,3 +1,11 @@
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+
 //! Latency Comparison Benchmarks
 //!
 //! This benchmark suite compares the latency characteristics of the BadBatch

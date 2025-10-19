@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
+const MAX_CONSECUTIVE_NO_EVENTS: u32 = 1_000;
+
 /// The main Disruptor class
 ///
 /// This is the primary entry point for using the Disruptor pattern. It provides
@@ -231,8 +233,6 @@ where
 
         // Start all event processors in their own threads
         // Each processor runs its actual event processing logic
-        const MAX_CONSECUTIVE_NO_EVENTS: u32 = 1_000;
-
         for (index, processor) in self.event_processors.iter().enumerate() {
             // Clone the processor for the thread
             let processor_clone = Arc::clone(processor);
@@ -375,6 +375,7 @@ where
 
         // Publish the sequence to make it available to consumers
         self.sequencer.publish(sequence);
+        drop(translator);
         Ok(())
     }
 
@@ -399,6 +400,7 @@ where
 
             // Publish the sequence to make it available to consumers
             self.sequencer.publish(sequence);
+            drop(translator);
             true
         } else {
             false
@@ -429,6 +431,7 @@ where
     ///
     /// # Returns
     /// A new DisruptorBuilder for further configuration
+    #[must_use]
     pub fn then<H>(mut self, event_handler: H) -> Self
     where
         H: EventHandler<T> + 'static,

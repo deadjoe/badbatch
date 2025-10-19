@@ -17,7 +17,7 @@ macro_rules! internal_debug {
     };
 }
 
-/// Internal info logging macro  
+/// Internal info logging macro\
 /// Only outputs if BADBATCH_LOG environment variable is set to "info", "debug", or "trace"
 #[macro_export]
 macro_rules! internal_info {
@@ -64,7 +64,7 @@ macro_rules! test_log {
         #[cfg(test)]
         {
             if std::env::var("BADBATCH_TEST_LOG").map(|s| s == "1" || s.to_lowercase() == "true").unwrap_or(false) {
-                println!("[BADBATCH TEST] {}", format!($($arg)*));
+                ::std::println!("[BADBATCH TEST] {}", format!($($arg)*));
             }
         }
     };

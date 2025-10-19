@@ -101,7 +101,7 @@ mod ring_buffer_properties {
         #[test]
         fn ring_buffer_wrapping_behavior(
             size_power in 1u32..8,
-            sequences in prop::collection::vec(any::<u64>(), 1..20)
+            sequences in prop::collection::vec(any::<i64>(), 1..20)
         ) {
             let size = 1usize << size_power;
             let factory = DefaultEventFactory::<i64>::new();
@@ -109,9 +109,7 @@ mod ring_buffer_properties {
             let size_i64 = i64::try_from(size).expect("size fits within i64");
 
             for (i, seq) in sequences.iter().enumerate() {
-                prop_assume!(i64::try_from(*seq).is_ok());
-                let seq_i64 = i64::try_from(*seq).unwrap();
-                let normalized = seq_i64.rem_euclid(size_i64);
+                let normalized = seq.rem_euclid(size_i64);
                 let value = i64::try_from(i).expect("index fits within i64");
 
                 *buffer.get_mut(normalized) = value;

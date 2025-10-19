@@ -112,23 +112,22 @@ pub fn create_disruptor_core<E, F, W>(
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + Clone + 'static,
+    W: WaitStrategy + Send + Sync + 'static,
 {
     // Create the ring buffer
     let closure_factory = ClosureEventFactory::new(event_factory);
     let ring_buffer =
         Arc::new(RingBuffer::new(size, closure_factory).expect("Failed to create ring buffer"));
 
+    let wait_strategy_arc: Arc<dyn WaitStrategy> = Arc::new(wait_strategy);
+
     // Create the appropriate sequencer
     let sequencer: Arc<dyn Sequencer> = if is_multi_producer {
-        Arc::new(MultiProducerSequencer::new(
-            size,
-            Arc::new(wait_strategy.clone()),
-        ))
+        Arc::new(MultiProducerSequencer::new(size, wait_strategy_arc.clone()))
     } else {
         Arc::new(SingleProducerSequencer::new(
             size,
-            Arc::new(wait_strategy.clone()),
+            wait_strategy_arc.clone(),
         ))
     };
 
@@ -139,7 +138,7 @@ where
     let mut consumer_threads: Vec<Consumer> = Vec::new();
     let mut consumer_sequences: Vec<Arc<Sequence>> = Vec::new();
 
-    for mut consumer_info in consumers.into_iter() {
+    for mut consumer_info in consumers {
         // Resolve dependencies: replace placeholder sequences with actual consumer sequences
         if !consumer_info.dependent_sequences.is_empty() {
             let mut actual_dependencies = Vec::new();
@@ -182,12 +181,12 @@ where
             if dependent_sequences.is_empty() && !is_multi_producer {
                 Arc::new(SimpleSequenceBarrier::new(
                     sequencer.get_cursor(),
-                    Arc::new(wait_strategy.clone()),
+                    wait_strategy_arc.clone(),
                 ))
             } else {
                 Arc::new(ProcessingSequenceBarrier::new(
                     sequencer.get_cursor(),
-                    Arc::new(wait_strategy.clone()),
+                    wait_strategy_arc.clone(),
                     dependent_sequences,
                     sequencer.clone(),
                 ))
@@ -477,64 +476,60 @@ where
                 }
 
                 // Wait for events to become available with shutdown support
-                match sequence_barrier.wait_for_with_shutdown(next_sequence, &shutdown_flag) {
-                    Ok(available_sequence) => {
-                        // Process all available events
-                        while next_sequence <= available_sequence
-                            && !shutdown_flag.load(Ordering::Acquire)
+                if let Ok(available_sequence) =
+                    sequence_barrier.wait_for_with_shutdown(next_sequence, &shutdown_flag)
+                {
+                    // Process all available events
+                    while next_sequence <= available_sequence
+                        && !shutdown_flag.load(Ordering::Acquire)
+                    {
+                        let end_of_batch = next_sequence == available_sequence;
+
+                        // Get the event from the ring buffer
+                        // SAFETY: We have exclusive access to this sequence range
+                        let event =
+                            unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
+
+                        // Process the event with proper exception handling
+                        if let Err(e) =
+                            event_handler.on_event(event, next_sequence, end_of_batch)
                         {
-                            let end_of_batch = next_sequence == available_sequence;
+                            // Log the error but continue processing
+                            // This follows LMAX Disruptor's approach of not stopping on individual event errors
+                            #[cfg(debug_assertions)]
+                            eprintln!(
+                                "Event processing error in thread '{thread_name}' at sequence {next_sequence}: {e:?}"
+                            );
+                            #[cfg(not(debug_assertions))]
+                            let _ = e;
 
-                            // Get the event from the ring buffer
-                            // SAFETY: We have exclusive access to this sequence range
-                            let event =
-                                unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
-
-                            // Process the event with proper exception handling
-                            if let Err(e) =
-                                event_handler.on_event(event, next_sequence, end_of_batch)
-                            {
-                                // Log the error but continue processing
-                                // This follows LMAX Disruptor's approach of not stopping on individual event errors
-                                #[cfg(debug_assertions)]
-                                eprintln!(
-                                    "Event processing error in thread '{thread_name}' at sequence {next_sequence}: {e:?}"
-                                );
-                                #[cfg(not(debug_assertions))]
-                                let _ = e;
-
-                                // You could also use an exception handler here if available:
-                                // exception_handler.handle_event_exception(e, next_sequence, event);
-
-                                // Continue processing the next event instead of breaking
-                                // This ensures the consumer doesn't stop due to a single bad event
-                            }
-
-                            // Critical: Update sequence AFTER event processing is completely done
-                            // This ensures that when other consumers see this sequence,
-                            // the event modifications are guaranteed to be visible
-
-                            // First, ensure all event modifications are committed to memory
-                            std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
-
-                            // Then update the consumer sequence using the strongest memory ordering
-                            consumer_sequence_clone.set_volatile(next_sequence);
-
-                            // Finally, ensure the sequence update is visible to other threads
-                            std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-
-                            next_sequence += 1;
+                            // Continue processing the next event instead of breaking
+                            // This ensures the consumer doesn't stop due to a single bad event
                         }
+
+                        // Critical: Update sequence AFTER event processing is completely done
+                        // This ensures that when other consumers see this sequence,
+                        // the event modifications are guaranteed to be visible
+
+                        // First, ensure all event modifications are committed to memory
+                        std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+
+                        // Then update the consumer sequence using the strongest memory ordering
+                        consumer_sequence_clone.set_volatile(next_sequence);
+
+                        // Finally, ensure the sequence update is visible to other threads
+                        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+
+                        next_sequence += 1;
                     }
-                    Err(_) => {
-                        // Handle barrier errors (e.g., alerts) or timeout
-                        // Check shutdown flag and break
-                        if shutdown_flag.load(Ordering::Acquire) {
-                            break;
-                        }
-                        // Small delay to avoid busy loop on errors
-                        std::thread::sleep(std::time::Duration::from_millis(1));
+                } else {
+                    // Handle barrier errors (e.g., alerts) or timeout
+                    // Check shutdown flag and break
+                    if shutdown_flag.load(Ordering::Acquire) {
+                        break;
                     }
+                    // Small delay to avoid busy loop on errors
+                    std::thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
         })
@@ -605,7 +600,7 @@ where
     where
         F: FnOnce(&mut E),
     {
-        self.producer.publish(update)
+        self.producer.publish(update);
     }
 
     /// Try to publish an event (delegated to producer)
@@ -624,7 +619,7 @@ where
     where
         F: for<'a> FnOnce(crate::disruptor::ring_buffer::BatchIterMut<'a, E>),
     {
-        self.producer.batch_publish(n, update)
+        self.producer.batch_publish(n, update);
     }
 
     /// Try to publish a batch of events (delegated to producer)
@@ -750,18 +745,21 @@ where
     W: WaitStrategy + Send + Sync + Clone + 'static,
 {
     /// Set CPU core affinity for the next event handler
+    #[must_use]
     pub fn pin_at_core(mut self, core_id: usize) -> Self {
         self.builder.shared.current_cpu_affinity = Some(core_id);
         self
     }
 
     /// Set thread name for the next event handler
+    #[must_use]
     pub fn thread_name<S: Into<String>>(mut self, name: S) -> Self {
         self.builder.shared.current_thread_name = Some(name.into());
         self
     }
 
     /// Add a dependent event handler that waits for previous consumers (closure-based)
+    #[must_use]
     pub fn handle_events_with<H>(
         mut self,
         handler: H,
@@ -790,6 +788,7 @@ where
     }
 
     /// Add a dependent stateful event handler that waits for previous consumers
+    #[must_use]
     pub fn handle_events_with_handler<H>(
         mut self,
         handler: H,
@@ -844,12 +843,14 @@ where
     }
 
     /// Set CPU core affinity for the next event handler
+    #[must_use]
     pub fn pin_at_core(mut self, core_id: usize) -> Self {
         self.shared.current_cpu_affinity = Some(core_id);
         self
     }
 
     /// Set thread name for the next event handler
+    #[must_use]
     pub fn thread_name<S: Into<String>>(mut self, name: S) -> Self {
         self.shared.current_thread_name = Some(name.into());
         self
@@ -876,6 +877,7 @@ where
     ///     .build();
     /// # drop(producer); // Clean shutdown
     /// ```
+    #[must_use]
     pub fn handle_events_with<H>(
         mut self,
         handler: H,
@@ -933,6 +935,7 @@ where
     ///     .build();
     /// # drop(producer); // Clean shutdown
     /// ```
+    #[must_use]
     pub fn handle_events_with_handler<H>(
         mut self,
         handler: H,
@@ -964,18 +967,21 @@ where
     W: WaitStrategy + Send + Sync + Clone + 'static,
 {
     /// Set CPU core affinity for the next event handler
+    #[must_use]
     pub fn pin_at_core(mut self, core_id: usize) -> Self {
         self.shared.current_cpu_affinity = Some(core_id);
         self
     }
 
     /// Set thread name for the next event handler
+    #[must_use]
     pub fn thread_name<S: Into<String>>(mut self, name: S) -> Self {
         self.shared.current_thread_name = Some(name.into());
         self
     }
 
     /// Add another event handler to process events in parallel (closure-based)
+    #[must_use]
     pub fn handle_events_with<H>(mut self, handler: H) -> Self
     where
         H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
@@ -992,6 +998,7 @@ where
     }
 
     /// Add another stateful event handler to process events in parallel
+    #[must_use]
     pub fn handle_events_with_handler<H>(mut self, handler: H) -> Self
     where
         H: EventHandler<E> + Send + Sync + 'static,
@@ -1095,18 +1102,21 @@ where
     }
 
     /// Set CPU core affinity for the next event handler
+    #[must_use]
     pub fn pin_at_core(mut self, core_id: usize) -> Self {
         self.shared.current_cpu_affinity = Some(core_id);
         self
     }
 
     /// Set thread name for the next event handler
+    #[must_use]
     pub fn thread_name<S: Into<String>>(mut self, name: S) -> Self {
         self.shared.current_thread_name = Some(name.into());
         self
     }
 
     /// Add an event handler to process events
+    #[must_use]
     pub fn handle_events_with<H>(
         mut self,
         handler: H,
@@ -1138,18 +1148,21 @@ where
     W: WaitStrategy + Send + Sync + Clone + 'static,
 {
     /// Set CPU core affinity for the next event handler
+    #[must_use]
     pub fn pin_at_core(mut self, core_id: usize) -> Self {
         self.shared.current_cpu_affinity = Some(core_id);
         self
     }
 
     /// Set thread name for the next event handler
+    #[must_use]
     pub fn thread_name<S: Into<String>>(mut self, name: S) -> Self {
         self.shared.current_thread_name = Some(name.into());
         self
     }
 
     /// Add another event handler to process events in parallel
+    #[must_use]
     pub fn handle_events_with<H>(mut self, handler: H) -> Self
     where
         H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
@@ -1239,7 +1252,7 @@ where
         F: FnOnce(&mut E),
     {
         let mut producer = self.create_producer();
-        producer.publish(update)
+        producer.publish(update);
     }
 
     /// Try to publish a batch of events
@@ -1261,7 +1274,7 @@ where
         F: for<'a> FnOnce(crate::disruptor::ring_buffer::BatchIterMut<'a, E>),
     {
         let mut producer = self.create_producer();
-        producer.batch_publish(n, update)
+        producer.batch_publish(n, update);
     }
 }
 
@@ -1306,9 +1319,22 @@ where
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::cast_possible_truncation)]
+    #![allow(clippy::cast_lossless)]
+    #![allow(clippy::cast_possible_wrap)]
+    #![allow(clippy::cast_precision_loss)]
+    #![allow(clippy::cast_sign_loss)]
+    #![allow(clippy::items_after_statements)]
+    #![allow(clippy::too_many_lines)]
     use super::*;
     use crate::disruptor::wait_strategy::{BusySpinWaitStrategy, YieldingWaitStrategy};
     use std::sync::{mpsc, Arc, Mutex};
+
+    macro_rules! println {
+        ($($arg:tt)*) => {
+            crate::test_log!($($arg)*);
+        };
+    }
 
     #[derive(Debug, Clone, PartialEq)]
     struct TestEvent {
@@ -2281,10 +2307,13 @@ mod tests {
                 // Check if we see the modification from Stage 1
                 if event.value < 1000 {
                     println!("❌ Stage 2 ERROR: sequence={sequence}, saw original value {} instead of modified value", event.value);
-                    panic!("Stage 2 saw unmodified value: {}", event.value);
-                } else {
-                    println!("✅ Stage 2 SUCCESS: sequence={sequence}, saw modified value {}", event.value);
                 }
+                assert!(
+                    event.value >= 1000,
+                    "Stage 2 saw unmodified value: {}",
+                    event.value
+                );
+                println!("✅ Stage 2 SUCCESS: sequence={sequence}, saw modified value {}", event.value);
 
                 stage2_count_clone.fetch_add(1, Ordering::SeqCst);
                 println!("🟢 Stage 2 END: sequence={sequence}");
@@ -2363,12 +2392,11 @@ mod tests {
                             "🟡 Transformation: sequence={}, data={}",
                             sequence, event.data
                         );
-                        if !event.data.contains("|validated") {
-                            panic!(
-                                "Transformation stage should see validated data, got: {}",
-                                event.data
-                            );
-                        }
+                        assert!(
+                            event.data.contains("|validated"),
+                            "Transformation stage should see validated data, got: {}",
+                            event.data
+                        );
                         event.data.push_str("|transformed");
                         event.value *= 2;
                         transformation_count.fetch_add(1, Ordering::SeqCst);
@@ -2380,12 +2408,11 @@ mod tests {
                 .handle_events_with(
                     move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
                         println!("🟠 Enrichment: sequence={}, data={}", sequence, event.data);
-                        if !event.data.contains("|transformed") {
-                            panic!(
-                                "Enrichment stage should see transformed data, got: {}",
-                                event.data
-                            );
-                        }
+                        assert!(
+                            event.data.contains("|transformed"),
+                            "Enrichment stage should see transformed data, got: {}",
+                            event.data
+                        );
                         event.data.push_str("|enriched");
                         event.value += 1000;
                         enrichment_count.fetch_add(1, Ordering::SeqCst);
@@ -2397,9 +2424,11 @@ mod tests {
                 .handle_events_with(
                     move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
                         println!("🟢 Final: sequence={}, data={}", sequence, event.data);
-                        if !event.data.contains("|enriched") {
-                            panic!("Final stage should see enriched data, got: {}", event.data);
-                        }
+                        assert!(
+                            event.data.contains("|enriched"),
+                            "Final stage should see enriched data, got: {}",
+                            event.data
+                        );
                         final_count.fetch_add(1, Ordering::SeqCst);
                         println!("🟢 Final DONE: sequence={sequence}");
                     },
@@ -2478,9 +2507,11 @@ mod tests {
                     move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
                         println!("🟡 Stage2: seq={}, data={}", sequence, event.data);
                         // Validate that stage1 processed this event
-                        if !event.data.contains("|stage1") {
-                            panic!("Stage2 should see stage1 data, got: {}", event.data);
-                        }
+                        assert!(
+                            event.data.contains("|stage1"),
+                            "Stage2 should see stage1 data, got: {}",
+                            event.data
+                        );
                         event.data.push_str("|stage2");
                         stage2_count_clone.fetch_add(1, Ordering::SeqCst);
                         println!("🟡 Stage2 DONE: seq={sequence}");
@@ -2492,12 +2523,16 @@ mod tests {
                     move |event: &mut TestEvent, sequence: i64, _end_of_batch: bool| {
                         println!("🟢 Stage3: seq={}, data={}", sequence, event.data);
                         // Validate that both stage1 and stage2 processed this event
-                        if !event.data.contains("|stage1") {
-                            panic!("Stage3 should see stage1 data, got: {}", event.data);
-                        }
-                        if !event.data.contains("|stage2") {
-                            panic!("Stage3 should see stage2 data, got: {}", event.data);
-                        }
+                        assert!(
+                            event.data.contains("|stage1"),
+                            "Stage3 should see stage1 data, got: {}",
+                            event.data
+                        );
+                        assert!(
+                            event.data.contains("|stage2"),
+                            "Stage3 should see stage2 data, got: {}",
+                            event.data
+                        );
                         event.data.push_str("|stage3");
                         stage3_count_clone.fetch_add(1, Ordering::SeqCst);
                         println!("🟢 Stage3 DONE: seq={sequence}");
@@ -2605,11 +2640,13 @@ mod tests {
                                 "❌ DEPENDENCY VIOLATION: sequence={}, saw {} (should be >= 1000)",
                                 sequence, event.value
                             );
-                            panic!(
-                                "Dependency chain violation at sequence {}: saw {}",
-                                sequence, event.value
-                            );
                         }
+                        assert!(
+                            event.value >= 1000,
+                            "Dependency chain violation at sequence {}: saw {}",
+                            sequence,
+                            event.value
+                        );
 
                         stage2_count_clone.fetch_add(1, Ordering::SeqCst);
                         println!("🟢 Stage 2 DONE: sequence={sequence}");

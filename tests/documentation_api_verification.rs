@@ -1,3 +1,11 @@
+#![allow(
+    missing_docs,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
+
 //! Test file to verify that the API examples in README.md and DESIGN.md actually compile and work
 //!
 //! This test verifies that the documented API patterns work correctly with the current codebase.
@@ -33,9 +41,11 @@ mod traditional_lmax_api_tests {
             sequence: i64,
             end_of_batch: bool,
         ) -> badbatch::disruptor::Result<()> {
-            println!(
+            badbatch::test_log!(
                 "Processing event {} with value {} (end_of_batch: {})",
-                sequence, event.value, end_of_batch
+                sequence,
+                event.value,
+                end_of_batch
             );
             Ok(())
         }
@@ -108,7 +118,7 @@ mod modern_disruptor_rs_api_tests {
         // The wait strategy needs to implement WaitStrategy, so we use BusySpinWaitStrategy
         let mut producer = build_single_producer(1024, MyEvent::default, BusySpinWaitStrategy)
             .handle_events_with(|event, _sequence, _end_of_batch| {
-                println!("Processing event with value {}", event.value);
+                badbatch::test_log!("Processing event with value {}", event.value);
             })
             .build();
 
@@ -134,7 +144,7 @@ mod modern_disruptor_rs_api_tests {
         let consumer = ElegantConsumer::with_affinity(
             ring_buffer,
             |event, _sequence, _end_of_batch| {
-                println!("Processing: {}", event.value);
+                badbatch::test_log!("Processing: {}", event.value);
             },
             BusySpin,
             1, // Pin to CPU core 1
