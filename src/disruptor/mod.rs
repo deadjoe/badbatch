@@ -1,4 +1,4 @@
-//! BadBatch Disruptor Implementation
+//! `BadBatch` Disruptor Implementation
 //!
 //! This module provides a complete Rust implementation of the LMAX Disruptor pattern,
 //! strictly following the original design from <https://github.com/LMAX-Exchange/disruptor>
@@ -7,14 +7,14 @@
 //!
 //! The Disruptor pattern consists of the following key components:
 //!
-//! 1. **RingBuffer** - Pre-allocated circular buffer for events
-//! 2. **Sequence** - Atomic sequence counters for coordination
-//! 3. **Sequencer** - Coordinates access to the ring buffer (single/multi producer)
-//! 4. **EventHandler** - Processes events from the ring buffer
-//! 5. **EventProcessor** - Manages the event processing loop
-//! 6. **WaitStrategy** - Different strategies for waiting for events
-//! 7. **SequenceBarrier** - Coordination point for dependencies
-//! 8. **Disruptor** - Main DSL for configuring the system
+//! 1. **`RingBuffer`** - Pre-allocated circular buffer for events
+//! 2. **`Sequence`** - Atomic sequence counters for coordination
+//! 3. **`Sequencer`** - Coordinates access to the ring buffer (single/multi producer)
+//! 4. **`EventHandler`** - Processes events from the ring buffer
+//! 5. **`EventProcessor`** - Manages the event processing loop
+//! 6. **`WaitStrategy`** - Different strategies for waiting for events
+//! 7. **`SequenceBarrier`** - Coordination point for dependencies
+//! 8. **`Disruptor`** - Main DSL for configuring the system
 //!
 //! ## Design Principles
 //!
@@ -109,27 +109,35 @@ pub const INITIAL_CURSOR_VALUE: i64 = -1;
 /// Errors that can occur in the Disruptor
 #[derive(Debug, thiserror::Error)]
 pub enum DisruptorError {
+    /// Returned when a producer attempts to publish but the ring buffer is full.
     #[error("Ring buffer is full")]
     BufferFull,
 
+    /// Returned when a sequence number outside the valid range is used.
     #[error("Invalid sequence: {0}")]
     InvalidSequence(i64),
 
+    /// Returned when an invalid (non power-of-two) buffer size is provided.
     #[error("Buffer size must be a power of 2, got: {0}")]
     InvalidBufferSize(usize),
 
+    /// Returned when a blocking call times out waiting for a sequence.
     #[error("Timeout waiting for sequence")]
     Timeout,
 
+    /// Returned when an operation is attempted after the disruptor shuts down.
     #[error("Disruptor has been shut down")]
     Shutdown,
 
+    /// Returned when the requested capacity exceeds available slots.
     #[error("Insufficient capacity")]
     InsufficientCapacity,
 
+    /// Returned when the disruptor is alerted to stop processing.
     #[error("Alert exception")]
     Alert,
 
+    /// Returned when shutdown encounters an unrecoverable error.
     #[error("Shutdown error: {0}")]
     ShutdownError(String),
 }
@@ -138,8 +146,9 @@ pub enum DisruptorError {
 pub type Result<T> = std::result::Result<T, DisruptorError>;
 
 /// Utility function to check if a number is a power of 2
+#[must_use]
 pub fn is_power_of_two(n: usize) -> bool {
-    n != 0 && (n & (n - 1)) == 0
+    n.is_power_of_two()
 }
 
 #[cfg(test)]

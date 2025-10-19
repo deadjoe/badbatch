@@ -231,6 +231,8 @@ where
 
         // Start all event processors in their own threads
         // Each processor runs its actual event processing logic
+        const MAX_CONSECUTIVE_NO_EVENTS: u32 = 1_000;
+
         for (index, processor) in self.event_processors.iter().enumerate() {
             // Clone the processor for the thread
             let processor_clone = Arc::clone(processor);
@@ -245,7 +247,6 @@ where
                 // Main event processing loop - this is the real implementation
                 let mut running = true;
                 let mut consecutive_no_events = 0;
-                const MAX_CONSECUTIVE_NO_EVENTS: u32 = 1000; // Prevent infinite waiting
 
                 while running && !shutdown_flag.load(Ordering::Acquire) {
                     match processor_clone.try_run_once() {

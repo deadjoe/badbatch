@@ -23,9 +23,13 @@ use std::thread::{self, JoinHandle};
 /// Disruptor class and the Builder-style API to avoid code duplication.
 #[derive(Debug, Clone)]
 pub struct DisruptorCore<E> {
+    /// Shared ring buffer storing all events managed by the disruptor.
     pub ring_buffer: Arc<RingBuffer<E>>,
+    /// Sequencer coordinating producer access to the ring buffer.
     pub sequencer: Arc<dyn Sequencer>,
+    /// Consumer handles that process published events.
     pub consumers: Vec<Consumer>,
+    /// Shared flag signaling graceful shutdown to consumer threads.
     pub shutdown_flag: Arc<AtomicBool>,
     gating_sequences: Vec<Arc<Sequence>>,
 }

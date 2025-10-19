@@ -108,8 +108,7 @@ pub trait WaitStrategy: Send + Sync + std::fmt::Debug {
             ) {
                 Ok(available_sequence) => return Ok(available_sequence),
                 Err(DisruptorError::Timeout) => {
-                    // Continue loop to check shutdown flag again
-                    continue;
+                    // Timeout indicates we should re-check shutdown flag and retry.
                 }
                 Err(e) => return Err(e),
             }
