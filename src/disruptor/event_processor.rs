@@ -320,6 +320,8 @@ where
     }
 
     fn on_start(&self) {
+        // Clear any previous alerts triggered during shutdown/halt cycles so that
+        self.sequence_barrier.clear_alert();
         self.running.store(true, Ordering::Release);
         unsafe {
             let handler = &mut *self.event_handler.get();
