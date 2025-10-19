@@ -965,7 +965,7 @@ impl Sequencer for MultiProducerSequencer {
     }
 
     fn remaining_capacity(&self) -> i64 {
-        let next_value = self.cursor.get() + 1;
+        let next_value = self.cursor.get();
         let consumed = self.get_minimum_sequence();
 
         // If no consumers are registered, consumed will be i64::MAX
@@ -1141,7 +1141,7 @@ mod tests {
 
         // Test remove gating sequence
         let removed = sequencer.remove_gating_sequence(gating_seq2.clone());
-        assert!***REMOVED***;
+        assert!(removed);
 
         let min_seq = sequencer.get_minimum_sequence();
         assert_eq!(min_seq, 5); // Should be remaining gating sequence
@@ -1274,7 +1274,7 @@ mod tests {
 
         // Test remove gating sequence
         let removed = sequencer.remove_gating_sequence(gating_seq2.clone());
-        assert!***REMOVED***;
+        assert!(removed);
 
         let min_seq = sequencer.get_minimum_sequence();
         assert_eq!(min_seq, 5); // Should be remaining gating sequence
@@ -1290,8 +1290,7 @@ mod tests {
         let sequencer = MultiProducerSequencer::new(8, wait_strategy);
 
         // Test remaining capacity with no consumers
-        let capacity = sequencer.remaining_capacity();
-        assert_eq!(capacity, 8);
+        assert_eq!(sequencer.remaining_capacity(), 8);
 
         // Test has_available_capacity
         assert!(sequencer.has_available_capacity(4));
@@ -1304,14 +1303,12 @@ mod tests {
         // Claim some sequences
         let _seq1 = sequencer.next_n(4).unwrap();
 
-        // Test remaining capacity with consumer
-        let capacity = sequencer.remaining_capacity();
-        assert!(capacity <= 8);
+        // With 4 sequences claimed and none consumed, remaining capacity should drop by 4
+        assert_eq!(sequencer.remaining_capacity(), 4);
 
         // Update consumer sequence and test again
         consumer_seq.set(2);
-        let capacity = sequencer.remaining_capacity();
-        assert!(capacity > 0);
+        assert_eq!(sequencer.remaining_capacity(), 7);
     }
 
     #[test]

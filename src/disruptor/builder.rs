@@ -27,6 +27,7 @@ pub struct DisruptorCore<E> {
     pub sequencer: Arc<dyn Sequencer>,
     pub consumers: Vec<Consumer>,
     pub shutdown_flag: Arc<AtomicBool>,
+    gating_sequences: Vec<Arc<Sequence>>,
 }
 
 impl<E> DisruptorCore<E>
@@ -39,12 +40,14 @@ where
         sequencer: Arc<dyn Sequencer>,
         consumers: Vec<Consumer>,
         shutdown_flag: Arc<AtomicBool>,
+        gating_sequences: Vec<Arc<Sequence>>,
     ) -> Self {
         Self {
             ring_buffer,
             sequencer,
             consumers,
             shutdown_flag,
+            gating_sequences,
         }
     }
 
@@ -60,8 +63,9 @@ where
 
     /// Shutdown all consumers
     pub fn shutdown(&mut self) {
-        // Set shutdown flag
-        self.shutdown_flag.store(true, Ordering::Release);
+        if self.shutdown_flag.swap(true, Ordering::AcqRel) {
+            return;
+        }
 
         // Wait for all consumer threads to finish
         for mut consumer in self.consumers.drain(..) {
@@ -76,6 +80,11 @@ where
                     let _ = e;
                 }
             }
+        }
+
+        // Remove gating sequences to restore full producer capacity
+        for sequence in self.gating_sequences.drain(..) {
+            self.sequencer.remove_gating_sequence(sequence);
         }
     }
 
@@ -154,30 +163,39 @@ where
             consumer_info.dependent_sequences = actual_dependencies;
         }
 
-        // Create a sequence barrier for this consumer
-        let sequence_barrier = if consumer_info.dependent_sequences.is_empty() {
-            // No dependencies - only wait for producer cursor
-            Arc::new(SimpleSequenceBarrier::new(
-                sequencer.get_cursor(),
-                Arc::new(wait_strategy.clone()),
-            )) as Arc<dyn SequenceBarrier>
-        } else {
-            // Has dependencies - wait for both producer cursor and dependent sequences
-            Arc::new(ProcessingSequenceBarrier::new(
-                sequencer.get_cursor(),
-                Arc::new(wait_strategy.clone()),
-                consumer_info.dependent_sequences,
-                sequencer.clone(),
-            )) as Arc<dyn SequenceBarrier>
-        };
+        // Destructure to avoid partial moves later on
+        let ConsumerInfo {
+            handler,
+            thread_name,
+            cpu_affinity,
+            dependent_sequences,
+        } = consumer_info;
+
+        // Create a sequence barrier for this consumer.
+        // Important: For multi-producer sequencers we must always use ProcessingSequenceBarrier
+        // to ensure contiguous publication checks via get_highest_published_sequence.
+        let sequence_barrier: Arc<dyn SequenceBarrier> =
+            if dependent_sequences.is_empty() && !is_multi_producer {
+                Arc::new(SimpleSequenceBarrier::new(
+                    sequencer.get_cursor(),
+                    Arc::new(wait_strategy.clone()),
+                ))
+            } else {
+                Arc::new(ProcessingSequenceBarrier::new(
+                    sequencer.get_cursor(),
+                    Arc::new(wait_strategy.clone()),
+                    dependent_sequences,
+                    sequencer.clone(),
+                ))
+            };
 
         // Start the consumer thread
         let (consumer_sequence, consumer) = start_consumer_thread(
             ring_buffer.clone(),
             sequence_barrier,
-            consumer_info.handler,
-            consumer_info.thread_name,
-            consumer_info.cpu_affinity,
+            handler,
+            thread_name,
+            cpu_affinity,
             shutdown_flag.clone(),
         );
 
@@ -190,7 +208,13 @@ where
         sequencer.add_gating_sequences(&consumer_sequences);
     }
 
-    DisruptorCore::new(ring_buffer, sequencer, consumer_threads, shutdown_flag)
+    DisruptorCore::new(
+        ring_buffer,
+        sequencer,
+        consumer_threads,
+        shutdown_flag,
+        consumer_sequences,
+    )
 }
 
 /// Set CPU affinity for the current thread
@@ -521,7 +545,7 @@ where
 /// This handle provides access to the producer and manages the lifecycle
 /// of consumer threads. When dropped, it will attempt to gracefully
 /// shutdown all consumer threads.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DisruptorHandle<E>
 where
     E: Send + Sync + 'static,
@@ -530,6 +554,8 @@ where
     core: DisruptorCore<E>,
     /// The producer for publishing events
     producer: SimpleProducer<E>,
+    /// Indicates whether shutdown() has been invoked
+    is_shutdown: bool,
 }
 
 impl<E> DisruptorHandle<E>
@@ -538,7 +564,11 @@ where
 {
     fn new(core: DisruptorCore<E>) -> Self {
         let producer = core.create_producer();
-        Self { core, producer }
+        Self {
+            core,
+            producer,
+            is_shutdown: false,
+        }
     }
 
     /// Creates a new producer that shares the same ring buffer and sequencer
@@ -558,17 +588,12 @@ where
     ///
     /// Note: This will shutdown all consumer threads before returning the producer
     pub fn into_producer(mut self) -> SimpleProducer<E> {
-        // Shutdown the core
-        self.core.shutdown();
+        // Ensure the system is stopped before handing out the producer.
+        self.shutdown();
 
-        // Use ManuallyDrop to avoid calling Drop
-        let manual_drop = std::mem::ManuallyDrop::new(self);
-
-        // Move the producer out safely
-        // SAFETY: We use ManuallyDrop to prevent the Drop impl from running,
-        // then use ptr::read to move the producer out without calling its destructor.
-        // This is safe because we never use manual_drop again after this point.
-        unsafe { std::ptr::read(&manual_drop.producer) }
+        // Move the producer out while leaving a placeholder behind so Drop can run normally.
+        let placeholder = self.core.create_producer();
+        std::mem::replace(&mut self.producer, placeholder)
     }
 
     /// Publish an event using a closure (delegated to producer)
@@ -636,12 +661,21 @@ where
     /// disruptor.shutdown();
     /// ```
     pub fn shutdown(&mut self) {
+        if self.is_shutdown {
+            return;
+        }
         self.core.shutdown();
+        self.is_shutdown = true;
     }
 
     /// Get the number of active consumer threads
     pub fn consumer_count(&self) -> usize {
         self.core.consumer_count()
+    }
+
+    /// Check whether the disruptor has been shut down
+    pub fn is_shutdown(&self) -> bool {
+        self.is_shutdown
     }
 }
 
@@ -650,7 +684,9 @@ where
     E: Send + Sync + 'static,
 {
     fn drop(&mut self) {
-        self.shutdown();
+        if !self.is_shutdown {
+            self.shutdown();
+        }
     }
 }
 
@@ -1413,9 +1449,8 @@ mod tests {
             .handle_events_with(handler)
             .build();
 
-        // Should successfully build and return a CloneableProducer
-        // The producer should be cloneable
-        let _producer2 = producer.clone();
+        // Should successfully build and return a handle that can create producers
+        let _producer2 = producer.create_producer();
         drop(producer);
         drop(rx); // Ensure we can drop the receiver
     }
@@ -1428,15 +1463,16 @@ mod tests {
             let _ = tx.send(sequence);
         };
 
-        let producer1 = build_multi_producer(16, test_event_factory, BusySpinWaitStrategy)
+        let handle = build_multi_producer(16, test_event_factory, BusySpinWaitStrategy)
             .handle_events_with(handler)
             .build();
 
+        let producer1 = handle.create_producer();
         let producer2 = producer1.clone();
 
-        // Both producers should be independent but share the same ring buffer
-        drop(producer1);
+        // Both SimpleProducer clones should operate on the same underlying buffer
         drop(producer2);
+        drop(handle);
         drop(rx);
     }
 
@@ -1659,11 +1695,13 @@ mod tests {
             });
         }
 
-        // Manually shutdown
+        // Manually shutdown (should be idempotent)
+        disruptor_handle.shutdown();
         disruptor_handle.shutdown();
 
         // Verify shutdown completed (consumers are cleaned up after shutdown)
         assert_eq!(disruptor_handle.consumer_count(), 0); // Consumers are cleaned up after shutdown
+        assert!(disruptor_handle.is_shutdown());
     }
 
     #[test]
@@ -1679,13 +1717,36 @@ mod tests {
             .build();
 
         // Convert to producer (this should shutdown consumer threads)
-        let mut producer = disruptor_handle.into_producer();
+        let _producer = disruptor_handle.into_producer();
+    }
 
-        // Verify we can still publish events
-        producer.publish(|event| {
-            event.value = 42;
-            event.data = "test".to_string();
-        });
+    #[test]
+    fn test_disruptor_handle_into_producer_restores_capacity() {
+        let mut handle = build_multi_producer(4, test_event_factory, BusySpinWaitStrategy)
+            .handle_events_with(|_event: &mut TestEvent, _seq, _eob| {})
+            .build();
+
+        // Publish a few events so the consumer advances the gating sequence
+        for i in 0..4 {
+            handle.publish(|event| {
+                event.value = i as i64;
+            });
+        }
+
+        // Give the consumer a brief moment to process
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Convert into a standalone producer. This should remove gating sequences so the
+        // ring buffer can wrap freely without consumer backpressure.
+        let mut producer = handle.into_producer();
+
+        for i in 0..8 {
+            producer
+                .try_publish(|event| {
+                    event.value = 100 + i as i64;
+                })
+                .expect("publishing after into_producer should not block");
+        }
     }
 
     #[test]
