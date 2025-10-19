@@ -18,7 +18,8 @@ CLAUDE.md
 # Cargo.lock
 
 # Cargo build cache
-.cargo/
+.cargo/*
+!.cargo/config.toml
 
 # Rust analyzer cache
 .rust-analyzer/
@@ -167,6 +168,7 @@ debug_*.rs
 .env.*.local
 .envrc
 config.toml
+!.cargo/config.toml
 config.yaml
 config.yml
 secrets.toml
