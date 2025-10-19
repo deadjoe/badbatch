@@ -1,4 +1,4 @@
-//! BadBatch - High-Performance Disruptor Engine
+//! `BadBatch` - High-Performance Disruptor Engine
 //!
 //! A complete Rust implementation of the LMAX Disruptor pattern for ultra-low latency
 //! inter-thread messaging with mechanical sympathy.
@@ -63,14 +63,14 @@
 //!
 //! The Disruptor pattern consists of several key components:
 //!
-//! - **RingBuffer**: Pre-allocated circular buffer for events
-//! - **Sequence**: Atomic sequence counters for coordination
-//! - **Sequencer**: Coordinates access to the ring buffer (single/multi producer)
-//! - **EventHandler**: Processes events from the ring buffer
-//! - **EventProcessor**: Manages the event processing loop
-//! - **WaitStrategy**: Different strategies for waiting for events
-//! - **SequenceBarrier**: Coordination point for dependencies
-//! - **Disruptor**: Main DSL for configuring the system
+//! - **`RingBuffer`**: Pre-allocated circular buffer for events
+//! - **`Sequence`**: Atomic sequence counters for coordination
+//! - **`Sequencer`**: Coordinates access to the ring buffer (single/multi producer)
+//! - **`EventHandler`**: Processes events from the ring buffer
+//! - **`EventProcessor`**: Manages the event processing loop
+//! - **`WaitStrategy`**: Different strategies for waiting for events
+//! - **`SequenceBarrier`**: Coordination point for dependencies
+//! - **`Disruptor`**: Main DSL for configuring the system
 //!
 //! ## Performance Characteristics
 //!
@@ -138,7 +138,8 @@ pub use disruptor::{
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Get the version of the BadBatch library
+/// Get the version of the `BadBatch` library
+#[must_use]
 pub fn version() -> &'static str {
     VERSION
 }
