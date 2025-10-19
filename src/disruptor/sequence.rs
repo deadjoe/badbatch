@@ -15,7 +15,7 @@ use std::sync::Arc;
 /// A sequence counter that provides atomic operations with memory ordering guarantees.
 ///
 /// This is equivalent to the Sequence class in the original LMAX Disruptor.
-/// It uses crossbeam_utils::CachePadded to prevent false sharing between sequence values
+/// It uses `crossbeam_utils::CachePadded` to prevent false sharing between sequence values
 /// and provides atomic operations with appropriate memory barriers.
 #[derive(Debug)]
 pub struct Sequence {
@@ -27,10 +27,11 @@ impl Sequence {
     /// Create a new sequence with the initial value
     ///
     /// # Arguments
-    /// * `initial_value` - The initial sequence value (typically INITIAL_CURSOR_VALUE)
+    /// * `initial_value` - The initial sequence value (typically `INITIAL_CURSOR_VALUE`)
     ///
     /// # Returns
     /// A new Sequence instance
+    #[must_use]
     pub fn new(initial_value: i64) -> Self {
         Self {
             value: CachePadded::new(AtomicI64::new(initial_value)),
@@ -40,14 +41,15 @@ impl Sequence {
     /// Create a new sequence with the default initial value
     ///
     /// # Returns
-    /// A new Sequence instance with INITIAL_CURSOR_VALUE
+    /// A new `Sequence` instance with `INITIAL_CURSOR_VALUE`
+    #[must_use]
     pub fn new_with_initial_value() -> Self {
         Self::new(INITIAL_CURSOR_VALUE)
     }
 
     /// Get the current sequence value
     ///
-    /// Uses SeqCst ordering to ensure the strongest synchronization with other threads.
+    /// Uses `SeqCst` ordering to ensure the strongest synchronization with other threads.
     /// This is critical for dependency chains to work correctly.
     ///
     /// # Returns
@@ -68,7 +70,7 @@ impl Sequence {
 
     /// Set the sequence value with volatile semantics
     ///
-    /// Uses SeqCst ordering for strongest memory ordering guarantees.
+    /// Uses `SeqCst` ordering for strongest memory ordering guarantees.
     /// This is equivalent to the setVolatile method in the original LMAX Disruptor.
     ///
     /// # Arguments
@@ -79,7 +81,7 @@ impl Sequence {
 
     /// Compare and swap the sequence value
     ///
-    /// Atomically compares the current value with expected and sets it to new_value
+    /// Atomically compares the current value with expected and sets it to `new_value`
     /// if they match.
     ///
     /// # Arguments
@@ -154,7 +156,7 @@ impl Sequence {
     /// * `sequences` - A slice of sequence references
     ///
     /// # Returns
-    /// The minimum sequence value, or i64::MAX if the slice is empty
+    /// The minimum sequence value, or `i64::MAX` if the slice is empty
     pub fn get_minimum_sequence(sequences: &[Arc<Sequence>]) -> i64 {
         if sequences.is_empty() {
             return i64::MAX;

@@ -7,6 +7,7 @@
 use crate::disruptor::core_interfaces::DataProvider;
 use crate::disruptor::{is_power_of_two, DisruptorError, EventFactory, Result};
 use std::cell::UnsafeCell;
+use std::convert::TryFrom;
 
 #[cfg(feature = "shared-ring-buffer")]
 use std::sync::Arc;
@@ -16,16 +17,16 @@ use std::sync::Arc;
 /// This is the heart of the Disruptor pattern. It pre-allocates all events
 /// and provides lock-free access through careful use of memory barriers and
 /// atomic operations. This follows the exact design from the original LMAX
-/// Disruptor RingBuffer with optimizations inspired by disruptor-rs.
+/// Disruptor `RingBuffer` with optimizations inspired by disruptor-rs.
 ///
 /// # Type Parameters
 /// * `T` - The event type stored in the buffer
 #[derive(Debug)]
 pub struct RingBuffer<T> {
-    /// The buffer storing all events using UnsafeCell for interior mutability
+    /// The buffer storing all events using `UnsafeCell` for interior mutability
     /// Using `Box<[UnsafeCell<T>]>` for better memory layout than `Vec<T>`
     slots: Box<[UnsafeCell<T>]>,
-    /// Mask for fast modulo operations (buffer_size - 1)
+    /// Mask for fast modulo operations (`buffer_size` - 1)
     /// Using i64 to match sequence type and avoid casting
     index_mask: i64,
 }
@@ -41,10 +42,11 @@ where
     /// * `event_factory` - Factory for creating events to pre-populate the buffer
     ///
     /// # Returns
-    /// A new RingBuffer instance
+    /// A new `RingBuffer` instance
     ///
     /// # Errors
-    /// Returns `DisruptorError::InvalidBufferSize` if buffer_size is not a power of 2
+    /// Returns `DisruptorError::InvalidBufferSize` if `buffer_size` is not a power of 2
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new<F>(buffer_size: usize, event_factory: F) -> Result<Self>
     where
         F: EventFactory<T>,
@@ -53,15 +55,20 @@ where
             return Err(DisruptorError::InvalidBufferSize(buffer_size));
         }
 
+        let buffer_size_i64 =
+            i64::try_from(buffer_size).map_err(|_| DisruptorError::InvalidBufferSize(buffer_size))?;
+
+        let factory_ref = &event_factory;
+
         // Pre-allocate all events using UnsafeCell for interior mutability
         // Using Box<[UnsafeCell<T>]> for better memory layout than Vec<T>
         let slots: Box<[UnsafeCell<T>]> = (0..buffer_size)
-            .map(|_| UnsafeCell::new(event_factory.new_instance()))
+            .map(|_| UnsafeCell::new(factory_ref.new_instance()))
             .collect();
 
         Ok(Self {
             slots,
-            index_mask: (buffer_size - 1) as i64,
+            index_mask: buffer_size_i64 - 1,
         })
     }
 
@@ -72,8 +79,10 @@ where
     ///
     /// # Returns
     /// A reference to the event at the specified sequence
+    #[must_use]
     pub fn get(&self, sequence: i64) -> &T {
-        let index = (sequence & self.index_mask) as usize;
+        let masked = sequence & self.index_mask;
+        let index = usize::try_from(masked).expect("sequence mask should fit into usize");
         // SAFETY: Index is within bounds - guaranteed by invariant and index mask.
         let slot = unsafe { self.slots.get_unchecked(index) };
         unsafe { &*slot.get() }
@@ -87,7 +96,8 @@ where
     /// # Returns
     /// A mutable reference to the event at the specified sequence
     pub fn get_mut(&mut self, sequence: i64) -> &mut T {
-        let index = (sequence & self.index_mask) as usize;
+        let masked = sequence & self.index_mask;
+        let index = usize::try_from(masked).expect("sequence mask should fit into usize");
         // SAFETY: We have exclusive access to self, so this is safe
         let slot = unsafe { self.slots.get_unchecked(index) };
         unsafe { &mut *slot.get() }
@@ -110,7 +120,8 @@ where
     /// for exclusive access. The caller must ensure that only one thread
     /// accesses the event mutably at a time.
     pub unsafe fn get_mut_unchecked(&self, sequence: i64) -> *mut T {
-        let index = (sequence & self.index_mask) as usize;
+        let masked = sequence & self.index_mask;
+        let index = usize::try_from(masked).expect("sequence mask should fit into usize");
         // SAFETY: Index is within bounds - guaranteed by invariant and index mask.
         let slot = self.slots.get_unchecked(index);
         slot.get()
@@ -261,9 +272,9 @@ where
 unsafe impl<T: Send + Sync> Send for RingBuffer<T> {}
 unsafe impl<T: Send + Sync> Sync for RingBuffer<T> {}
 
-/// Implementation of DataProvider trait for RingBuffer
+/// Implementation of `DataProvider` trait for `RingBuffer`
 ///
-/// This allows RingBuffer to be used as a data provider in the core interfaces,
+/// This allows `RingBuffer` to be used as a data provider in the core interfaces,
 /// providing a clean abstraction for data access.
 impl<T> DataProvider<T> for RingBuffer<T>
 where
@@ -312,7 +323,7 @@ where
     /// * `buffer_size` - The size of the ring buffer (must be a power of 2)
     ///
     /// # Returns
-    /// A new SharedRingBuffer instance
+    /// A new `SharedRingBuffer` instance
     ///
     /// # Errors
     /// Returns `DisruptorError::InvalidBufferSize` if buffer_size is not a power of 2

@@ -10,6 +10,7 @@ use crate::disruptor::{
     wait_strategy::BusySpinWaitStrategy,
 };
 use proptest::prelude::*;
+use std::convert::TryFrom;
 use std::sync::Arc;
 
 /// Property tests for Sequence
@@ -64,17 +65,18 @@ mod sequence_properties {
     }
 }
 
-/// Property tests for RingBuffer
+/// Property tests for `RingBuffer`
 mod ring_buffer_properties {
     use super::*;
 
     proptest! {
         #[test]
         fn ring_buffer_size_is_power_of_two(size_power in 1u32..16) {
-            let size = 1 << size_power;  // 2^size_power
+            let size = 1usize << size_power;  // 2^size_power
             let factory = DefaultEventFactory::<i64>::new();
             let buffer = RingBuffer::new(size, factory).unwrap();
-            prop_assert_eq!(buffer.size(), size as i64);
+            let size_i64 = i64::try_from(size).expect("size fits within i64");
+            prop_assert_eq!(buffer.size(), size_i64);
             prop_assert!(size.is_power_of_two());
         }
 
@@ -84,12 +86,13 @@ mod ring_buffer_properties {
             sequence in any::<i64>(),
             value in any::<i64>()
         ) {
-            let size = 1 << size_power;
+            let size = 1usize << size_power;
             let factory = DefaultEventFactory::<i64>::new();
             let mut buffer = RingBuffer::new(size, factory).unwrap();
 
             // 确保sequence是有效的
-            let normalized_seq = sequence.abs() % (size as i64);
+            let size_i64 = i64::try_from(size).expect("size fits within i64");
+            let normalized_seq = sequence.rem_euclid(size_i64);
 
             *buffer.get_mut(normalized_seq) = value;
             prop_assert_eq!(*buffer.get(normalized_seq), value);
@@ -100,14 +103,16 @@ mod ring_buffer_properties {
             size_power in 1u32..8,
             sequences in prop::collection::vec(any::<u64>(), 1..20)
         ) {
-            let size = 1 << size_power;
+            let size = 1usize << size_power;
             let factory = DefaultEventFactory::<i64>::new();
             let mut buffer = RingBuffer::new(size, factory).unwrap();
+            let size_i64 = i64::try_from(size).expect("size fits within i64");
 
             for (i, seq) in sequences.iter().enumerate() {
-                let seq_i64 = *seq as i64;
-                let normalized = seq_i64 % (size as i64);
-                let value = i as i64;
+                prop_assume!(i64::try_from(*seq).is_ok());
+                let seq_i64 = i64::try_from(*seq).unwrap();
+                let normalized = seq_i64.rem_euclid(size_i64);
+                let value = i64::try_from(i).expect("index fits within i64");
 
                 *buffer.get_mut(normalized) = value;
                 prop_assert_eq!(*buffer.get(normalized), value);
@@ -116,7 +121,7 @@ mod ring_buffer_properties {
     }
 }
 
-/// Property tests for SingleProducerSequencer
+/// Property tests for `SingleProducerSequencer`
 mod single_producer_sequencer_properties {
     use super::*;
 
@@ -126,14 +131,15 @@ mod single_producer_sequencer_properties {
             size_power in 1u32..10,
             requests in prop::collection::vec(1usize..10, 1..20)
         ) {
-            let buffer_size = 1 << size_power;
+            let buffer_size = 1usize << size_power;
             let wait_strategy = Arc::new(BusySpinWaitStrategy::new());
             let sequencer = SingleProducerSequencer::new(buffer_size, wait_strategy);
 
             let mut last_sequence = -1i64;
 
             for request_size in requests {
-                if let Ok(sequence) = sequencer.next_n(request_size as i64) {
+                let request_i64 = i64::try_from(request_size).expect("request size fits in i64");
+                if let Ok(sequence) = sequencer.next_n(request_i64) {
                     prop_assert!(sequence > last_sequence);
                     sequencer.publish(sequence);
                     last_sequence = sequence;
@@ -146,12 +152,13 @@ mod single_producer_sequencer_properties {
             size_power in 1u32..8,
             sequences in prop::collection::vec(1usize..5, 1..10)
         ) {
-            let buffer_size = 1 << size_power;
+            let buffer_size = 1usize << size_power;
             let wait_strategy = Arc::new(BusySpinWaitStrategy::new());
             let sequencer = SingleProducerSequencer::new(buffer_size, wait_strategy);
 
             for request_size in sequences {
-                if let Ok(sequence) = sequencer.next_n(request_size as i64) {
+                let request_i64 = i64::try_from(request_size).expect("request size fits in i64");
+                if let Ok(sequence) = sequencer.next_n(request_i64) {
                     // 发布前不应该可用
                     prop_assert!(!sequencer.is_available(sequence));
 
@@ -165,7 +172,7 @@ mod single_producer_sequencer_properties {
     }
 }
 
-/// Property tests for MultiProducerSequencer
+/// Property tests for `MultiProducerSequencer`
 mod multi_producer_sequencer_properties {
     use super::*;
 
@@ -175,14 +182,15 @@ mod multi_producer_sequencer_properties {
             size_power in 1u32..8,
             requests in prop::collection::vec(1usize..5, 1..10)
         ) {
-            let buffer_size = 1 << size_power;
+            let buffer_size = 1usize << size_power;
             let wait_strategy = Arc::new(BusySpinWaitStrategy::new());
             let sequencer = MultiProducerSequencer::new(buffer_size, wait_strategy);
 
             let mut allocated_sequences = std::collections::HashSet::new();
 
             for request_size in requests {
-                if let Ok(sequence) = sequencer.next_n(request_size as i64) {
+                let request_i64 = i64::try_from(request_size).expect("request size fits in i64");
+                if let Ok(sequence) = sequencer.next_n(request_i64) {
                     // 每个分配的序列应该是唯一的
                     prop_assert!(!allocated_sequences.contains(&sequence));
                     allocated_sequences.insert(sequence);
@@ -196,14 +204,15 @@ mod multi_producer_sequencer_properties {
             size_power in 1u32..6,
             mut sequences in prop::collection::vec(1usize..3, 2..5)
         ) {
-            let buffer_size = 1 << size_power;
+            let buffer_size = 1usize << size_power;
             let wait_strategy = Arc::new(BusySpinWaitStrategy::new());
             let sequencer = MultiProducerSequencer::new(buffer_size, wait_strategy);
 
             // 分配多个序列
             let mut allocated = Vec::new();
             for request_size in &sequences {
-                if let Ok(seq) = sequencer.next_n(*request_size as i64) {
+                let request_i64 = i64::try_from(*request_size).expect("request size fits in i64");
+                if let Ok(seq) = sequencer.next_n(request_i64) {
                     allocated.push(seq);
                 }
             }
