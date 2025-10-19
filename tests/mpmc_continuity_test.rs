@@ -4,10 +4,12 @@
 //! convergence behavior, particularly focusing on scenarios that were identified
 //! in the code review as missing test coverage.
 
-use badbatch::disruptor::{build_multi_producer, BusySpinWaitStrategy};
+use badbatch::disruptor::{
+    build_multi_producer, BlockingWaitStrategy, BusySpinWaitStrategy, Producer,
+};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Condvar, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -66,7 +68,7 @@ fn test_mpmc_multi_producer() {
     let count_clone = Arc::clone(&processed_count);
 
     // Create multi-producer disruptor with adequate buffer size
-    let producer = build_multi_producer(256, TestEvent::default, BusySpinWaitStrategy)
+    let mut disruptor = build_multi_producer(256, TestEvent::default, BusySpinWaitStrategy)
         .handle_events_with(
             move |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
                 count_clone.fetch_add(1, Ordering::SeqCst);
@@ -82,7 +84,7 @@ fn test_mpmc_multi_producer() {
 
     // Create producer threads with conservative publishing
     for producer_id in 0..num_producers {
-        let mut producer_clone = producer.clone();
+        let mut producer_clone = disruptor.create_producer();
         let handle = thread::spawn(move || {
             for event_id in 0..events_per_producer {
                 // Use blocking publish to avoid ring buffer full errors
@@ -120,6 +122,8 @@ fn test_mpmc_multi_producer() {
 
     println!("✅ MPMC multi-producer test passed");
     println!("   Processed {final_count} events from {num_producers} producers");
+
+    disruptor.shutdown();
 }
 
 /// Test continuity convergence with sequence tracking
@@ -227,6 +231,106 @@ fn test_mpmc_continuity_under_load() {
 
     println!("✅ MPMC continuity under load test passed");
     println!("   Perfect sequence continuity maintained for {num_events} events");
+}
+
+/// Regression: ensure that the first-stage consumer in a multi-producer disruptor
+/// does not observe events before the publishing producer completes initialization.
+#[test]
+fn test_mpmc_slow_producer_does_not_leak_unpublished_events() {
+    #[derive(Debug, Clone)]
+    struct SlowEvent {
+        value: i64,
+    }
+
+    impl Default for SlowEvent {
+        fn default() -> Self {
+            Self { value: -1 }
+        }
+    }
+
+    let processed_values = Arc::new(Mutex::new(Vec::new()));
+    let processed_clone = Arc::clone(&processed_values);
+
+    let mut disruptor = build_multi_producer(16, SlowEvent::default, BlockingWaitStrategy::new())
+        .handle_events_with(move |event: &mut SlowEvent, _sequence, _end_of_batch| {
+            processed_clone.lock().unwrap().push(event.value);
+        })
+        .build();
+
+    // Latches for coordinating the slow producer
+    let claim_latch = Arc::new((Mutex::new(false), Condvar::new()));
+    let release_latch = Arc::new((Mutex::new(false), Condvar::new()));
+
+    // Spawn a slow producer that claims a sequence but delays initialization.
+    let mut slow_producer = disruptor.create_producer();
+    let claim_latch_clone = Arc::clone(&claim_latch);
+    let release_latch_clone = Arc::clone(&release_latch);
+    let producer_thread = std::thread::spawn(move || {
+        slow_producer.publish(|event| {
+            // Signal that we have entered the critical section before initialization.
+            {
+                let (lock, cvar) = &*claim_latch_clone;
+                let mut claimed = lock.lock().unwrap();
+                *claimed = true;
+                cvar.notify_one();
+            }
+
+            // Wait until main thread allows initialization to complete.
+            let (lock, cvar) = &*release_latch_clone;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = cvar.wait(released).unwrap();
+            }
+
+            // Perform the actual event initialization.
+            event.value = 7;
+        });
+    });
+
+    // Wait until the producer has claimed the slot and is holding before initialization.
+    {
+        let (lock, cvar) = &*claim_latch;
+        let mut claimed = lock.lock().unwrap();
+        while !*claimed {
+            claimed = cvar.wait(claimed).unwrap();
+        }
+    }
+
+    // Give consumers a chance to misbehave (they should not see the event yet).
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(
+        processed_values.lock().unwrap().is_empty(),
+        "Consumer should not observe unpublished events"
+    );
+
+    // Allow the slow producer to finish initialization and publish the event.
+    {
+        let (lock, cvar) = &*release_latch;
+        let mut released = lock.lock().unwrap();
+        *released = true;
+        cvar.notify_one();
+    }
+
+    producer_thread
+        .join()
+        .expect("Slow producer thread should complete cleanly");
+
+    // Wait until the consumer processes the event.
+    let start = std::time::Instant::now();
+    while processed_values.lock().unwrap().is_empty()
+        && start.elapsed() < std::time::Duration::from_secs(1)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let processed = processed_values.lock().unwrap().clone();
+    assert_eq!(
+        processed,
+        vec![7],
+        "Consumer should see exactly the initialized value after publish"
+    );
+
+    disruptor.shutdown();
 }
 
 /// Verify the DisruptorBuilder API works correctly for MPMC
