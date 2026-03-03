@@ -165,9 +165,8 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
         // Check again after waiting in case we were alerted while waiting
         self.check_alert()?;
 
-        // Critical memory barrier to ensure all previous writes are visible
-        // This matches disruptor-rs fence(Ordering::Acquire) at line 177
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+        // Note: Acquire semantics are already provided by the wait strategy's
+        // atomic loads and the sequencer's is_available checks below.
 
         // CRITICAL FIX: Call sequencer.getHighestPublishedSequence like LMAX Disruptor
         // This is essential for MultiProducer scenarios to ensure we only process
@@ -197,8 +196,7 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
         // Check again after waiting in case we were alerted while waiting
         self.check_alert()?;
 
-        // Critical memory barrier to ensure all previous writes are visible
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+        // Note: Acquire semantics are already provided by the wait strategy's atomic loads.
 
         // CRITICAL FIX: Call sequencer.getHighestPublishedSequence like LMAX Disruptor
         if available_sequence < sequence {
@@ -256,9 +254,8 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
         // Check again after waiting in case we were alerted while waiting
         self.check_alert()?;
 
-        // Critical memory barrier to ensure all previous writes are visible
-        // This matches disruptor-rs fence(Ordering::Acquire) at line 177
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+        // Note: Acquire semantics are already provided by the wait strategy's
+        // atomic loads and the sequencer's is_available checks below.
 
         // Align with other wait paths: ensure we return the highest
         // contiguous published sequence for multi-producer scenarios.
@@ -321,8 +318,7 @@ impl SequenceBarrier for SimpleSequenceBarrier {
 
         self.check_alert()?;
 
-        // Critical memory barrier to ensure all previous writes are visible
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+        // Note: Acquire semantics are already provided by the wait strategy's atomic loads.
 
         Ok(available_sequence)
     }
@@ -340,8 +336,7 @@ impl SequenceBarrier for SimpleSequenceBarrier {
 
         self.check_alert()?;
 
-        // Critical memory barrier to ensure all previous writes are visible
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+        // Note: Acquire semantics are already provided by the wait strategy's atomic loads.
 
         Ok(available_sequence)
     }
@@ -389,8 +384,7 @@ impl SequenceBarrier for SimpleSequenceBarrier {
 
         self.check_alert()?;
 
-        // Critical memory barrier to ensure all previous writes are visible
-        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+        // Note: Acquire semantics are already provided by the wait strategy's atomic loads.
 
         Ok(available_sequence)
     }
