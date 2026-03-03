@@ -46,7 +46,7 @@ const MAX_CONSECUTIVE_NO_EVENTS: u32 = 1_000;
 #[derive(Debug)]
 pub struct Disruptor<T>
 where
-    T: Send + Sync + 'static,
+    T: Send + Sync + std::fmt::Debug + 'static,
 {
     /// The ring buffer for storing events
     ring_buffer: Arc<RingBuffer<T>>,
@@ -66,7 +66,7 @@ where
 
 impl<T> Disruptor<T>
 where
-    T: Send + Sync + 'static + std::fmt::Debug,
+    T: Send + Sync + std::fmt::Debug + 'static,
 {
     /// Create a new Disruptor
     ///
@@ -414,7 +414,7 @@ where
 /// topologies with dependencies between processors.
 pub struct DisruptorBuilder<T>
 where
-    T: Send + Sync + 'static,
+    T: Send + Sync + std::fmt::Debug + 'static,
 {
     disruptor: Disruptor<T>,
     last_processor_sequences: Vec<Arc<Sequence>>,
@@ -422,7 +422,7 @@ where
 
 impl<T> DisruptorBuilder<T>
 where
-    T: Send + Sync + 'static + std::fmt::Debug,
+    T: Send + Sync + std::fmt::Debug + 'static,
 {
     /// Add another event handler that depends on the previous handlers
     ///
