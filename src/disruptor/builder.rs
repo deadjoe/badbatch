@@ -507,18 +507,10 @@ where
                             // This ensures the consumer doesn't stop due to a single bad event
                         }
 
-                        // Critical: Update sequence AFTER event processing is completely done
-                        // This ensures that when other consumers see this sequence,
-                        // the event modifications are guaranteed to be visible
-
-                        // First, ensure all event modifications are committed to memory
-                        std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
-
-                        // Then update the consumer sequence using the strongest memory ordering
+                        // Update sequence AFTER event processing is completely done.
+                        // The Release store in set_volatile ensures all prior writes
+                        // (event modifications) are visible before the sequence advances.
                         consumer_sequence_clone.set_volatile(next_sequence);
-
-                        // Finally, ensure the sequence update is visible to other threads
-                        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
 
                         next_sequence += 1;
                     }

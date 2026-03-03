@@ -49,13 +49,13 @@ impl Sequence {
 
     /// Get the current sequence value
     ///
-    /// Uses `SeqCst` ordering to ensure the strongest synchronization with other threads.
-    /// This is critical for dependency chains to work correctly.
+    /// Uses `Acquire` ordering to ensure all writes before the corresponding
+    /// `Release` store are visible to the reading thread.
     ///
     /// # Returns
     /// The current sequence value
     pub fn get(&self) -> i64 {
-        self.value.load(Ordering::SeqCst)
+        self.value.load(Ordering::Acquire)
     }
 
     /// Set the sequence value
@@ -70,13 +70,13 @@ impl Sequence {
 
     /// Set the sequence value with volatile semantics
     ///
-    /// Uses `SeqCst` ordering for strongest memory ordering guarantees.
-    /// This is equivalent to the setVolatile method in the original LMAX Disruptor.
+    /// Uses `Release` ordering to ensure all prior writes are visible to threads
+    /// that subsequently load with `Acquire`. Equivalent to Java's volatile write.
     ///
     /// # Arguments
     /// * `value` - The new sequence value
     pub fn set_volatile(&self, value: i64) {
-        self.value.store(value, Ordering::SeqCst);
+        self.value.store(value, Ordering::Release);
     }
 
     /// Compare and swap the sequence value
@@ -92,7 +92,7 @@ impl Sequence {
     /// True if the swap was successful, false otherwise
     pub fn compare_and_set(&self, expected: i64, new_value: i64) -> bool {
         self.value
-            .compare_exchange(expected, new_value, Ordering::SeqCst, Ordering::Acquire)
+            .compare_exchange(expected, new_value, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 
@@ -103,7 +103,7 @@ impl Sequence {
     /// # Returns
     /// The new sequence value after incrementing
     pub fn increment_and_get(&self) -> i64 {
-        self.value.fetch_add(1, Ordering::SeqCst) + 1
+        self.value.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     /// Add a value and get the new result
@@ -116,7 +116,7 @@ impl Sequence {
     /// # Returns
     /// The new sequence value after adding the increment
     pub fn add_and_get(&self, increment: i64) -> i64 {
-        self.value.fetch_add(increment, Ordering::SeqCst) + increment
+        self.value.fetch_add(increment, Ordering::AcqRel) + increment
     }
 
     /// Get the current value and add increment
@@ -130,7 +130,7 @@ impl Sequence {
     /// # Returns
     /// The original sequence value before adding the increment
     pub fn get_and_add(&self, increment: i64) -> i64 {
-        self.value.fetch_add(increment, Ordering::SeqCst)
+        self.value.fetch_add(increment, Ordering::AcqRel)
     }
 }
 
