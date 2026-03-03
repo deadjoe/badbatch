@@ -60,11 +60,28 @@ pub trait WaitStrategy: Send + Sync + std::fmt::Debug {
         sequence: i64,
         cursor: Arc<Sequence>,
         dependent_sequences: &[Arc<Sequence>],
-        _timeout: Duration,
+        timeout: Duration,
     ) -> Result<i64> {
-        // Default implementation delegates to wait_for
-        // Specific strategies can override this for better timeout handling
-        self.wait_for(sequence, cursor, dependent_sequences)
+        // Default implementation: poll with timeout check
+        let start = std::time::Instant::now();
+        loop {
+            let cursor_value = cursor.get();
+            if cursor_value >= sequence {
+                let dep_min = if dependent_sequences.is_empty() {
+                    cursor_value
+                } else {
+                    Sequence::get_minimum_sequence(dependent_sequences)
+                };
+                let available = std::cmp::min(cursor_value, dep_min);
+                if available >= sequence {
+                    return Ok(available);
+                }
+            }
+            if start.elapsed() >= timeout {
+                return Err(crate::disruptor::DisruptorError::Timeout);
+            }
+            std::thread::yield_now();
+        }
     }
 
     /// Wait for the given sequence with external shutdown signal
