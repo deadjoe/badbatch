@@ -17,6 +17,16 @@ use std::sync::Arc;
 ///
 /// This wrapper provides a limited sequencer interface that can be used
 /// by sequence barriers without creating circular dependencies.
+///
+/// # Safety Invariant
+///
+/// The `sequencer_ptr` raw pointer **must** outlive this wrapper. This is upheld
+/// because `new_barrier()` is called on a sequencer that lives inside an `Arc`
+/// which is shared with the returned barrier. The barrier (and thus this wrapper)
+/// cannot outlive the `Arc<dyn Sequencer>` that created it, since they share the
+/// same `Arc` reference. Callers must not construct a `SequencerWrapper` with a
+/// pointer to a stack-local sequencer that may be dropped while the wrapper is
+/// still alive (test code excepted, where lifetimes are scoped together).
 #[derive(Debug)]
 struct SequencerWrapper {
     buffer_size: usize,
@@ -539,12 +549,14 @@ pub struct MultiProducerSequencer {
     available_bitmap: Box<[AtomicU64]>,
     /// Index mask for fast modulo operations (buffer_size - 1)
     index_mask: usize,
+    /// Bit shift for calculating round flags: `buffer_size.trailing_zeros()`
+    /// Replaces expensive div_euclid with `sequence >> index_shift`
+    index_shift: u32,
 
     /// Cached minimum gating sequence to reduce lock contention
     /// This is an optimization from the LMAX Disruptor to avoid frequent reads of gating sequences
     cached_gating_sequence: CachePadded<AtomicI64>,
-    /// Legacy available buffer for backward compatibility
-    /// This maintains compatibility with existing LMAX-style availability checking
+    /// Legacy available buffer for backward compatibility with small buffers (< 64)
     available_buffer: Vec<AtomicI32>,
 }
 
@@ -559,7 +571,8 @@ impl MultiProducerSequencer {
     /// A new MultiProducerSequencer instance
     ///
     /// # Panics
-    /// Panics if buffer_size is not a power of 2
+    /// Panics if `buffer_size` is not a power of 2. Callers should validate
+    /// buffer size before construction (e.g., via `Disruptor::new` or builders).
     pub fn new(buffer_size: usize, wait_strategy: Arc<dyn WaitStrategy>) -> Self {
         assert!(
             is_power_of_two(buffer_size),
@@ -594,44 +607,49 @@ impl MultiProducerSequencer {
             gating_sequences: parking_lot::RwLock::new(Vec::new()),
             available_bitmap,
             index_mask: buffer_size - 1,
+            index_shift: buffer_size.trailing_zeros(),
             cached_gating_sequence: CachePadded::new(AtomicI64::new(-1)),
             available_buffer,
         }
     }
 
     /// Calculate the index in the available buffer for a given sequence
-    /// This matches the LMAX Disruptor calculateIndex method
+    /// Uses bitmask for O(1) modulo on power-of-2 buffer sizes
+    #[inline]
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     fn calculate_index(&self, sequence: i64) -> usize {
-        let normalized = sequence.rem_euclid(self.buffer_size_i64);
-        let seq = usize::try_from(normalized).expect("normalized sequence must fit");
-        seq & self.index_mask
+        // Sign loss is intentional: bitmask discards upper bits and sign.
+        // Truncation is safe: index_mask is at most usize::MAX.
+        (sequence as usize) & self.index_mask
     }
 
     /// Calculate the availability flag for a given sequence
-    /// This matches the LMAX Disruptor calculateAvailabilityFlag method
+    /// Uses bit shift for O(1) round calculation on power-of-2 buffer sizes
     /// Returns 0 for even rounds, 1 for odd rounds
+    #[inline]
     fn calculate_availability_flag(&self, sequence: i64) -> i32 {
-        let round = sequence.div_euclid(self.buffer_size_i64);
-        let flag = round & 1;
-        i32::try_from(flag).expect("flag must fit in i32")
+        ((sequence >> self.index_shift) & 1) as i32
     }
 
     /// Calculate the round flag for bitmap availability checking (inspired by disruptor-rs)
+    /// Uses bit shift for O(1) round calculation on power-of-2 buffer sizes
     /// Returns 0 for even rounds, 1 for odd rounds
     #[inline]
+    #[allow(clippy::cast_sign_loss)]
     fn calculate_round_flag(&self, sequence: i64) -> u64 {
-        let round = sequence.div_euclid(self.buffer_size_i64);
-        let flag = u8::try_from(round & 1).expect("round flag must be 0 or 1");
-        u64::from(flag)
+        // Sign loss is intentional: `& 1` guarantees result is 0 or 1.
+        ((sequence >> self.index_shift) & 1) as u64
     }
 
     /// Calculate availability indices for bitmap (inspired by disruptor-rs)
+    /// Uses bitmask for O(1) slot calculation on power-of-2 buffer sizes
+    #[inline]
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     fn calculate_availability_indices(&self, sequence: i64) -> (usize, usize) {
-        let normalized = sequence.rem_euclid(self.buffer_size_i64);
-        let slot_index =
-            usize::try_from(normalized).expect("normalized sequence must fit") & self.index_mask;
+        // Sign loss is intentional: bitmask discards upper bits and sign.
+        let slot_index = (sequence as usize) & self.index_mask;
         let availability_index = slot_index >> 6; // Divide by 64
-        let bit_index = slot_index - availability_index * 64;
+        let bit_index = slot_index & 63; // Modulo 64
         (availability_index, bit_index)
     }
 
@@ -641,16 +659,16 @@ impl MultiProducerSequencer {
         unsafe { self.available_bitmap.get_unchecked(index) }
     }
 
-    /// Set a sequence as available for consumption using both methods
-    /// This maintains compatibility while adding bitmap optimization
+    /// Set a sequence as available for consumption
+    /// Uses bitmap for large buffers (>= 64), legacy available_buffer for small buffers
     fn set_available(&self, sequence: i64) {
-        // Legacy LMAX method (always used for compatibility)
-        let index = self.calculate_index(sequence);
-        let flag = self.calculate_availability_flag(sequence);
-        self.available_buffer[index].store(flag, Ordering::Release);
-
-        // New bitmap method (inspired by disruptor-rs) - only for large buffers
-        if self.buffer_size >= 64 && !self.available_bitmap.is_empty() {
+        if self.available_bitmap.is_empty() {
+            // Legacy LMAX method for small buffers
+            let index = self.calculate_index(sequence);
+            let flag = self.calculate_availability_flag(sequence);
+            self.available_buffer[index].store(flag, Ordering::Release);
+        } else {
+            // Bitmap method for large buffers (>= 64)
             self.publish_bitmap(sequence);
         }
     }
@@ -686,8 +704,8 @@ impl MultiProducerSequencer {
         }
     }
 
-    /// Get highest published sequence using bitmap method (inspired by disruptor-rs get_after)
-    /// This correctly handles wraparound by tracking when availability_index wraps to 0
+    /// Get highest published sequence using bitmap method (inspired by disruptor-rs)
+    /// Scans from `next_sequence` to find the highest contiguous published sequence
     fn get_highest_published_sequence_bitmap(
         &self,
         next_sequence: i64,
@@ -697,60 +715,17 @@ impl MultiProducerSequencer {
             return available_sequence;
         }
 
-        // Use disruptor-rs approach: start from previous sequence and find highest available
-        let prev_sequence = next_sequence - 1;
-        let mut availability_flag = self.calculate_round_flag(prev_sequence);
-        let (mut availability_index, mut bit_index) =
-            self.calculate_availability_indices(prev_sequence);
+        // Start scanning from next_sequence itself
+        let mut sequence = next_sequence;
 
-        if availability_index >= self.available_bitmap.len() {
-            return prev_sequence; // No bitmap available, fall back
+        while sequence <= available_sequence {
+            if !self.is_bitmap_available(sequence) {
+                return sequence - 1;
+            }
+            sequence += 1;
         }
 
-        let mut availability = self.available_bitmap[availability_index].load(Ordering::Acquire);
-        // Shift to the first relevant bit
-        availability >>= bit_index;
-        let mut highest_available = prev_sequence;
-
-        loop {
-            // Check if current sequence is available
-            if (availability & 1) != availability_flag {
-                // Found unavailable sequence, return the previous one
-                return highest_available - 1;
-            }
-
-            highest_available += 1;
-
-            // If we've checked all sequences up to available_sequence, we're done
-            if highest_available > available_sequence {
-                return available_sequence;
-            }
-
-            // Prepare for checking the next bit
-            if bit_index < 63 {
-                bit_index += 1;
-                availability >>= 1;
-            } else {
-                // Move to next AtomicU64 (bitmap field)
-                let (next_availability_index, _) =
-                    self.calculate_availability_indices(highest_available);
-
-                if next_availability_index >= self.available_bitmap.len() {
-                    // No more bitmap data available
-                    return highest_available - 1;
-                }
-
-                availability_index = next_availability_index;
-                availability = self.available_bitmap[availability_index].load(Ordering::Acquire);
-                bit_index = 0;
-
-                // Critical wraparound detection: when availability_index becomes 0 again
-                if availability_index == 0 {
-                    // We've wrapped around the bitmap, flip the expected flag
-                    availability_flag ^= 1;
-                }
-            }
-        }
+        available_sequence
     }
 
     /// Get highest published sequence using legacy LMAX Disruptor algorithm
@@ -886,29 +861,23 @@ impl Sequencer for MultiProducerSequencer {
             return None;
         }
 
-        // This follows the LMAX Disruptor tryNext implementation
-        loop {
-            let current = self.cursor.get();
-            let next = current + n;
+        let current = self.cursor.get();
+        let next = current + n;
 
-            // Check if we have available capacity
-            let Ok(required) = usize::try_from(n) else {
-                return None;
-            };
+        // Check if we have available capacity
+        let Ok(required) = usize::try_from(n) else {
+            return None;
+        };
 
-            if !self.has_available_capacity_internal(
-                &self.gating_sequences.read(),
-                required,
-                current,
-            ) {
-                return None; // Insufficient capacity
-            }
+        if !self.has_available_capacity_internal(&self.gating_sequences.read(), required, current) {
+            return None; // Insufficient capacity
+        }
 
-            // Try to claim the sequences using CAS
-            if self.cursor.compare_and_set(current, next) {
-                return Some(next);
-            }
-            // If CAS failed, another producer claimed this sequence, try again
+        // Single CAS attempt - if it fails, return None (try semantics)
+        if self.cursor.compare_and_set(current, next) {
+            Some(next)
+        } else {
+            None // Another producer claimed this sequence
         }
     }
 
@@ -1610,5 +1579,124 @@ mod tests {
     fn test_multi_producer_invalid_buffer_size() {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         MultiProducerSequencer::new(7, wait_strategy); // Not a power of 2
+    }
+
+    #[test]
+    fn test_bitmap_wraparound_correctness() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(64, wait_strategy);
+
+        // Add a gating sequence so we can wrap around
+        let consumer_seq = Arc::new(Sequence::new(-1));
+        sequencer.add_gating_sequences(std::slice::from_ref(&consumer_seq));
+
+        // Publish the entire first round (sequences 0..63)
+        for i in 0..64 {
+            let seq = sequencer.next().unwrap();
+            assert_eq!(seq, i);
+            sequencer.publish(seq);
+        }
+
+        // Verify all first-round sequences are available
+        for i in 0..64 {
+            assert!(
+                sequencer.is_available(i),
+                "Sequence {i} should be available"
+            );
+        }
+        let highest = sequencer.get_highest_published_sequence(0, 63);
+        assert_eq!(highest, 63);
+
+        // Advance consumer to allow wraparound
+        consumer_seq.set(63);
+
+        // Publish the second round (sequences 64..127)
+        for i in 64..128 {
+            let seq = sequencer.next().unwrap();
+            assert_eq!(seq, i);
+            sequencer.publish(seq);
+        }
+
+        // Verify second-round sequences are available
+        for i in 64..128 {
+            assert!(
+                sequencer.is_available(i),
+                "Sequence {i} should be available after wraparound"
+            );
+        }
+        let highest = sequencer.get_highest_published_sequence(64, 127);
+        assert_eq!(highest, 127);
+    }
+
+    #[test]
+    fn test_bitmap_wraparound_with_gaps() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(64, wait_strategy);
+
+        let consumer_seq = Arc::new(Sequence::new(-1));
+        sequencer.add_gating_sequences(std::slice::from_ref(&consumer_seq));
+
+        // Publish first round fully
+        for _ in 0..64 {
+            let seq = sequencer.next().unwrap();
+            sequencer.publish(seq);
+        }
+        consumer_seq.set(63);
+
+        // Second round: claim 0..3 but publish with gap at seq 66
+        let seq64 = sequencer.next().unwrap();
+        let seq65 = sequencer.next().unwrap();
+        let seq66 = sequencer.next().unwrap();
+        let seq67 = sequencer.next().unwrap();
+
+        sequencer.publish(seq64);
+        sequencer.publish(seq65);
+        // Skip seq66
+        sequencer.publish(seq67);
+
+        // Highest contiguous from 64 should be 65 (gap at 66)
+        let highest = sequencer.get_highest_published_sequence(64, 67);
+        assert_eq!(highest, 65, "Should stop at gap at sequence 66");
+
+        // Fill the gap
+        sequencer.publish(seq66);
+        let highest = sequencer.get_highest_published_sequence(64, 67);
+        assert_eq!(highest, 67, "All sequences should be contiguous now");
+    }
+
+    #[test]
+    fn test_bitmap_index_shift_field() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let seq64 = MultiProducerSequencer::new(64, wait_strategy.clone());
+        assert_eq!(seq64.index_shift, 6); // 64 = 2^6
+
+        let seq128 = MultiProducerSequencer::new(128, wait_strategy.clone());
+        assert_eq!(seq128.index_shift, 7); // 128 = 2^7
+
+        let seq1024 = MultiProducerSequencer::new(1024, wait_strategy);
+        assert_eq!(seq1024.index_shift, 10); // 1024 = 2^10
+    }
+
+    #[test]
+    fn test_no_dual_write_in_set_available() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = MultiProducerSequencer::new(64, wait_strategy);
+
+        // For buffer_size >= 64, set_available should only write to bitmap, not legacy buffer
+        let seq = sequencer.next().unwrap();
+        sequencer.set_available(seq);
+
+        // Legacy buffer should remain at initial value (-1) since we only write bitmap
+        assert_eq!(
+            sequencer.available_buffer[0].load(Ordering::Relaxed),
+            -1,
+            "Legacy buffer should not be written for bitmap-enabled sequencers"
+        );
+
+        // But bitmap should reflect the publish
+        assert!(
+            sequencer.is_bitmap_available(seq),
+            "Bitmap should reflect the published sequence"
+        );
     }
 }
