@@ -58,20 +58,23 @@ impl Sequence {
         self.value.load(Ordering::Acquire)
     }
 
-    /// Set the sequence value
+    /// Set the sequence value with relaxed ordering (lazy-set).
     ///
-    /// Uses Release ordering to ensure proper synchronization with other threads.
+    /// Equivalent to Java's `UNSAFE.putOrderedLong` / `lazySet`.
+    /// Use when the store only needs to be eventually visible to other threads
+    /// (e.g., producer cursor updates that will be followed by a signal).
     ///
     /// # Arguments
     /// * `value` - The new sequence value
     pub fn set(&self, value: i64) {
-        self.value.store(value, Ordering::Release);
+        self.value.store(value, Ordering::Relaxed);
     }
 
-    /// Set the sequence value with volatile semantics
+    /// Set the sequence value with volatile (Release) semantics.
     ///
-    /// Uses `Release` ordering to ensure all prior writes are visible to threads
-    /// that subsequently load with `Acquire`. Equivalent to Java's volatile write.
+    /// Ensures all prior writes are visible to threads that subsequently
+    /// load with `Acquire`. Equivalent to Java's volatile write.
+    /// Use for consumer sequence updates that must be immediately visible.
     ///
     /// # Arguments
     /// * `value` - The new sequence value

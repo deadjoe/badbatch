@@ -107,8 +107,6 @@ pub struct BatchEventProcessor<T>
 where
     T: Send + Sync,
 {
-    /// Cache line padding before critical fields
-    _pad1: [u8; 64],
     /// The data provider for accessing events
     data_provider: Arc<dyn DataProvider<T>>,
     /// The sequence barrier for coordination
@@ -121,8 +119,6 @@ where
     sequence: Arc<Sequence>,
     /// Flag indicating if the processor is running
     running: AtomicBool,
-    /// Cache line padding after critical fields
-    _pad2: [u8; 64],
 }
 
 // Safety: BatchEventProcessor is Send and Sync because:
@@ -153,14 +149,12 @@ where
         exception_handler: Box<dyn ExceptionHandler<T>>,
     ) -> Self {
         Self {
-            _pad1: [0; 64],
             data_provider,
             sequence_barrier,
             event_handler: UnsafeCell::new(event_handler),
             exception_handler,
             sequence: Arc::new(Sequence::new_with_initial_value()),
             running: AtomicBool::new(false),
-            _pad2: [0; 64],
         }
     }
 
@@ -274,13 +268,14 @@ where
         let mut current_sequence = next_sequence;
         let batch_span = available_sequence - next_sequence + 1;
 
-        // Notify batch start
+        // Notify batch start with batch size and queue depth (total available from consumer's view)
+        let queue_depth = available_sequence - self.sequence.get();
         // SAFETY: We have exclusive access to the event handler through UnsafeCell.
         // The event processor is designed to be used from a single thread, ensuring
         // no concurrent access to the handler.
         unsafe {
             let handler = &mut *self.event_handler.get();
-            let _ = handler.on_batch_start(batch_span, batch_span);
+            let _ = handler.on_batch_start(batch_span, queue_depth);
         }
 
         while current_sequence <= available_sequence {
