@@ -467,22 +467,23 @@ where
 
             let mut next_sequence = 0i64;
 
+            // Lifecycle: notify handler of start
+            let _ = event_handler.on_start();
+
             // Main event processing loop
             while !shutdown_flag.load(Ordering::Acquire) {
-                // Alert the barrier when shutdown is requested
-                if shutdown_flag.load(Ordering::Acquire) {
-                    sequence_barrier.alert();
-                    break;
-                }
-
                 // Wait for events to become available with shutdown support
                 if let Ok(available_sequence) =
                     sequence_barrier.wait_for_with_shutdown(next_sequence, &shutdown_flag)
                 {
-                    // Process all available events
-                    while next_sequence <= available_sequence
-                        && !shutdown_flag.load(Ordering::Acquire)
-                    {
+                    // Lifecycle: notify handler of batch start
+                    let batch_size = available_sequence - next_sequence + 1;
+                    let _ = event_handler.on_batch_start(batch_size, batch_size);
+
+                    // Process ALL available events in this batch.
+                    // Never check shutdown inside the inner loop — published events
+                    // must be fully consumed before stopping (LMAX Disruptor contract).
+                    while next_sequence <= available_sequence {
                         let end_of_batch = next_sequence == available_sequence;
 
                         // Get the event from the ring buffer
@@ -502,9 +503,6 @@ where
                             );
                             #[cfg(not(debug_assertions))]
                             let _ = e;
-
-                            // Continue processing the next event instead of breaking
-                            // This ensures the consumer doesn't stop due to a single bad event
                         }
 
                         // Update sequence AFTER event processing is completely done.
@@ -515,15 +513,17 @@ where
                         next_sequence += 1;
                     }
                 } else {
-                    // Handle barrier errors (e.g., alerts) or timeout
-                    // Check shutdown flag and break
+                    // Barrier returned error (Alert on shutdown, or timeout).
                     if shutdown_flag.load(Ordering::Acquire) {
                         break;
                     }
-                    // Small delay to avoid busy loop on errors
+                    // Small delay to avoid busy loop on transient errors
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
+
+            // Lifecycle: notify handler of shutdown
+            let _ = event_handler.on_shutdown();
         })
         .expect("Failed to spawn consumer thread");
 

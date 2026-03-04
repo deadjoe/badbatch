@@ -454,14 +454,11 @@ impl WaitStrategy for BusySpinWaitStrategy {
             let dep_min = if dependent_sequences.is_empty() {
                 cursor_sequence
             } else {
-                // Ensure we see the most up-to-date dependent sequence values
-                std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+                // Sequence::get() uses Acquire ordering, so no extra fence needed
                 Sequence::get_minimum_sequence(dependent_sequences)
             };
             let available = std::cmp::min(cursor_sequence, dep_min);
             if available >= sequence {
-                // Ensure visibility of writes before returning
-                std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
                 return Ok(available);
             }
             std::hint::spin_loop();
