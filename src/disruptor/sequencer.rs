@@ -4,7 +4,7 @@
 //! Sequencers manage the allocation of sequence numbers and ensure that producers don't
 //! overwrite events that haven't been consumed yet.
 
-use crate::disruptor::sequence_barrier::{ProcessingSequenceBarrier, SimpleSequenceBarrier};
+use crate::disruptor::sequence_barrier::ProcessingSequenceBarrier;
 use crate::disruptor::{
     is_power_of_two, DisruptorError, Result, Sequence, SequenceBarrier, WaitStrategy,
 };
@@ -78,33 +78,31 @@ impl Sequencer for SequencerWrapper {
     }
 
     fn next(&self) -> Result<i64> {
-        // This is a simplified implementation for barrier use
-        // The actual sequencing is handled by the real sequencer
-        Ok(self.cursor.get() + 1)
+        panic!("SequencerWrapper is a read-only proxy for barrier queries; next() must not be called")
     }
 
-    fn next_n(&self, n: i64) -> Result<i64> {
-        Ok(self.cursor.get() + n)
+    fn next_n(&self, _n: i64) -> Result<i64> {
+        panic!("SequencerWrapper is a read-only proxy for barrier queries; next_n() must not be called")
     }
 
     fn try_next(&self) -> Option<i64> {
-        Some(self.cursor.get() + 1)
+        panic!("SequencerWrapper is a read-only proxy for barrier queries; try_next() must not be called")
     }
 
-    fn try_next_n(&self, n: i64) -> Option<i64> {
-        Some(self.cursor.get() + n)
+    fn try_next_n(&self, _n: i64) -> Option<i64> {
+        panic!("SequencerWrapper is a read-only proxy for barrier queries; try_next_n() must not be called")
     }
 
     fn publish(&self, _sequence: i64) {
-        // No-op for wrapper
+        panic!("SequencerWrapper is a read-only proxy for barrier queries; publish() must not be called")
     }
 
     fn publish_range(&self, _low: i64, _high: i64) {
-        // No-op for wrapper
+        panic!("SequencerWrapper is a read-only proxy for barrier queries; publish_range() must not be called")
     }
 
     fn has_available_capacity(&self, _required_capacity: usize) -> bool {
-        true // Simplified for wrapper
+        panic!("SequencerWrapper is a read-only proxy for barrier queries; has_available_capacity() must not be called")
     }
 
     fn is_available(&self, sequence: i64) -> bool {
@@ -128,28 +126,23 @@ impl Sequencer for SequencerWrapper {
     }
 
     fn new_barrier(&self, _sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
-        // Return a simple barrier to avoid infinite recursion
-        Arc::new(SimpleSequenceBarrier::new(
-            self.cursor.clone(),
-            // We don't have access to wait strategy here, so use a dummy
-            Arc::new(crate::disruptor::BlockingWaitStrategy::new()),
-        ))
+        panic!("SequencerWrapper is a read-only proxy for barrier queries; new_barrier() must not be called")
     }
 
     fn add_gating_sequences(&self, _gating_sequences: &[Arc<Sequence>]) {
-        // No-op for wrapper
+        panic!("SequencerWrapper is a read-only proxy for barrier queries; add_gating_sequences() must not be called")
     }
 
     fn remove_gating_sequence(&self, _sequence: Arc<Sequence>) -> bool {
-        false // No-op for wrapper
+        panic!("SequencerWrapper is a read-only proxy for barrier queries; remove_gating_sequence() must not be called")
     }
 
     fn get_minimum_sequence(&self) -> i64 {
-        self.cursor.get()
+        panic!("SequencerWrapper is a read-only proxy for barrier queries; get_minimum_sequence() must not be called")
     }
 
     fn remaining_capacity(&self) -> i64 {
-        i64::try_from(self.buffer_size).expect("buffer size must fit into i64")
+        panic!("SequencerWrapper is a read-only proxy for barrier queries; remaining_capacity() must not be called")
     }
 }
 
@@ -1381,20 +1374,13 @@ mod tests {
         let sp = SingleProducerSequencer::new(8, wait_strategy.clone());
         let sp_ptr: *const (dyn Sequencer + 'static) = &sp as &dyn Sequencer;
 
-        // Test single producer wrapper
+        // Test single producer wrapper — read-only queries that delegate
         let wrapper = SequencerWrapper::new_single_producer(8, sp_ptr);
         assert_eq!(wrapper.get_buffer_size(), 8);
         assert_eq!(wrapper.get_cursor().get(), -1);
-        assert_eq!(wrapper.next().unwrap(), 0);
-        assert_eq!(wrapper.next_n(3).unwrap(), 2);
-        assert_eq!(wrapper.try_next().unwrap(), 0);
-        assert_eq!(wrapper.try_next_n(2).unwrap(), 1);
-        assert!(wrapper.has_available_capacity(4));
         // Delegated is_available should reflect real sequencer state (initially unpublished)
         assert!(!wrapper.is_available(0));
         assert_eq!(wrapper.get_highest_published_sequence(0, 5), 5);
-        assert_eq!(wrapper.get_minimum_sequence(), -1);
-        assert_eq!(wrapper.remaining_capacity(), 8);
 
         // Test multi producer wrapper
         let sp2 = SingleProducerSequencer::new(16, Arc::new(BlockingWaitStrategy::new()));
@@ -1402,16 +1388,24 @@ mod tests {
         let wrapper = SequencerWrapper::new_multi_producer(16, ptr2);
         assert_eq!(wrapper.get_buffer_size(), 16);
         assert_eq!(wrapper.get_cursor().get(), -1);
+    }
 
-        // Test publish methods (no-ops)
+    #[test]
+    #[should_panic(expected = "read-only proxy")]
+    fn test_sequencer_wrapper_panics_on_next() {
+        let sp = SingleProducerSequencer::new(8, Arc::new(BlockingWaitStrategy::new()));
+        let ptr: *const (dyn Sequencer + 'static) = &sp as &dyn Sequencer;
+        let wrapper = SequencerWrapper::new_single_producer(8, ptr);
+        let _ = wrapper.next();
+    }
+
+    #[test]
+    #[should_panic(expected = "read-only proxy")]
+    fn test_sequencer_wrapper_panics_on_publish() {
+        let sp = SingleProducerSequencer::new(8, Arc::new(BlockingWaitStrategy::new()));
+        let ptr: *const (dyn Sequencer + 'static) = &sp as &dyn Sequencer;
+        let wrapper = SequencerWrapper::new_single_producer(8, ptr);
         wrapper.publish(0);
-        wrapper.publish_range(0, 5);
-        wrapper.add_gating_sequences(&[]);
-        assert!(!wrapper.remove_gating_sequence(Arc::new(Sequence::new(0))));
-
-        // Test barrier creation
-        let barrier = wrapper.new_barrier(vec![]);
-        assert!(!barrier.is_alerted());
     }
 
     #[test]
