@@ -468,7 +468,11 @@ where
             let mut next_sequence = 0i64;
 
             // Lifecycle: notify handler of start
-            let _ = event_handler.on_start();
+            if let Err(e) = event_handler.on_start() {
+                crate::internal_error!(
+                    "EventHandler on_start failed in thread '{thread_name}': {e:?}"
+                );
+            }
 
             // Main event processing loop
             while !shutdown_flag.load(Ordering::Acquire) {
@@ -523,7 +527,11 @@ where
             }
 
             // Lifecycle: notify handler of shutdown
-            let _ = event_handler.on_shutdown();
+            if let Err(e) = event_handler.on_shutdown() {
+                crate::internal_error!(
+                    "EventHandler on_shutdown failed in thread '{thread_name}': {e:?}"
+                );
+            }
         })
         .expect("Failed to spawn consumer thread");
 

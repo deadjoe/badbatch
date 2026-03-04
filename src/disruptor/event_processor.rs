@@ -325,14 +325,18 @@ where
         self.running.store(true, Ordering::Release);
         unsafe {
             let handler = &mut *self.event_handler.get();
-            let _ = handler.on_start();
+            if let Err(e) = handler.on_start() {
+                self.exception_handler.handle_on_start_exception(e);
+            }
         }
     }
 
     fn on_shutdown(&self) {
         unsafe {
             let handler = &mut *self.event_handler.get();
-            let _ = handler.on_shutdown();
+            if let Err(e) = handler.on_shutdown() {
+                self.exception_handler.handle_on_shutdown_exception(e);
+            }
         }
         self.running.store(false, Ordering::Release);
     }
