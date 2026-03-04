@@ -45,18 +45,7 @@ unsafe impl Send for SequencerWrapper {}
 unsafe impl Sync for SequencerWrapper {}
 
 impl SequencerWrapper {
-    fn new_single_producer(
-        buffer_size: usize,
-        sequencer_ptr: *const (dyn Sequencer + 'static),
-    ) -> Self {
-        Self {
-            buffer_size,
-            cursor: Arc::new(Sequence::new(-1)),
-            sequencer_ptr,
-        }
-    }
-
-    fn new_multi_producer(
+    fn new(
         buffer_size: usize,
         sequencer_ptr: *const (dyn Sequencer + 'static),
     ) -> Self {
@@ -473,7 +462,7 @@ impl Sequencer for SingleProducerSequencer {
             self.cursor.clone(),
             Arc::clone(&self.wait_strategy),
             sequences_to_track,
-            Arc::new(SequencerWrapper::new_single_producer(
+            Arc::new(SequencerWrapper::new(
                 self.buffer_size,
                 self_ptr,
             )) as Arc<dyn Sequencer>,
@@ -582,7 +571,7 @@ impl MultiProducerSequencer {
         // Initialize bitmap for availability tracking if buffer is large enough
         // For smaller buffers, we'll use an empty bitmap and fall back to legacy method
         let available_bitmap = if buffer_size >= 64 {
-            let bitmap_size = buffer_size.div_ceil(64); // Each AtomicU64 tracks 64 slots, round up
+            let bitmap_size = buffer_size / 64; // buffer_size is always power-of-2 and >= 64
             let bitmap: Box<[AtomicU64]> = (0..bitmap_size)
                 .map(|_| AtomicU64::new(!0_u64)) // Initialize with all 1's (nothing published initially, matching disruptor-rs)
                 .collect();
@@ -997,7 +986,7 @@ impl Sequencer for MultiProducerSequencer {
             self.cursor.clone(),
             Arc::clone(&self.wait_strategy),
             sequences_to_track,
-            Arc::new(SequencerWrapper::new_multi_producer(
+            Arc::new(SequencerWrapper::new(
                 self.buffer_size,
                 self_ptr,
             )) as Arc<dyn Sequencer>,
@@ -1439,7 +1428,7 @@ mod tests {
         let sp_ptr: *const (dyn Sequencer + 'static) = &sp as &dyn Sequencer;
 
         // Test single producer wrapper — read-only queries that delegate
-        let wrapper = SequencerWrapper::new_single_producer(8, sp_ptr);
+        let wrapper = SequencerWrapper::new(8, sp_ptr);
         assert_eq!(wrapper.get_buffer_size(), 8);
         assert_eq!(wrapper.get_cursor().get(), -1);
         // Delegated is_available should reflect real sequencer state (initially unpublished)
@@ -1449,7 +1438,7 @@ mod tests {
         // Test multi producer wrapper
         let sp2 = SingleProducerSequencer::new(16, Arc::new(BlockingWaitStrategy::new()));
         let ptr2: *const (dyn Sequencer + 'static) = &sp2 as &dyn Sequencer;
-        let wrapper = SequencerWrapper::new_multi_producer(16, ptr2);
+        let wrapper = SequencerWrapper::new(16, ptr2);
         assert_eq!(wrapper.get_buffer_size(), 16);
         assert_eq!(wrapper.get_cursor().get(), -1);
     }
@@ -1459,7 +1448,7 @@ mod tests {
     fn test_sequencer_wrapper_panics_on_next() {
         let sp = SingleProducerSequencer::new(8, Arc::new(BlockingWaitStrategy::new()));
         let ptr: *const (dyn Sequencer + 'static) = &sp as &dyn Sequencer;
-        let wrapper = SequencerWrapper::new_single_producer(8, ptr);
+        let wrapper = SequencerWrapper::new(8, ptr);
         let _ = wrapper.next();
     }
 
@@ -1468,7 +1457,7 @@ mod tests {
     fn test_sequencer_wrapper_panics_on_publish() {
         let sp = SingleProducerSequencer::new(8, Arc::new(BlockingWaitStrategy::new()));
         let ptr: *const (dyn Sequencer + 'static) = &sp as &dyn Sequencer;
-        let wrapper = SequencerWrapper::new_single_producer(8, ptr);
+        let wrapper = SequencerWrapper::new(8, ptr);
         wrapper.publish(0);
     }
 

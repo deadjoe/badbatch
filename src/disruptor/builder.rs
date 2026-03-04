@@ -327,12 +327,6 @@ pub struct NoConsumers;
 /// State marker: Has consumers
 pub struct HasConsumers;
 
-/// State marker: Single consumer
-pub struct SingleConsumer;
-
-/// State marker: Multiple consumers
-pub struct MultipleConsumers;
-
 /// Consumer thread handle
 ///
 /// This structure manages a consumer thread and provides methods to control its lifecycle.
@@ -482,7 +476,8 @@ where
                 {
                     // Lifecycle: notify handler of batch start
                     let batch_size = available_sequence - next_sequence + 1;
-                    let _ = event_handler.on_batch_start(batch_size, batch_size);
+                    let queue_depth = available_sequence - consumer_sequence_clone.get();
+                    let _ = event_handler.on_batch_start(batch_size, queue_depth);
 
                     // Process ALL available events in this batch.
                     // Never check shutdown inside the inner loop — published events

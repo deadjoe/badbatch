@@ -293,6 +293,9 @@ where
     }
 }
 
+impl<T: Send + Sync> ExactSizeIterator for BatchIterMut<'_, T> {}
+impl<T: Send + Sync> std::iter::FusedIterator for BatchIterMut<'_, T> {}
+
 // Ensure RingBuffer is Send and Sync for multi-threading
 // SAFETY: RingBuffer<T> is Send and Sync when T is Send + Sync because:
 // - The ring buffer uses UnsafeCell internally, but access is coordinated through sequencers

@@ -235,10 +235,10 @@ where
         // Try to claim n sequences from the sequencer
         let batch_size = i64::try_from(n).expect("batch size must fit in i64");
         let Some(end_sequence) = self.sequencer.try_next_n(batch_size) else {
-            let missing = n; // We don't know exactly how many are missing
-            return Err(MissingFreeSlots(
-                u64::try_from(missing).expect("missing slots must fit in u64"),
-            ));
+            #[allow(clippy::cast_sign_loss)]
+            let remaining = self.sequencer.remaining_capacity().max(0) as u64;
+            let deficit = (n as u64).saturating_sub(remaining);
+            return Err(MissingFreeSlots(deficit));
         };
 
         let start_sequence = end_sequence - (batch_size - 1);
