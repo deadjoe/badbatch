@@ -353,14 +353,17 @@ impl SingleProducerSequencer {
 }
 
 impl Sequencer for SingleProducerSequencer {
+    #[inline]
     fn get_cursor(&self) -> Arc<Sequence> {
         Arc::clone(&self.cursor)
     }
 
+    #[inline]
     fn get_buffer_size(&self) -> usize {
         self.buffer_size
     }
 
+    #[inline]
     fn next(&self) -> Result<i64> {
         self.next_n(1)
     }
@@ -387,7 +390,7 @@ impl Sequencer for SingleProducerSequencer {
                 wrap_point > min_sequence
             } {
                 // Wait briefly (equivalent to LockSupport.parkNanos(1L))
-                std::thread::sleep(std::time::Duration::from_nanos(1));
+                std::thread::yield_now();
             }
 
             // Update cached value
@@ -425,19 +428,23 @@ impl Sequencer for SingleProducerSequencer {
         Some(next_sequence)
     }
 
+    #[inline]
     fn publish(&self, sequence: i64) {
         self.cursor.set(sequence);
         self.wait_strategy.signal_all_when_blocking();
     }
 
+    #[inline]
     fn publish_range(&self, _low: i64, high: i64) {
         self.publish(high);
     }
 
+    #[inline]
     fn is_available(&self, sequence: i64) -> bool {
         sequence <= self.cursor.get()
     }
 
+    #[inline]
     fn get_highest_published_sequence(&self, _next_sequence: i64, available_sequence: i64) -> i64 {
         available_sequence
     }
@@ -572,10 +579,6 @@ impl MultiProducerSequencer {
             "Buffer size must be a power of 2"
         );
 
-        // Initialize legacy available buffer with -1 (unavailable) for all slots
-        let available_buffer: Vec<AtomicI32> =
-            (0..buffer_size).map(|_| AtomicI32::new(-1)).collect();
-
         // Initialize bitmap for availability tracking if buffer is large enough
         // For smaller buffers, we'll use an empty bitmap and fall back to legacy method
         let available_bitmap = if buffer_size >= 64 {
@@ -586,8 +589,15 @@ impl MultiProducerSequencer {
             bitmap
         } else {
             // For small buffers, use empty bitmap and fall back to legacy method
-            let empty_bitmap: Box<[AtomicU64]> = Box::new([]);
-            empty_bitmap
+            Box::new([])
+        };
+
+        // Only allocate legacy available_buffer for small buffers (< 64);
+        // large buffers use the bitmap exclusively.
+        let available_buffer: Vec<AtomicI32> = if buffer_size < 64 {
+            (0..buffer_size).map(|_| AtomicI32::new(-1)).collect()
+        } else {
+            Vec::new()
         };
 
         let buffer_size_i64 = i64::try_from(buffer_size).expect("buffer size must fit into i64");
@@ -698,7 +708,9 @@ impl MultiProducerSequencer {
     }
 
     /// Get highest published sequence using bitmap method (inspired by disruptor-rs)
-    /// Scans from `next_sequence` to find the highest contiguous published sequence
+    /// Scans from `next_sequence` to find the highest contiguous published sequence.
+    /// Optimized to load each AtomicU64 word once and check all bits within it (O(n/64)).
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn get_highest_published_sequence_bitmap(
         &self,
         next_sequence: i64,
@@ -708,14 +720,34 @@ impl MultiProducerSequencer {
             return available_sequence;
         }
 
-        // Start scanning from next_sequence itself
         let mut sequence = next_sequence;
 
         while sequence <= available_sequence {
-            if !self.is_bitmap_available(sequence) {
+            let (word_index, start_bit) = self.calculate_availability_indices(sequence);
+            if word_index >= self.available_bitmap.len() {
                 return sequence - 1;
             }
-            sequence += 1;
+
+            // Load the word once for all bits in this word
+            let word = self.availability_at(word_index).load(Ordering::Acquire);
+
+            // How many bits can we check in this word starting from start_bit?
+            let bits_remaining_in_word = 64 - start_bit;
+            let sequences_remaining = (available_sequence - sequence + 1) as usize;
+            let bits_to_check = bits_remaining_in_word.min(sequences_remaining);
+
+            // Check each bit within the already-loaded word
+            for bit_offset in 0..bits_to_check {
+                let seq = sequence + bit_offset as i64;
+                let bit_index = start_bit + bit_offset;
+                let expected_flag = self.calculate_round_flag(seq);
+                let actual_flag = (word >> bit_index) & 1;
+                if actual_flag != expected_flag {
+                    return seq - 1;
+                }
+            }
+
+            sequence += bits_to_check as i64;
         }
 
         available_sequence
@@ -788,10 +820,12 @@ impl MultiProducerSequencer {
 }
 
 impl Sequencer for MultiProducerSequencer {
+    #[inline]
     fn get_cursor(&self) -> Arc<Sequence> {
         Arc::clone(&self.cursor)
     }
 
+    #[inline]
     fn get_buffer_size(&self) -> usize {
         self.buffer_size
     }
@@ -826,7 +860,7 @@ impl Sequencer for MultiProducerSequencer {
                 // If we don't have enough capacity, wait until we do
                 if wrap_point > min_sequence {
                     // Wait briefly before checking again (equivalent to LockSupport.parkNanos(1L))
-                    std::thread::sleep(std::time::Duration::from_nanos(1));
+                    std::thread::yield_now();
                     continue;
                 }
 
@@ -874,6 +908,7 @@ impl Sequencer for MultiProducerSequencer {
         }
     }
 
+    #[inline]
     fn publish(&self, sequence: i64) {
         // Use the proper LMAX Disruptor setAvailable method
         self.set_available(sequence);
@@ -882,26 +917,53 @@ impl Sequencer for MultiProducerSequencer {
         self.wait_strategy.signal_all_when_blocking();
     }
 
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn publish_range(&self, low: i64, high: i64) {
         if low > high {
-            return; // Invalid range
+            return;
         }
 
-        // Mark all sequences in the range as available
-        // This follows the LMAX Disruptor MultiProducerSequencer.publish(long lo, long hi) logic
-        for sequence in low..=high {
-            self.set_available(sequence);
+        if self.available_bitmap.is_empty() {
+            // Legacy mode: per-slot store
+            for sequence in low..=high {
+                let index = self.calculate_index(sequence);
+                let flag = self.calculate_availability_flag(sequence);
+                self.available_buffer[index].store(flag, Ordering::Release);
+            }
+        } else {
+            // Bitmap mode: batch XOR per word
+            let mut sequence = low;
+            while sequence <= high {
+                let (word_index, start_bit) = self.calculate_availability_indices(sequence);
+                let bits_remaining_in_word = 64 - start_bit;
+                let sequences_remaining = (high - sequence + 1) as usize;
+                let bits_to_set = bits_remaining_in_word.min(sequences_remaining);
+
+                // Build a combined XOR mask for all bits in this word
+                let mut mask = 0_u64;
+                for bit_offset in 0..bits_to_set {
+                    mask |= 1_u64 << (start_bit + bit_offset);
+                }
+
+                if word_index < self.available_bitmap.len() {
+                    self.availability_at(word_index)
+                        .fetch_xor(mask, Ordering::Release);
+                }
+
+                sequence += bits_to_set as i64;
+            }
         }
 
-        // Signal waiting consumers once after marking all sequences
         self.wait_strategy.signal_all_when_blocking();
     }
 
+    #[inline]
     fn is_available(&self, sequence: i64) -> bool {
         // Use the proper LMAX Disruptor isAvailable method with flag checking
         self.is_available_internal(sequence)
     }
 
+    #[inline]
     fn get_highest_published_sequence(&self, next_sequence: i64, available_sequence: i64) -> i64 {
         // For large buffers with bitmap, use disruptor-rs inspired algorithm
         if self.buffer_size >= 64 && !self.available_bitmap.is_empty() {
@@ -982,7 +1044,9 @@ mod tests {
 
         assert_eq!(sequencer.buffer_size, 1024);
         assert_eq!(sequencer.index_mask, 1023);
-        assert_eq!(sequencer.available_buffer.len(), 1024);
+        // buffer_size >= 64: bitmap used, legacy buffer empty
+        assert!(sequencer.available_buffer.is_empty());
+        assert_eq!(sequencer.available_bitmap.len(), 1024 / 64);
     }
 
     #[test]
@@ -1676,18 +1740,15 @@ mod tests {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequencer = MultiProducerSequencer::new(64, wait_strategy);
 
-        // For buffer_size >= 64, set_available should only write to bitmap, not legacy buffer
-        let seq = sequencer.next().unwrap();
-        sequencer.set_available(seq);
-
-        // Legacy buffer should remain at initial value (-1) since we only write bitmap
-        assert_eq!(
-            sequencer.available_buffer[0].load(Ordering::Relaxed),
-            -1,
-            "Legacy buffer should not be written for bitmap-enabled sequencers"
+        // For buffer_size >= 64, legacy buffer should not even be allocated
+        assert!(
+            sequencer.available_buffer.is_empty(),
+            "Legacy buffer should not be allocated for bitmap-enabled sequencers"
         );
 
-        // But bitmap should reflect the publish
+        // Bitmap should work correctly
+        let seq = sequencer.next().unwrap();
+        sequencer.set_available(seq);
         assert!(
             sequencer.is_bitmap_available(seq),
             "Bitmap should reflect the published sequence"

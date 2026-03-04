@@ -82,10 +82,12 @@ where
     ///
     /// # Panics
     /// Panics if the masked sequence cannot be converted into a valid `usize`.
+    #[inline]
     #[must_use]
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn get(&self, sequence: i64) -> &T {
-        let masked = sequence & self.index_mask;
-        let index = usize::try_from(masked).expect("sequence mask should fit into usize");
+        // masked is always non-negative (index_mask clears sign bit) and fits usize
+        let index = (sequence & self.index_mask) as usize;
         // SAFETY: Index is within bounds - guaranteed by invariant and index mask.
         let slot = unsafe { self.slots.get_unchecked(index) };
         unsafe { &*slot.get() }
@@ -101,10 +103,11 @@ where
     ///
     /// # Panics
     /// Panics if the masked sequence cannot be converted into a valid `usize`.
+    #[inline]
     #[must_use]
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn get_mut(&mut self, sequence: i64) -> &mut T {
-        let masked = sequence & self.index_mask;
-        let index = usize::try_from(masked).expect("sequence mask should fit into usize");
+        let index = (sequence & self.index_mask) as usize;
         // SAFETY: We have exclusive access to self, so this is safe
         let slot = unsafe { self.slots.get_unchecked(index) };
         unsafe { &mut *slot.get() }
@@ -129,10 +132,11 @@ where
     ///
     /// # Panics
     /// Panics if the masked sequence cannot be converted into a valid `usize`.
+    #[inline]
     #[must_use]
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub unsafe fn get_mut_unchecked(&self, sequence: i64) -> *mut T {
-        let masked = sequence & self.index_mask;
-        let index = usize::try_from(masked).expect("sequence mask should fit into usize");
+        let index = (sequence & self.index_mask) as usize;
         // SAFETY: Index is within bounds - guaranteed by invariant and index mask.
         let slot = self.slots.get_unchecked(index);
         slot.get()
