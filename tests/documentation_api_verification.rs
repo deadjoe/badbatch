@@ -190,10 +190,9 @@ mod design_md_verification_tests {
 
         let factory = DefaultEventFactory::<i64>::new();
         let ring_buffer = Arc::new(RingBuffer::new(1024, factory).unwrap());
-        let sequencer = badbatch::disruptor::SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
-            1024,
-            Arc::new(badbatch::disruptor::BusySpinWaitStrategy),
-        )));
+        let sequencer = badbatch::disruptor::SequencerEnum::Single(Arc::new(
+            SingleProducerSequencer::new(1024, Arc::new(badbatch::disruptor::BusySpinWaitStrategy)),
+        ));
 
         let mut producer = SimpleProducer::new(ring_buffer, sequencer);
 
