@@ -144,7 +144,7 @@ Init ==
   /\ Buffer!Init
   /\ next_sequence    = 0
   /\ claimed_sequence = [ w \in Writers                |-> -1     ]
-  /\ published        = [ i \in 0..Size                |-> FALSE  ]
+  /\ published        = [ i \in 0..Size-1              |-> FALSE  ]
   /\ read             = [ r \in Readers                |-> -1     ]
   /\ consumed         = [ r \in Readers                |-> << >>  ]
   /\ pc               = [ a \in Writers \union Readers |-> Access ]
@@ -174,7 +174,7 @@ TypeOk ==
   /\ Buffer!TypeOk
   /\ next_sequence    \in Nat
   /\ claimed_sequence \in [ Writers                -> Int                 ]
-  /\ published        \in [ 0..Size                -> { TRUE, FALSE }     ]
+  /\ published        \in [ 0..Size-1              -> { TRUE, FALSE }     ]
   /\ read             \in [ Readers                -> Int                 ]
   /\ consumed         \in [ Readers                -> Seq(Nat)            ]
   /\ pc               \in [ Writers \union Readers -> { Access, Advance } ]
