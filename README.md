@@ -288,6 +288,20 @@ BadBatch is designed for high-performance event processing with the following ch
 - **Bit Manipulation**: Fast modulo operations using bit masks for power-of-2 buffer sizes
 - **Memory Layout**: Optimal data structures (`Box<[UnsafeCell<T>]>`) for better cache locality
 
+### ARM / Apple Silicon Notes
+
+On AArch64, Rust typically targets ARMv8.0-A by default, which can generate LL/SC-based atomics.
+On ARMv8.1+ CPUs with LSE support (Apple Silicon, AWS Graviton 2+, Ampere Altra), enabling LSE can
+significantly reduce the cost of contended atomic RMW operations (e.g., the bitmap `fetch_xor` path).
+
+```bash
+# Best default when building on the target machine:
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+
+# If you ONLY deploy/run on LSE-capable CPUs:
+RUSTFLAGS="-C target-feature=+lse" cargo build --release
+```
+
 ### Experimental Features
 
 - **Bitmap Optimization**: Enabled by default for buffers with size ≥ 64. This feature provides O(1) availability checking for large buffers using atomic bitmap operations（inspired by disruptor‑rs）. For smaller buffers, the sequencer transparently falls back to the legacy LMAX availability buffer. You can evaluate performance trade‑offs via the provided benchmarks.
