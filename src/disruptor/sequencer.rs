@@ -8,6 +8,7 @@ use crate::disruptor::sequence_barrier::ProcessingSequenceBarrier;
 use crate::disruptor::{
     is_power_of_two, DisruptorError, Result, Sequence, SequenceBarrier, WaitStrategy,
 };
+use arc_swap::ArcSwap;
 use crossbeam_utils::CachePadded;
 use std::convert::TryFrom;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
@@ -269,6 +270,66 @@ impl Sequencer for SequencerEnum {
     }
 }
 
+fn add_gating_sequences_rcu(
+    gating_sequences: &ArcSwap<Vec<Arc<Sequence>>>,
+    to_add: &[Arc<Sequence>],
+) {
+    if to_add.is_empty() {
+        return;
+    }
+
+    // Treat gating sequences as a set keyed by pointer identity (`Arc::ptr_eq`).
+    // This matches the intended Disruptor model (each consumer has a unique `Sequence`) and
+    // avoids accidental duplicates increasing the minimum-sequence scan cost.
+    //
+    // The closure is side-effect-free and can re-run if `rcu()` retries due to concurrent writers.
+    gating_sequences.rcu(|current| {
+        let mut updated = Vec::with_capacity(current.len() + to_add.len());
+
+        // Keep existing sequences, but drop any accidental duplicates.
+        for seq in current.iter() {
+            if !updated.iter().any(|existing| Arc::ptr_eq(existing, seq)) {
+                updated.push(Arc::clone(seq));
+            }
+        }
+
+        // Add new sequences if not already present.
+        for seq in to_add {
+            if !updated.iter().any(|existing| Arc::ptr_eq(existing, seq)) {
+                updated.push(Arc::clone(seq));
+            }
+        }
+
+        updated
+    });
+}
+
+fn remove_gating_sequence_cas(
+    gating_sequences: &ArcSwap<Vec<Arc<Sequence>>>,
+    sequence: &Arc<Sequence>,
+) -> bool {
+    let mut cur = gating_sequences.load();
+    loop {
+        // Fast-path: don't allocate/clone if it's not present in the currently observed snapshot.
+        if !cur.iter().any(|s| Arc::ptr_eq(s, sequence)) {
+            return false;
+        }
+
+        // Remove all matches (duplicates should not happen, but this keeps behavior robust).
+        let updated = cur
+            .iter()
+            .filter(|s| !Arc::ptr_eq(s, sequence))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let prev = gating_sequences.compare_and_swap(&*cur, updated.into());
+        if Arc::ptr_eq(&*prev, &*cur) {
+            return true;
+        }
+        cur = prev;
+    }
+}
+
 /// Single producer sequencer
 ///
 /// This sequencer is optimized for scenarios where only one thread will be
@@ -286,7 +347,13 @@ pub struct SingleProducerSequencer {
     wait_strategy: Arc<dyn WaitStrategy>,
     needs_signal: bool,
     cursor: Arc<Sequence>,
-    gating_sequences: parking_lot::RwLock<Vec<Arc<Sequence>>>,
+    /// Gating sequences that this sequencer must not overtake.
+    ///
+    /// Uses `ArcSwap` for lock-free reads on the producer hot path (backpressure spin loop),
+    /// matching LMAX Java's `volatile Sequence[]` + `AtomicReferenceFieldUpdater` design.
+    /// Writes (add/remove) use `rcu()` with CAS retry — acceptable since they only occur
+    /// during setup/shutdown, not on the hot path.
+    gating_sequences: ArcSwap<Vec<Arc<Sequence>>>,
     /// Next sequence value to be claimed (equivalent to LMAX nextValue)
     /// Using AtomicI64 for Rust thread safety, but logically only one thread accesses it
     next_value: AtomicI64,
@@ -313,7 +380,7 @@ impl SingleProducerSequencer {
             wait_strategy,
             needs_signal,
             cursor: Arc::new(Sequence::new_with_initial_value()),
-            gating_sequences: parking_lot::RwLock::new(Vec::new()),
+            gating_sequences: ArcSwap::from_pointee(Vec::new()),
             next_value: AtomicI64::new(-1),
             cached_value: AtomicI64::new(-1),
         }
@@ -462,18 +529,11 @@ impl Sequencer for SingleProducerSequencer {
     }
 
     fn add_gating_sequences(&self, gating_sequences: &[Arc<Sequence>]) {
-        let mut sequences = self.gating_sequences.write();
-        sequences.extend_from_slice(gating_sequences);
+        add_gating_sequences_rcu(&self.gating_sequences, gating_sequences);
     }
 
     fn remove_gating_sequence(&self, sequence: Arc<Sequence>) -> bool {
-        let mut sequences = self.gating_sequences.write();
-        if let Some(pos) = sequences.iter().position(|s| Arc::ptr_eq(s, &sequence)) {
-            sequences.remove(pos);
-            true
-        } else {
-            false
-        }
+        remove_gating_sequence_cas(&self.gating_sequences, &sequence)
     }
 
     fn new_barrier(&self, _sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
@@ -481,8 +541,8 @@ impl Sequencer for SingleProducerSequencer {
     }
 
     fn get_minimum_sequence(&self) -> i64 {
-        let sequences = self.gating_sequences.read();
-        Sequence::get_minimum_sequence(&sequences)
+        let guard = self.gating_sequences.load();
+        Sequence::get_minimum_sequence(&guard)
     }
 
     fn remaining_capacity(&self) -> i64 {
@@ -543,7 +603,9 @@ pub struct MultiProducerSequencer {
     /// The publish operation only marks availability bits without advancing the cursor,
     /// relying on consumers to perform contiguity checking through sequence barriers.
     cursor: Arc<Sequence>,
-    gating_sequences: parking_lot::RwLock<Vec<Arc<Sequence>>>,
+    /// Gating sequences that this sequencer must not overtake.
+    /// See `SingleProducerSequencer::gating_sequences` for design rationale.
+    gating_sequences: ArcSwap<Vec<Arc<Sequence>>>,
     /// Bitmap tracking availability of slots using AtomicU64 arrays
     /// Each bit represents whether a slot was published in an even or odd round
     /// This is inspired by disruptor-rs's innovative bitmap approach
@@ -610,7 +672,7 @@ impl MultiProducerSequencer {
             wait_strategy,
             needs_signal,
             cursor: Arc::new(Sequence::new_with_initial_value()),
-            gating_sequences: parking_lot::RwLock::new(Vec::new()),
+            gating_sequences: ArcSwap::from_pointee(Vec::new()),
             available_bitmap,
             index_mask: buffer_size - 1,
             index_shift: buffer_size.trailing_zeros(),
@@ -932,7 +994,8 @@ impl Sequencer for MultiProducerSequencer {
             return None;
         };
 
-        if !self.has_available_capacity_internal(&self.gating_sequences.read(), required, current) {
+        let guard = self.gating_sequences.load();
+        if !self.has_available_capacity_internal(&guard, required, current) {
             return None; // Insufficient capacity
         }
 
@@ -1027,18 +1090,11 @@ impl Sequencer for MultiProducerSequencer {
     }
 
     fn add_gating_sequences(&self, gating_sequences: &[Arc<Sequence>]) {
-        let mut sequences = self.gating_sequences.write();
-        sequences.extend_from_slice(gating_sequences);
+        add_gating_sequences_rcu(&self.gating_sequences, gating_sequences);
     }
 
     fn remove_gating_sequence(&self, sequence: Arc<Sequence>) -> bool {
-        let mut sequences = self.gating_sequences.write();
-        if let Some(pos) = sequences.iter().position(|s| Arc::ptr_eq(s, &sequence)) {
-            sequences.remove(pos);
-            true
-        } else {
-            false
-        }
+        remove_gating_sequence_cas(&self.gating_sequences, &sequence)
     }
 
     fn new_barrier(&self, _sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
@@ -1046,8 +1102,8 @@ impl Sequencer for MultiProducerSequencer {
     }
 
     fn get_minimum_sequence(&self) -> i64 {
-        let sequences = self.gating_sequences.read();
-        Sequence::get_minimum_sequence(&sequences)
+        let guard = self.gating_sequences.load();
+        Sequence::get_minimum_sequence(&guard)
     }
 
     fn remaining_capacity(&self) -> i64 {
@@ -1065,9 +1121,9 @@ impl Sequencer for MultiProducerSequencer {
     }
 
     fn has_available_capacity(&self, required_capacity: usize) -> bool {
-        let gating_sequences = self.gating_sequences.read();
+        let guard = self.gating_sequences.load();
         let cursor_value = self.cursor.get();
-        self.has_available_capacity_internal(&gating_sequences, required_capacity, cursor_value)
+        self.has_available_capacity_internal(&guard, required_capacity, cursor_value)
     }
 }
 
@@ -1222,6 +1278,9 @@ mod tests {
 
         // Add gating sequences
         sequencer.add_gating_sequences(&[gating_seq1.clone(), gating_seq2.clone()]);
+        // Adding the same sequences again should be idempotent (no duplicates)
+        sequencer.add_gating_sequences(&[gating_seq1.clone(), gating_seq2.clone()]);
+        assert_eq!(sequencer.gating_sequences.load().len(), 2);
 
         // Test minimum sequence calculation
         let min_seq = sequencer.get_minimum_sequence();
@@ -1230,6 +1289,8 @@ mod tests {
         // Test remove gating sequence
         let removed = sequencer.remove_gating_sequence(gating_seq2.clone());
         assert!(removed);
+        // Removing again should report false
+        assert!(!sequencer.remove_gating_sequence(gating_seq2.clone()));
 
         let min_seq = sequencer.get_minimum_sequence();
         assert_eq!(min_seq, 5); // Should be remaining gating sequence
@@ -1237,6 +1298,45 @@ mod tests {
         // Test removing non-existent sequence
         let removed = sequencer.remove_gating_sequence(Arc::new(Sequence::new(100)));
         assert!(!removed);
+    }
+
+    #[test]
+    fn test_single_producer_sequencer_remove_gating_sequence_concurrent() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = Arc::new(SingleProducerSequencer::new(8, wait_strategy));
+
+        let gating_seq = Arc::new(Sequence::new(3));
+        sequencer.add_gating_sequences(std::slice::from_ref(&gating_seq));
+        assert_eq!(sequencer.gating_sequences.load().len(), 1);
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let t1_sequencer = Arc::clone(&sequencer);
+        let t1_seq = Arc::clone(&gating_seq);
+        let t1_barrier = Arc::clone(&barrier);
+        let t1 = std::thread::spawn(move || {
+            t1_barrier.wait();
+            t1_sequencer.remove_gating_sequence(t1_seq)
+        });
+
+        let t2_sequencer = Arc::clone(&sequencer);
+        let t2_seq = Arc::clone(&gating_seq);
+        let t2_barrier = Arc::clone(&barrier);
+        let t2 = std::thread::spawn(move || {
+            t2_barrier.wait();
+            t2_sequencer.remove_gating_sequence(t2_seq)
+        });
+
+        barrier.wait();
+
+        let r1 = t1.join().expect("thread 1 panicked");
+        let r2 = t2.join().expect("thread 2 panicked");
+
+        assert!(
+            r1 ^ r2,
+            "expected exactly one successful remove, got r1={r1} r2={r2}"
+        );
+        assert!(sequencer.gating_sequences.load().is_empty());
     }
 
     #[test]
@@ -1355,6 +1455,9 @@ mod tests {
 
         // Add gating sequences
         sequencer.add_gating_sequences(&[gating_seq1.clone(), gating_seq2.clone()]);
+        // Adding the same sequences again should be idempotent (no duplicates)
+        sequencer.add_gating_sequences(&[gating_seq1.clone(), gating_seq2.clone()]);
+        assert_eq!(sequencer.gating_sequences.load().len(), 2);
 
         // Test minimum sequence calculation
         let min_seq = sequencer.get_minimum_sequence();
@@ -1363,6 +1466,8 @@ mod tests {
         // Test remove gating sequence
         let removed = sequencer.remove_gating_sequence(gating_seq2.clone());
         assert!(removed);
+        // Removing again should report false
+        assert!(!sequencer.remove_gating_sequence(gating_seq2.clone()));
 
         let min_seq = sequencer.get_minimum_sequence();
         assert_eq!(min_seq, 5); // Should be remaining gating sequence
@@ -1370,6 +1475,45 @@ mod tests {
         // Test removing non-existent sequence
         let removed = sequencer.remove_gating_sequence(Arc::new(Sequence::new(100)));
         assert!(!removed);
+    }
+
+    #[test]
+    fn test_multi_producer_sequencer_remove_gating_sequence_concurrent() {
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = Arc::new(MultiProducerSequencer::new(8, wait_strategy));
+
+        let gating_seq = Arc::new(Sequence::new(3));
+        sequencer.add_gating_sequences(std::slice::from_ref(&gating_seq));
+        assert_eq!(sequencer.gating_sequences.load().len(), 1);
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let t1_sequencer = Arc::clone(&sequencer);
+        let t1_seq = Arc::clone(&gating_seq);
+        let t1_barrier = Arc::clone(&barrier);
+        let t1 = std::thread::spawn(move || {
+            t1_barrier.wait();
+            t1_sequencer.remove_gating_sequence(t1_seq)
+        });
+
+        let t2_sequencer = Arc::clone(&sequencer);
+        let t2_seq = Arc::clone(&gating_seq);
+        let t2_barrier = Arc::clone(&barrier);
+        let t2 = std::thread::spawn(move || {
+            t2_barrier.wait();
+            t2_sequencer.remove_gating_sequence(t2_seq)
+        });
+
+        barrier.wait();
+
+        let r1 = t1.join().expect("thread 1 panicked");
+        let r2 = t2.join().expect("thread 2 panicked");
+
+        assert!(
+            r1 ^ r2,
+            "expected exactly one successful remove, got r1={r1} r2={r2}"
+        );
+        assert!(sequencer.gating_sequences.load().is_empty());
     }
 
     #[test]
