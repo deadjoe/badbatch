@@ -292,9 +292,11 @@ where
         drop(handler);
 
         // Update our sequence to indicate we've processed up to this point.
-        // Use Release ordering so producers see all prior event writes before
-        // observing the advanced consumer sequence (backpressure correctness).
-        self.sequence.set_volatile(available_sequence);
+        // Release ordering ensures all prior event reads/writes are visible
+        // before the sequence advance. Producers read this with Acquire,
+        // forming a correct Release-Acquire pair. SeqCst is unnecessary here
+        // (LMAX Java BatchEventProcessor also uses lazySet = Release).
+        self.sequence.set(available_sequence);
 
         Ok(true)
     }

@@ -384,14 +384,15 @@ impl Sequencer for SingleProducerSequencer {
             // Set cursor with volatile semantics (equivalent to cursor.setVolatile in LMAX)
             self.cursor.set_volatile(next_value);
 
-            // Wait for consumers to catch up
+            // Wait for consumers to catch up.
+            // Use spin_loop() instead of yield_now() to avoid syscall overhead
+            // (~1-5μs per sched_yield). PAUSE (x86) / YIELD (ARM) stays on-core.
             let mut min_sequence;
             while {
                 min_sequence = self.get_minimum_sequence();
                 wrap_point > min_sequence
             } {
-                // Wait briefly (equivalent to LockSupport.parkNanos(1L))
-                std::thread::yield_now();
+                std::hint::spin_loop();
             }
 
             // Update cached value
@@ -713,7 +714,7 @@ impl MultiProducerSequencer {
 
     /// Get highest published sequence using bitmap method (inspired by disruptor-rs)
     /// Scans from `next_sequence` to find the highest contiguous published sequence.
-    /// Optimized to load each AtomicU64 word once and check all bits within it (O(n/64)).
+    /// Uses bulk XOR + trailing_zeros for O(1) per 64-bit word instead of per-bit checking.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn get_highest_published_sequence_bitmap(
         &self,
@@ -740,15 +741,29 @@ impl MultiProducerSequencer {
             let sequences_remaining = (available_sequence - sequence + 1) as usize;
             let bits_to_check = bits_remaining_in_word.min(sequences_remaining);
 
-            // Check each bit within the already-loaded word
-            for bit_offset in 0..bits_to_check {
-                let seq = sequence + bit_offset as i64;
-                let bit_index = start_bit + bit_offset;
-                let expected_flag = self.calculate_round_flag(seq);
-                let actual_flag = (word >> bit_index) & 1;
-                if actual_flag != expected_flag {
-                    return seq - 1;
-                }
+            // All sequences within one bitmap word share the same round flag
+            // (buffer_size >= 64, so each 64-slot word maps to one round parity).
+            let expected_flag = self.calculate_round_flag(sequence);
+            // Build the expected word pattern: all 0s or all 1s depending on round.
+            let expected_word = if expected_flag == 0 { 0_u64 } else { !0_u64 };
+
+            // Build mask covering only the bits we need to check:
+            // bits [start_bit, start_bit + bits_to_check)
+            let range_mask = if bits_to_check >= 64 {
+                !0_u64
+            } else {
+                ((1_u64 << bits_to_check) - 1) << start_bit
+            };
+
+            // XOR with expected pattern: mismatch bits become 1.
+            // Mask to only the range we care about.
+            let mismatches = (word ^ expected_word) & range_mask;
+
+            if mismatches != 0 {
+                // First mismatch bit position (absolute bit index in the word)
+                let first_mismatch = mismatches.trailing_zeros() as usize;
+                let offset = first_mismatch - start_bit;
+                return sequence + offset as i64 - 1;
             }
 
             sequence += bits_to_check as i64;
@@ -785,14 +800,13 @@ impl MultiProducerSequencer {
     /// Check if a sequence is available for consumption
     /// This matches the LMAX Disruptor isAvailable method with proper flag checking
     fn is_available_internal(&self, sequence: i64) -> bool {
-        // For large buffers, use bitmap method as the primary check
-        if self.buffer_size >= 64 && !self.available_bitmap.is_empty() {
-            self.is_bitmap_available(sequence)
-        } else {
-            // For small buffers, use legacy method
+        // Bitmap is allocated iff buffer_size >= 64; one check suffices.
+        if self.available_bitmap.is_empty() {
             let index = self.calculate_index(sequence);
             let flag = self.calculate_availability_flag(sequence);
             self.available_buffer[index].load(Ordering::Acquire) == flag
+        } else {
+            self.is_bitmap_available(sequence)
         }
     }
 
@@ -863,8 +877,9 @@ impl Sequencer for MultiProducerSequencer {
 
                 // If we don't have enough capacity, wait until we do
                 if wrap_point > min_sequence {
-                    // Wait briefly before checking again (equivalent to LockSupport.parkNanos(1L))
-                    std::thread::yield_now();
+                    // spin_loop() avoids syscall overhead of yield_now() (~1-5μs).
+                    // PAUSE (x86) / YIELD (ARM) keeps the thread on-core.
+                    std::hint::spin_loop();
                     continue;
                 }
 
@@ -951,11 +966,12 @@ impl Sequencer for MultiProducerSequencer {
                 let sequences_remaining = (high - sequence + 1) as usize;
                 let bits_to_set = bits_remaining_in_word.min(sequences_remaining);
 
-                // Build a combined XOR mask for all bits in this word
-                let mut mask = 0_u64;
-                for bit_offset in 0..bits_to_set {
-                    mask |= 1_u64 << (start_bit + bit_offset);
-                }
+                // Build a contiguous bitmask in O(1) instead of a loop
+                let mask = if bits_to_set >= 64 {
+                    !0_u64
+                } else {
+                    ((1_u64 << bits_to_set) - 1) << start_bit
+                };
 
                 if word_index < self.available_bitmap.len() {
                     self.availability_at(word_index)
@@ -977,12 +993,11 @@ impl Sequencer for MultiProducerSequencer {
 
     #[inline]
     fn get_highest_published_sequence(&self, next_sequence: i64, available_sequence: i64) -> i64 {
-        // For large buffers with bitmap, use disruptor-rs inspired algorithm
-        if self.buffer_size >= 64 && !self.available_bitmap.is_empty() {
-            self.get_highest_published_sequence_bitmap(next_sequence, available_sequence)
-        } else {
-            // For small buffers, use legacy LMAX Disruptor algorithm
+        // Bitmap is allocated iff buffer_size >= 64; one check suffices.
+        if self.available_bitmap.is_empty() {
             self.get_highest_published_sequence_legacy(next_sequence, available_sequence)
+        } else {
+            self.get_highest_published_sequence_bitmap(next_sequence, available_sequence)
         }
     }
 
