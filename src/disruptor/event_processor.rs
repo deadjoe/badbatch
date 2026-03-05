@@ -220,7 +220,7 @@ where
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            return Err(DisruptorError::InvalidSequence(-1)); // Already running
+            return Err(DisruptorError::AlreadyRunning);
         }
 
         // Clear any existing alerts
@@ -301,8 +301,10 @@ where
             current_sequence += 1;
         }
 
-        // Update our sequence to indicate we've processed up to this point
-        self.sequence.set(available_sequence);
+        // Update our sequence to indicate we've processed up to this point.
+        // Use Release ordering so producers see all prior event writes before
+        // observing the advanced consumer sequence (backpressure correctness).
+        self.sequence.set_volatile(available_sequence);
 
         Ok(true)
     }
