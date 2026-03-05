@@ -7,7 +7,7 @@
 use crate::disruptor::{
     DisruptorError, EventHandler, ExceptionHandler, Result, Sequence, SequenceBarrier,
 };
-use std::cell::UnsafeCell;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -111,8 +111,8 @@ where
     data_provider: Arc<dyn DataProvider<T>>,
     /// The sequence barrier for coordination
     sequence_barrier: Arc<dyn SequenceBarrier>,
-    /// The event handler for processing events (wrapped in UnsafeCell for interior mutability)
-    event_handler: UnsafeCell<Box<dyn EventHandler<T>>>,
+    /// The event handler for processing events (Mutex ensures sound interior mutability)
+    event_handler: Mutex<Box<dyn EventHandler<T>>>,
     /// The exception handler for error handling
     exception_handler: Box<dyn ExceptionHandler<T>>,
     /// The current sequence being processed
@@ -121,12 +121,9 @@ where
     running: AtomicBool,
 }
 
-// Safety: BatchEventProcessor is Send and Sync because:
-// - All fields except event_handler are Send + Sync
-// - event_handler is protected by UnsafeCell and only accessed from the processing thread
-// - The processor ensures single-threaded access to the event handler
-unsafe impl<T> Send for BatchEventProcessor<T> where T: Send + Sync {}
-unsafe impl<T> Sync for BatchEventProcessor<T> where T: Send + Sync {}
+// Send + Sync are auto-derived: all fields are Send + Sync.
+// - Mutex<Box<dyn EventHandler<T>>> is Send + Sync when EventHandler<T>: Send
+// - EventHandler requires Send (trait bound), so this is satisfied.
 
 impl<T> BatchEventProcessor<T>
 where
@@ -151,7 +148,7 @@ where
         Self {
             data_provider,
             sequence_barrier,
-            event_handler: UnsafeCell::new(event_handler),
+            event_handler: Mutex::new(event_handler),
             exception_handler,
             sequence: Arc::new(Sequence::new_with_initial_value()),
             running: AtomicBool::new(false),
@@ -268,38 +265,31 @@ where
         let mut current_sequence = next_sequence;
         let batch_span = available_sequence - next_sequence + 1;
 
-        // Notify batch start with batch size and queue depth (total available from consumer's view)
+        // Lock the handler once for the entire batch — uncontended in practice
+        // since each processor runs on a single dedicated thread.
+        let mut handler = self.event_handler.lock();
+
+        // Notify batch start with batch size and queue depth
         let queue_depth = available_sequence - self.sequence.get();
-        // SAFETY: We have exclusive access to the event handler through UnsafeCell.
-        // The event processor is designed to be used from a single thread, ensuring
-        // no concurrent access to the handler.
-        unsafe {
-            let handler = &mut *self.event_handler.get();
-            let _ = handler.on_batch_start(batch_span, queue_depth);
-        }
+        let _ = handler.on_batch_start(batch_span, queue_depth);
 
         while current_sequence <= available_sequence {
             let end_of_batch = current_sequence == available_sequence;
 
-            // Get mutable access to the event for processing
             // SAFETY: We have exclusive access to this sequence position as guaranteed by
-            // the barrier wait - no other processor can access this sequence until we're done.
+            // the barrier wait — no other processor can access this sequence until we're done.
             let event = unsafe { self.data_provider.get_mut(current_sequence) };
 
-            // Process the event with the handler
-            // SAFETY: Single-threaded access to the event handler through UnsafeCell.
-            // Each event processor runs on its own thread with exclusive handler access.
-            unsafe {
-                let handler = &mut *self.event_handler.get();
-                if let Err(e) = handler.on_event(event, current_sequence, end_of_batch) {
-                    // Handle exception using exception handler
-                    let exception_handler = &*self.exception_handler;
-                    exception_handler.handle_event_exception(e, current_sequence, event);
-                }
+            if let Err(e) = handler.on_event(event, current_sequence, end_of_batch) {
+                let exception_handler = &*self.exception_handler;
+                exception_handler.handle_event_exception(e, current_sequence, event);
             }
 
             current_sequence += 1;
         }
+
+        // Drop the lock before the atomic store
+        drop(handler);
 
         // Update our sequence to indicate we've processed up to this point.
         // Use Release ordering so producers see all prior event writes before
@@ -310,27 +300,23 @@ where
     }
 
     fn notify_timeout(&self, sequence: i64) {
-        unsafe {
-            let handler = &mut *self.event_handler.get();
-            let _ = handler.on_timeout(sequence);
-        }
+        let mut handler = self.event_handler.lock();
+        let _ = handler.on_timeout(sequence);
     }
 
     fn on_start(&self) {
-        // Clear any previous alerts triggered during shutdown/halt cycles so that
+        // Clear any previous alerts triggered during shutdown/halt cycles
         self.sequence_barrier.clear_alert();
         self.running.store(true, Ordering::Release);
-        unsafe {
-            let handler = &mut *self.event_handler.get();
-            if let Err(e) = handler.on_start() {
-                self.exception_handler.handle_on_start_exception(e);
-            }
+        let mut handler = self.event_handler.lock();
+        if let Err(e) = handler.on_start() {
+            self.exception_handler.handle_on_start_exception(e);
         }
     }
 
     fn on_shutdown(&self) {
-        unsafe {
-            let handler = &mut *self.event_handler.get();
+        {
+            let mut handler = self.event_handler.lock();
             if let Err(e) = handler.on_shutdown() {
                 self.exception_handler.handle_on_shutdown_exception(e);
             }
