@@ -371,9 +371,9 @@ mod tests {
         cursor: Arc<Sequence>,
         wait_strategy: Arc<BlockingWaitStrategy>,
     ) -> Arc<ProcessingSequenceBarrier> {
-        let sequencer = crate::disruptor::sequencer::SequencerEnum::Single(
-            Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone())),
-        );
+        let sequencer = crate::disruptor::sequencer::SequencerEnum::Single(Arc::new(
+            SingleProducerSequencer::new(16, wait_strategy.clone()),
+        ));
         Arc::new(ProcessingSequenceBarrier::new(
             cursor,
             wait_strategy,
@@ -430,9 +430,9 @@ mod tests {
         let data_provider = Arc::new(TestDataProvider::new(8));
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = crate::disruptor::sequencer::SequencerEnum::Single(
-            Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone())),
-        );
+        let sequencer = crate::disruptor::sequencer::SequencerEnum::Single(Arc::new(
+            SingleProducerSequencer::new(16, wait_strategy.clone()),
+        ));
         let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
             cursor,
             wait_strategy,

@@ -285,10 +285,9 @@ mod design_md_verification {
 
         let factory = DefaultEventFactory::<TestEvent>::new();
         let ring_buffer = std::sync::Arc::new(RingBuffer::new(1024, factory).unwrap());
-        let sequencer = badbatch::disruptor::SequencerEnum::Single(std::sync::Arc::new(SingleProducerSequencer::new(
-            1024,
-            std::sync::Arc::new(BusySpinWaitStrategy),
-        )));
+        let sequencer = badbatch::disruptor::SequencerEnum::Single(std::sync::Arc::new(
+            SingleProducerSequencer::new(1024, std::sync::Arc::new(BusySpinWaitStrategy)),
+        ));
 
         let mut producer = producer::SimpleProducer::new(ring_buffer, sequencer);
 

@@ -123,7 +123,10 @@ where
 
     // Create the appropriate sequencer
     let sequencer: SequencerEnum = if is_multi_producer {
-        SequencerEnum::Multi(Arc::new(MultiProducerSequencer::new(size, wait_strategy_arc.clone())))
+        SequencerEnum::Multi(Arc::new(MultiProducerSequencer::new(
+            size,
+            wait_strategy_arc.clone(),
+        )))
     } else {
         SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
             size,
@@ -178,13 +181,12 @@ where
         // Always use ProcessingSequenceBarrier for uniform contiguous-publication
         // checking. For single-producer, get_highest_published_sequence is a trivial
         // pass-through so there is no overhead.
-        let sequence_barrier: Arc<dyn SequenceBarrier> =
-            Arc::new(ProcessingSequenceBarrier::new(
-                sequencer.get_cursor(),
-                wait_strategy_arc.clone(),
-                dependent_sequences,
-                sequencer.clone(),
-            ));
+        let sequence_barrier: Arc<dyn SequenceBarrier> = Arc::new(ProcessingSequenceBarrier::new(
+            sequencer.get_cursor(),
+            wait_strategy_arc.clone(),
+            dependent_sequences,
+            sequencer.clone(),
+        ));
 
         // Start the consumer thread
         let (consumer_sequence, consumer) = start_consumer_thread(
