@@ -229,7 +229,12 @@ impl Sequencer for SequencerEnum {
 
     #[inline]
     fn get_highest_published_sequence(&self, next_sequence: i64, available_sequence: i64) -> i64 {
-        dispatch_sequencer!(self, get_highest_published_sequence, next_sequence, available_sequence)
+        dispatch_sequencer!(
+            self,
+            get_highest_published_sequence,
+            next_sequence,
+            available_sequence
+        )
     }
 
     #[inline]
@@ -279,6 +284,7 @@ pub struct SingleProducerSequencer {
     buffer_size: usize,
     buffer_size_i64: i64,
     wait_strategy: Arc<dyn WaitStrategy>,
+    needs_signal: bool,
     cursor: Arc<Sequence>,
     gating_sequences: parking_lot::RwLock<Vec<Arc<Sequence>>>,
     /// Next sequence value to be claimed (equivalent to LMAX nextValue)
@@ -300,10 +306,12 @@ impl SingleProducerSequencer {
     /// A new SingleProducerSequencer instance
     pub fn new(buffer_size: usize, wait_strategy: Arc<dyn WaitStrategy>) -> Self {
         let buffer_size_i64 = i64::try_from(buffer_size).expect("buffer size must fit into i64");
+        let needs_signal = wait_strategy.needs_signal();
         Self {
             buffer_size,
             buffer_size_i64,
             wait_strategy,
+            needs_signal,
             cursor: Arc::new(Sequence::new_with_initial_value()),
             gating_sequences: parking_lot::RwLock::new(Vec::new()),
             next_value: AtomicI64::new(-1),
@@ -433,7 +441,9 @@ impl Sequencer for SingleProducerSequencer {
     #[inline]
     fn publish(&self, sequence: i64) {
         self.cursor.set(sequence);
-        self.wait_strategy.signal_all_when_blocking();
+        if self.needs_signal {
+            self.wait_strategy.signal_all_when_blocking();
+        }
     }
 
     #[inline]
@@ -522,6 +532,7 @@ pub struct MultiProducerSequencer {
     buffer_size: usize,
     buffer_size_i64: i64,
     wait_strategy: Arc<dyn WaitStrategy>,
+    needs_signal: bool,
     /// Cursor tracks the highest **claimed** sequence number by any producer.
     ///
     /// **Important**: Unlike LMAX Disruptor's cursor which represents the "highest published
@@ -568,6 +579,7 @@ impl MultiProducerSequencer {
             is_power_of_two(buffer_size),
             "Buffer size must be a power of 2"
         );
+        let needs_signal = wait_strategy.needs_signal();
 
         // Initialize bitmap for availability tracking if buffer is large enough
         // For smaller buffers, we'll use an empty bitmap and fall back to legacy method
@@ -596,6 +608,7 @@ impl MultiProducerSequencer {
             buffer_size,
             buffer_size_i64,
             wait_strategy,
+            needs_signal,
             cursor: Arc::new(Sequence::new_with_initial_value()),
             gating_sequences: parking_lot::RwLock::new(Vec::new()),
             available_bitmap,
@@ -715,7 +728,11 @@ impl MultiProducerSequencer {
     /// Get highest published sequence using bitmap method (inspired by disruptor-rs)
     /// Scans from `next_sequence` to find the highest contiguous published sequence.
     /// Uses bulk XOR + trailing_zeros for O(1) per 64-bit word instead of per-bit checking.
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap
+    )]
     fn get_highest_published_sequence_bitmap(
         &self,
         next_sequence: i64,
@@ -933,7 +950,9 @@ impl Sequencer for MultiProducerSequencer {
         self.set_available(sequence);
 
         // Signal waiting consumers
-        self.wait_strategy.signal_all_when_blocking();
+        if self.needs_signal {
+            self.wait_strategy.signal_all_when_blocking();
+        }
     }
 
     /// Publish a contiguous range of sequences `[low, high]`.
@@ -944,7 +963,11 @@ impl Sequencer for MultiProducerSequencer {
     /// Consumers always scan for contiguity via `get_highest_published_sequence`,
     /// so a partially-visible range simply means fewer events are consumed in that
     /// barrier wait round — correctness is preserved.
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap
+    )]
     fn publish_range(&self, low: i64, high: i64) {
         if low > high {
             return;
@@ -982,7 +1005,9 @@ impl Sequencer for MultiProducerSequencer {
             }
         }
 
-        self.wait_strategy.signal_all_when_blocking();
+        if self.needs_signal {
+            self.wait_strategy.signal_all_when_blocking();
+        }
     }
 
     #[inline]
