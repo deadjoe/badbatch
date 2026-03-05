@@ -144,7 +144,7 @@ where
     fn wait_for(
         &self,
         sequence: i64,
-        cursor: Arc<Sequence>,
+        cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
     ) -> crate::disruptor::Result<i64> {
         // Conservatively wait until the producer cursor reaches the requested sequence
@@ -177,7 +177,7 @@ where
     fn wait_for_with_timeout(
         &self,
         sequence: i64,
-        cursor: Arc<Sequence>,
+        cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
         timeout: std::time::Duration,
     ) -> crate::disruptor::Result<i64> {
@@ -204,7 +204,7 @@ where
     fn wait_for_with_shutdown(
         &self,
         sequence: i64,
-        cursor: Arc<Sequence>,
+        cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
         shutdown_flag: &std::sync::atomic::AtomicBool,
     ) -> crate::disruptor::Result<i64> {
@@ -315,7 +315,7 @@ mod tests {
         let cursor = Arc::new(Sequence::new(50)); // Set cursor ahead of requested sequence
         let dependent_sequences = vec![Arc::new(Sequence::new(45))]; // Set dependency ahead too
 
-        let result = adapter.wait_for(42, cursor, &dependent_sequences);
+        let result = adapter.wait_for(42, &cursor, &dependent_sequences);
         assert!(result.is_ok());
         // Should return min(cursor=50, dep_min=45) = 45, but since we requested 42, should return 45
         assert_eq!(result.unwrap(), 45);

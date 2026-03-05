@@ -158,11 +158,9 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
         self.check_alert()?;
 
         // Use the wait strategy to wait for the sequence
-        let available_sequence = self.wait_strategy.wait_for(
-            sequence,
-            self.cursor.clone(),
-            &self.dependent_sequences,
-        )?;
+        let available_sequence =
+            self.wait_strategy
+                .wait_for(sequence, &self.cursor, &self.dependent_sequences)?;
 
         // Check again after waiting in case we were alerted while waiting
         self.check_alert()?;
@@ -190,7 +188,7 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
         // Use the wait strategy with timeout to wait for the sequence
         let available_sequence = self.wait_strategy.wait_for_with_timeout(
             sequence,
-            self.cursor.clone(),
+            &self.cursor,
             &self.dependent_sequences,
             timeout,
         )?;
@@ -248,7 +246,7 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
         // Use the wait strategy with shutdown support
         let available_sequence = self.wait_strategy.wait_for_with_shutdown(
             sequence,
-            self.cursor.clone(),
+            &self.cursor,
             &self.dependent_sequences,
             shutdown_flag,
         )?;
@@ -287,9 +285,10 @@ mod tests {
         wait_strategy: Arc<BlockingWaitStrategy>,
     ) -> ProcessingSequenceBarrier {
         use crate::disruptor::SingleProducerSequencer;
-        let sequencer = SequencerEnum::Single(
-            Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone())),
-        );
+        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
+            16,
+            wait_strategy.clone(),
+        )));
         ProcessingSequenceBarrier::new(cursor, wait_strategy, vec![], sequencer)
     }
 
@@ -302,7 +301,10 @@ mod tests {
         let dependent_sequences = vec![Arc::new(Sequence::new(5))];
 
         // Create a test sequencer
-        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone())));
+        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
+            16,
+            wait_strategy.clone(),
+        )));
 
         let barrier = ProcessingSequenceBarrier::new(
             cursor.clone(),
@@ -374,7 +376,10 @@ mod tests {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let dependent_sequences = vec![Arc::new(Sequence::new(5))];
 
-        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone())));
+        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
+            16,
+            wait_strategy.clone(),
+        )));
 
         let barrier = ProcessingSequenceBarrier::new(
             cursor.clone(),
@@ -403,7 +408,10 @@ mod tests {
         use std::time::Duration;
 
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = SequencerEnum::Multi(Arc::new(MultiProducerSequencer::new(16, wait_strategy.clone())));
+        let sequencer = SequencerEnum::Multi(Arc::new(MultiProducerSequencer::new(
+            16,
+            wait_strategy.clone(),
+        )));
 
         // Create barrier tracking only the cursor (no dependent consumers)
         let cursor = sequencer.get_cursor();
@@ -495,7 +503,10 @@ mod tests {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let dependent_sequences = vec![Arc::new(Sequence::new(5))];
 
-        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone())));
+        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
+            16,
+            wait_strategy.clone(),
+        )));
 
         let barrier = ProcessingSequenceBarrier::new(
             cursor.clone(),
@@ -552,7 +563,10 @@ mod tests {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let dependent_sequences = vec![Arc::new(Sequence::new(5))];
 
-        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone())));
+        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
+            16,
+            wait_strategy.clone(),
+        )));
 
         let barrier = ProcessingSequenceBarrier::new(
             cursor.clone(),
@@ -588,7 +602,10 @@ mod tests {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let dependent_sequences = vec![Arc::new(Sequence::new(15))];
 
-        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(32, wait_strategy.clone())));
+        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
+            32,
+            wait_strategy.clone(),
+        )));
 
         let barrier = ProcessingSequenceBarrier::new(
             cursor.clone(),
@@ -613,7 +630,10 @@ mod tests {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let dependent_sequences = vec![Arc::new(Sequence::new(3))];
 
-        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone())));
+        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
+            16,
+            wait_strategy.clone(),
+        )));
 
         let barrier = ProcessingSequenceBarrier::new(
             cursor.clone(),
@@ -641,7 +661,10 @@ mod tests {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let dependent_sequences = vec![Arc::new(Sequence::new(3))];
 
-        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone())));
+        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
+            16,
+            wait_strategy.clone(),
+        )));
 
         let barrier = ProcessingSequenceBarrier::new(
             cursor.clone(),
