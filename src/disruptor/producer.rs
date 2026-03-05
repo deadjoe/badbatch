@@ -6,6 +6,7 @@
 //! This implementation has been corrected to properly integrate with the Sequencer
 //! component, following the LMAX Disruptor design principles.
 
+use crate::disruptor::sequencer::SequencerEnum;
 use crate::disruptor::{ring_buffer::BatchIterMut, RingBuffer, Sequencer};
 use std::convert::TryFrom;
 use std::sync::Arc;
@@ -170,7 +171,7 @@ where
     T: Send + Sync,
 {
     ring_buffer: Arc<RingBuffer<T>>,
-    sequencer: Arc<dyn Sequencer>,
+    sequencer: SequencerEnum,
 }
 
 impl<T> SimpleProducer<T>
@@ -185,7 +186,7 @@ where
     ///
     /// # Returns
     /// A new SimpleProducer instance
-    pub fn new(ring_buffer: Arc<RingBuffer<T>>, sequencer: Arc<dyn Sequencer>) -> Self {
+    pub fn new(ring_buffer: Arc<RingBuffer<T>>, sequencer: SequencerEnum) -> Self {
         Self {
             ring_buffer,
             sequencer,
@@ -334,10 +335,10 @@ mod tests {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let ring_buffer =
             Arc::new(RingBuffer::new(8, factory).expect("Failed to create ring buffer"));
-        let sequencer = Arc::new(SingleProducerSequencer::new(
+        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
             8,
             Arc::new(BusySpinWaitStrategy),
-        ));
+        )));
         SimpleProducer::new(ring_buffer, sequencer)
     }
 
@@ -345,10 +346,10 @@ mod tests {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let ring_buffer =
             Arc::new(RingBuffer::new(16, factory).expect("Failed to create ring buffer"));
-        let sequencer = Arc::new(MultiProducerSequencer::new(
+        let sequencer = SequencerEnum::Multi(Arc::new(MultiProducerSequencer::new(
             16,
             Arc::new(BusySpinWaitStrategy),
-        ));
+        )));
         SimpleProducer::new(ring_buffer, sequencer)
     }
 
@@ -531,10 +532,10 @@ mod tests {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let ring_buffer =
             Arc::new(RingBuffer::new(64, factory).expect("Failed to create ring buffer"));
-        let sequencer = Arc::new(MultiProducerSequencer::new(
+        let sequencer = SequencerEnum::Multi(Arc::new(MultiProducerSequencer::new(
             64,
             Arc::new(BusySpinWaitStrategy),
-        ));
+        )));
 
         let mut producer1 = SimpleProducer::new(ring_buffer.clone(), sequencer.clone());
         let mut producer2 = SimpleProducer::new(ring_buffer.clone(), sequencer.clone());
@@ -555,10 +556,10 @@ mod tests {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let ring_buffer =
             Arc::new(RingBuffer::new(1024, factory).expect("Failed to create ring buffer"));
-        let sequencer = Arc::new(SingleProducerSequencer::new(
+        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
             1024,
             Arc::new(BusySpinWaitStrategy),
-        ));
+        )));
         let mut producer = SimpleProducer::new(ring_buffer, sequencer);
 
         // Test large batch

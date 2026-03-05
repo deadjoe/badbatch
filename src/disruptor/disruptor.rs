@@ -9,6 +9,7 @@ use crate::disruptor::{
     is_power_of_two, BatchEventProcessor, BlockingWaitStrategy, DisruptorError, EventFactory,
     EventHandler, EventProcessor, MultiProducerSequencer, ProducerType, Result, RingBuffer,
     Sequence, Sequencer, SingleProducerSequencer, WaitStrategy,
+    sequencer::SequencerEnum,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -50,8 +51,8 @@ where
 {
     /// The ring buffer for storing events
     ring_buffer: Arc<RingBuffer<T>>,
-    /// The sequencer for coordinating access
-    sequencer: Arc<dyn Sequencer>,
+    /// The sequencer for coordinating access (enum dispatch, no vtable)
+    sequencer: SequencerEnum,
     /// The buffer size
     buffer_size: usize,
     /// Started event processors
@@ -99,12 +100,12 @@ where
 
         // Create the appropriate sequencer based on producer type
         let wait_strategy = Arc::from(wait_strategy);
-        let sequencer: Arc<dyn Sequencer> = match producer_type {
+        let sequencer: SequencerEnum = match producer_type {
             ProducerType::Single => {
-                Arc::new(SingleProducerSequencer::new(buffer_size, wait_strategy))
+                SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(buffer_size, wait_strategy)))
             }
             ProducerType::Multi => {
-                Arc::new(MultiProducerSequencer::new(buffer_size, wait_strategy))
+                SequencerEnum::Multi(Arc::new(MultiProducerSequencer::new(buffer_size, wait_strategy)))
             }
         };
 

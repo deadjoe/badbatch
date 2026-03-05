@@ -273,7 +273,7 @@ fn test_try_run_once_functionality() {
         sequencer.get_cursor(),
         wait_strategy,
         vec![],
-        sequencer.clone() as Arc<dyn badbatch::disruptor::Sequencer>,
+        badbatch::disruptor::SequencerEnum::Single(sequencer.clone()),
     ));
 
     let handler = CountingEventHandler::new("test_handler");
@@ -320,11 +320,11 @@ fn test_sequence_barrier_dependency_resolution() {
     use badbatch::disruptor::{Sequence, SingleProducerSequencer};
 
     let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-    let sequencer = SingleProducerSequencer::new(64, wait_strategy.clone());
+    let sequencer = Arc::new(SingleProducerSequencer::new(64, wait_strategy.clone()));
 
-    // Test that new_barrier now creates proper barriers with dependency tracking
+    // Test that new_barrier_typed creates proper barriers with dependency tracking
     let dep_sequence = Arc::new(Sequence::new(5));
-    let barrier = sequencer.new_barrier(vec![dep_sequence.clone()]);
+    let barrier = sequencer.new_barrier_typed(vec![dep_sequence.clone()]);
 
     // Verify the barrier was created successfully
     assert!(barrier.get_cursor().get() == -1); // Initial cursor value
