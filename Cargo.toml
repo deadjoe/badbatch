@@ -21,6 +21,7 @@ thiserror = "1.0"
 # Synchronization primitives
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 crossbeam-utils = "0.8"
+arc-swap = "1.8"
 core_affinity = "0.8"
 
 [dev-dependencies]
