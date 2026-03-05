@@ -5,9 +5,9 @@
 //! This follows the exact design from the original LMAX Disruptor WaitStrategy interface.
 
 use crate::disruptor::{DisruptorError, Result, Sequence};
+use parking_lot::{Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -177,25 +177,19 @@ impl BlockingWaitStrategy {
     /// Alert the wait strategy to wake up all waiting threads
     /// This is used during shutdown to interrupt waiting threads
     pub fn alert(&self) {
-        if let Ok(mut state) = self.mutex.lock() {
-            state.alerted = true;
-            self.condvar.notify_all();
-        }
+        let mut state = self.mutex.lock();
+        state.alerted = true;
+        self.condvar.notify_all();
     }
 
     /// Clear the alert state
     pub fn clear_alert(&self) {
-        if let Ok(mut state) = self.mutex.lock() {
-            state.alerted = false;
-        }
+        self.mutex.lock().alerted = false;
     }
 
     /// Check if the strategy is currently alerted
     pub fn is_alerted(&self) -> bool {
-        self.mutex
-            .lock()
-            .map(|state| state.alerted)
-            .unwrap_or(false)
+        self.mutex.lock().alerted
     }
 }
 
@@ -211,7 +205,7 @@ impl WaitStrategy for BlockingWaitStrategy {
 
         // First check: wait for cursor to advance if needed
         if cursor.get() < sequence {
-            let mut guard = self.mutex.lock().map_err(|_| DisruptorError::Alert)?;
+            let mut guard = self.mutex.lock();
 
             while cursor.get() < sequence {
                 // Check for alert state (equivalent to barrier.checkAlert() in LMAX)
@@ -220,10 +214,7 @@ impl WaitStrategy for BlockingWaitStrategy {
                 }
 
                 // Wait for signal from producers (equivalent to mutex.wait() in LMAX)
-                guard = self
-                    .condvar
-                    .wait(guard)
-                    .map_err(|_| DisruptorError::Alert)?;
+                self.condvar.wait(&mut guard);
             }
         }
 
@@ -262,7 +253,7 @@ impl WaitStrategy for BlockingWaitStrategy {
 
         // First check: wait for cursor to advance if needed (with timeout)
         if cursor.get() < sequence {
-            let mut guard = self.mutex.lock().map_err(|_| DisruptorError::Alert)?;
+            let mut guard = self.mutex.lock();
 
             while cursor.get() < sequence {
                 // Check for timeout
@@ -281,12 +272,8 @@ impl WaitStrategy for BlockingWaitStrategy {
                     return Err(DisruptorError::Timeout);
                 }
 
-                // Wait with timeout
-                let (new_guard, timeout_result) = self
-                    .condvar
-                    .wait_timeout(guard, remaining)
-                    .map_err(|_| DisruptorError::Alert)?;
-                guard = new_guard;
+                // Wait with timeout (parking_lot returns WaitTimeoutResult directly)
+                let timeout_result = self.condvar.wait_for(&mut guard, remaining);
 
                 if timeout_result.timed_out() {
                     return Err(DisruptorError::Timeout);
