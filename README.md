@@ -17,7 +17,7 @@
 - **Lock-free ring buffer** with power-of-2 sizing for maximum performance
 - **Multiple wait strategies**: Blocking, BusySpin, Yielding, Sleeping
 - **Event processors** with batch processing capabilities
-- **Single and multi-producer** support with experimental bitmap optimization (enabled by default for buffer size ≥ 64)
+- **Single and multi-producer** support (multi-producer uses bitmap availability tracking by default for buffer size ≥ 64)
 - **Comprehensive exception handling** with custom error types
 - **Sequence barriers** and dependency management
 - **Event factories, handlers, and translators** for flexible event processing
@@ -27,14 +27,14 @@
 
 - **Simplified Producer API**: Closure-based publishing with `producer.publish(|event| { ... })`
 - **Batch Publishing**: Efficient `BatchIterMut` for zero-copy batch operations
-- **Builder Pattern**: Fluent API with `build_single_producer(size, factory, wait_strategy)`
+- **Builder Pattern**: Fluent API with `build_single_producer(...)` / `build_multi_producer(...)`
 - **Thread Management**: CPU affinity support with `ThreadBuilder::new().pin_at_core(1)`
 - **Elegant Consumer**: Automatic lifecycle management with `ElegantConsumer::new()`
 - **Simple Wait Strategies**: Streamlined strategies for easier usage
 
 ### 🔬 Formal Verification & Benchmarking
 
-- **TLA+ Verification**: Mathematical proofs of correctness for SPMC and MPMC scenarios
+- **TLA+ Verification**: Mathematical proofs of correctness for SPMC, MPMC, and pipeline dependency scenarios
 - **Comprehensive Benchmarks**: 7 specialized benchmark suites covering latency, throughput, and scaling
 - **Performance Testing**: Systematic evaluation against std::mpsc and crossbeam channels
 - **Property Testing**: Invariant checking with proptest for robust validation
@@ -58,7 +58,7 @@ BadBatch is a focused, high-performance disruptor library with a clean, modular 
 │  ⚡ Core Disruptor Engine                                   │
 │  ├─ Ring Buffer (Lock-free, Power-of-2 Sizing)             │
 │  ├─ Event Processors (Batch Processing)                    │
-│  ├─ Wait Strategies (Blocking, BusySpin, Yielding, Sleep)  │
+│  ├─ Wait Strategies (Blocking, BusySpin, Yielding, Sleeping) │
 │  ├─ Producer Types (Single/Multi with Experimental Bitmap) │
 │  ├─ Sequence Management (Atomic Coordination)              │
 │  ├─ Event Factories, Handlers & Translators               │
@@ -102,8 +102,8 @@ BadBatch is a library for building high-performance event processing systems. He
 
 ```rust
 use badbatch::disruptor::{
-    Disruptor, ProducerType, BlockingWaitStrategy, DefaultEventFactory,
-    EventHandler, EventTranslator, Result,
+    BlockingWaitStrategy, DefaultEventFactory, Disruptor, EventHandler, EventTranslator,
+    ProducerType,
 };
 
 #[derive(Debug, Default)]
@@ -112,32 +112,23 @@ struct MyEvent {
     message: String,
 }
 
-// Event handler implementation
 struct MyEventHandler;
 
 impl EventHandler<MyEvent> for MyEventHandler {
-    fn on_event(&mut self, event: &mut MyEvent, sequence: i64, end_of_batch: bool) -> Result<()> {
-        println!("Processing event {} with value {} (end_of_batch: {})",
-                 sequence, event.value, end_of_batch);
+    fn on_event(
+        &mut self,
+        event: &mut MyEvent,
+        sequence: i64,
+        end_of_batch: bool,
+    ) -> badbatch::disruptor::Result<()> {
+        println!(
+            "Processing event {} with value {} (end_of_batch: {})",
+            sequence, event.value, end_of_batch
+        );
         Ok(())
     }
 }
 
-// Create and configure the Disruptor
-let factory = DefaultEventFactory::<MyEvent>::new();
-let mut disruptor = Disruptor::new(
-    factory,
-    1024, // Buffer size (must be power of 2)
-    ProducerType::Single,
-    Box::new(BlockingWaitStrategy::new()),
-)?
-.handle_events_with(MyEventHandler)
-.build();
-
-// Start the Disruptor
-disruptor.start()?;
-
-// Publish events using EventTranslator
 struct MyEventTranslator {
     value: i64,
     message: String,
@@ -150,22 +141,38 @@ impl EventTranslator<MyEvent> for MyEventTranslator {
     }
 }
 
-let translator = MyEventTranslator {
-    value: 42,
-    message: "Hello, World!".to_string(),
-};
-disruptor.publish_event(translator)?;
+fn main() {
+    // Create and configure the Disruptor
+    let factory = DefaultEventFactory::<MyEvent>::new();
+    let mut disruptor = Disruptor::new(
+        factory,
+        1024, // Buffer size (must be power of 2)
+        ProducerType::Single,
+        Box::new(BlockingWaitStrategy::new()),
+    )
+    .unwrap()
+    .handle_events_with(MyEventHandler)
+    .build();
 
-// Shutdown when done
-disruptor.shutdown()?;
+    disruptor.start().unwrap();
+
+    disruptor
+        .publish_event(MyEventTranslator {
+            value: 42,
+            message: "Hello, World!".to_string(),
+        })
+        .unwrap();
+
+    disruptor.shutdown().unwrap();
+}
 ```
 
 ### Modern disruptor-rs Inspired API
 
 ```rust
 use badbatch::disruptor::{
-    build_single_producer, Producer, ElegantConsumer, RingBuffer,
-    BusySpinWaitStrategy, simple_wait_strategy, event_factory::ClosureEventFactory,
+    build_single_producer, event_factory::ClosureEventFactory, simple_wait_strategy::BusySpin,
+    BusySpinWaitStrategy, ElegantConsumer, RingBuffer,
 };
 use std::sync::Arc;
 
@@ -174,47 +181,47 @@ struct MyEvent {
     value: i64,
 }
 
-// Simple producer with closure-based publishing
-let mut producer = build_single_producer(1024, || MyEvent::default(), BusySpinWaitStrategy)
-    .handle_events_with(|event, sequence, end_of_batch| {
-        println!("Processing event {} with value {} (batch_end: {})",
-                 sequence, event.value, end_of_batch);
-    })
-    .build();
+fn main() {
+    // build_* expects a full LMAX `WaitStrategy` (e.g. BusySpinWaitStrategy).
+    let mut disruptor = build_single_producer(1024, MyEvent::default, BusySpinWaitStrategy)
+        .handle_events_with(|event, sequence, end_of_batch| {
+            println!(
+                "Processing event {} with value {} (batch_end: {})",
+                sequence, event.value, end_of_batch
+            );
+        })
+        .build();
 
-// Publish events with closures
-producer.publish(|event| {
-    event.value = 42;
-});
+    disruptor.publish(|event| event.value = 42);
 
-// Batch publishing
-producer.batch_publish(5, |batch| {
-    for (i, event) in batch.enumerate() {
-        event.value = i as i64;
-    }
-});
+    disruptor.batch_publish(5, |batch| {
+        for (i, event) in batch.enumerate() {
+            event.value = i as i64;
+        }
+    });
 
-// Elegant consumer with CPU affinity
-let factory = ClosureEventFactory::new(|| MyEvent::default());
-let ring_buffer = Arc::new(RingBuffer::new(1024, factory)?);
+    // ElegantConsumer uses simplified `SimpleWaitStrategy` types (e.g. BusySpin).
+    let factory = ClosureEventFactory::new(MyEvent::default);
+    let ring_buffer = Arc::new(RingBuffer::new(1024, factory).unwrap());
+    let consumer = ElegantConsumer::with_affinity(
+        ring_buffer,
+        |event, sequence, _end_of_batch| println!("Processing: {} at {}", event.value, sequence),
+        BusySpin,
+        1, // Pin to CPU core 1
+    )
+    .unwrap();
 
-let consumer = ElegantConsumer::with_affinity(
-    ring_buffer,
-    |event, sequence, end_of_batch| {
-        println!("Processing: {} at {}", event.value, sequence);
-    },
-    simple_wait_strategy::BusySpin,
-    1, // Pin to CPU core 1
-)?;
-
-// Graceful shutdown
-consumer.shutdown()?;
+    consumer.shutdown().unwrap();
+    disruptor.shutdown();
+}
 ```
+
+Tip: `build_single_producer` / `build_multi_producer` take a full LMAX `WaitStrategy`. To use the simplified strategies there, use adapters like `simple_wait_strategy::busy_spin()` which return a `WaitStrategy` adapter.
 
 ## 🔧 Development
 
 ### Prerequisites
-- Rust 1.70 or later
+- Rust 1.75 or later (see `Cargo.toml` `rust-version`)
 - Git
 
 ### Building
@@ -227,7 +234,7 @@ cargo build
 ### Testing
 
 ```bash
-# Run all tests (191 unit tests + 5 integration tests)
+# Run all tests
 cargo test
 
 # Run comprehensive test suite with quality checks
@@ -235,7 +242,7 @@ bash scripts/test-all.sh
 
 # Run specific test categories
 cargo test --lib                    # Unit tests
-cargo test --test '*'               # Integration tests
+cargo test --test '*'               # Integration tests (all integration targets)
 cargo test --doc                    # Documentation tests
 
 # Run performance benchmarks
@@ -283,7 +290,8 @@ BadBatch is designed for high-performance event processing with the following ch
 ### Optimization Techniques
 
 - **Cache Line Padding**: Uses `crossbeam_utils::CachePadded` to prevent false sharing
-- **Bitmap Optimization**: Enabled by default for buffers with size ≥ 64, providing O(1) availability checking for large buffers (inspired by disruptor-rs). For smaller buffers, the sequencer transparently falls back to the legacy LMAX availability buffer.
+- **Lock-free gating sequences (H9)**: Producers read the consumer gating list through `ArcSwap` to avoid lock traffic in backpressure paths.
+- **Bitmap Optimization**: Multi-producer sequencer enables bitmap tracking by default for buffers with size ≥ 64, providing O(1) availability checks (inspired by disruptor-rs). For smaller buffers, it transparently falls back to the legacy LMAX availability buffer.
 - **Batch Processing**: Automatic batching reduces coordination overhead
 - **Bit Manipulation**: Fast modulo operations using bit masks for power-of-2 buffer sizes
 - **Memory Layout**: Optimal data structures (`Box<[UnsafeCell<T>]>`) for better cache locality
@@ -304,7 +312,7 @@ RUSTFLAGS="-C target-feature=+lse" cargo build --release
 
 ### Experimental Features
 
-- **Bitmap Optimization**: Enabled by default for buffers with size ≥ 64. This feature provides O(1) availability checking for large buffers using atomic bitmap operations（inspired by disruptor‑rs）. For smaller buffers, the sequencer transparently falls back to the legacy LMAX availability buffer. You can evaluate performance trade‑offs via the provided benchmarks.
+- **Bitmap Optimization (multi-producer)**: Enabled by default for buffers with size ≥ 64. This provides O(1) availability checking for large buffers using atomic bitmap operations (inspired by disruptor‑rs). For smaller buffers, the multi-producer sequencer transparently falls back to the legacy LMAX availability buffer. You can evaluate performance trade‑offs via the provided benchmarks.
 
 ### Benchmark Results
 
@@ -347,7 +355,8 @@ BadBatch includes comprehensive TLA+ formal verification models that mathematica
 ### Verification Models
 - **BadBatchSPMC.tla**: Single Producer Multi Consumer verification (✅ 7,197 states verified)
 - **BadBatchMPMC.tla**: Multi Producer Multi Consumer verification (✅ 161,285 states verified) 
-- **BadBatchRingBuffer.tla**: Ring buffer data structure verification
+- **BadBatchPipeline.tla**: Consumer dependency chain (pipeline) verification
+- **BadBatchRingBuffer.tla**: Shared ring buffer model/invariants used by the specs above
 
 ### Verified Properties
 - **Safety**: No data races, type safety, memory safety
@@ -356,10 +365,13 @@ BadBatch includes comprehensive TLA+ formal verification models that mathematica
 Run formal verification:
 ```bash
 cd verification
-./verify.sh spmc    # Quick SPMC verification
-./verify.sh mpmc    # Comprehensive MPMC verification  
-./verify.sh all     # Full verification suite
+./verify.sh               # Quick suite (SPMC + MPMC)
+./verify.sh extended      # Extended suite (includes extended MPMC config)
+./verify.sh spmc          # SPMC model only
+./verify.sh mpmc          # MPMC model only
 ```
+
+See `verification/README.md` for detailed configuration options, state counts, and running the pipeline/MPSC models.
 
 ## 🙏 Acknowledgments
 
