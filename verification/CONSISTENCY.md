@@ -21,7 +21,7 @@ This note maps the Rust implementation to the TLA+ models and highlights checks 
 
 - No data races: TLA `BadBatchRingBuffer.NoDataRaces` prohibits overlapping reader/writer on the same slot and multiple concurrent writers to a slot. This is enforced in Rust by sequencers/gating and exclusive claims prior to writes.
 - Ordering: TLA readers always consume `read[r]+1` and require `IsPublished(next)` (MPMC) or `published >= next` (SPMC). This matches Rust barriers returning highest contiguous published sequence; consumers cannot observe gaps.
-- Progress: TLA `Liveliness` asserts eventual consumption of all published events under fairness — aligned with wait strategies signaling and sequencer progress in Rust.
+- Progress: TLA `Liveness` asserts eventual consumption of all published events under fairness — aligned with wait strategies signaling and sequencer progress in Rust.
 
 ## Tooling
 
@@ -38,7 +38,7 @@ This note maps the Rust implementation to the TLA+ models and highlights checks 
 
 ## Suggested Model Enhancements (Optional)
 
-- Add a simple safety property asserting per-reader monotonic consumption (prefix strictly increasing), though it’s already implied by the state machine and `Liveliness`.
+- Add a simple safety property asserting per-reader monotonic consumption (prefix strictly increasing), though it’s already implied by the state machine and `Liveness`.
 - Add a small comment in the MPMC model noting that `next_sequence` models atomic CAS claims; interleaving is covered by independent writers’ `pc` state.
 
 ## Current Assessment

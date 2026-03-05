@@ -34,7 +34,7 @@ Transition(t, from, to) ==
   /\ pc[t] = from
   /\ pc'   = [ pc EXCEPT ![t] = to ]
 
-Buffer  == INSTANCE SimpleRingBuffer WITH
+Buffer  == INSTANCE BadBatchRingBuffer WITH
   Readers <- Consumers,
   Writers <- {Producer}
 

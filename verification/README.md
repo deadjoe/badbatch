@@ -164,7 +164,7 @@ Models the single producer, multi consumer scenario based on proven disruptor-rs
 - **Verification Results**:
   - ✅ NoDataRaces: No concurrent read/write access
   - ✅ TypeOk: All variables maintain correct types
-  - ✅ Liveliness: All events eventually consumed by all consumers
+  - ✅ Liveness: All events eventually consumed by all consumers
   - ✅ 7,197 states explored, 61 depth levels
 
 ### BadBatchMPMC.tla ✅ **VERIFIED**
@@ -176,7 +176,7 @@ Models the multi producer, multi consumer scenario with proven correctness:
 - **Verification Results**:
   - ✅ NoDataRaces: No concurrent read/write access to ring buffer slots
   - ✅ TypeOk: All variables maintain correct types throughout execution
-  - ✅ Liveliness: All events eventually consumed by all consumers
+  - ✅ Liveness: All events eventually consumed by all consumers
   - ✅ 161,285 states explored, 48,197 distinct states
 - **Status**: Fully verified and matches Rust implementation
 

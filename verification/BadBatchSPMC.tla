@@ -142,6 +142,7 @@ Spec ==
 
 TypeOk ==
   /\ Buffer!TypeOk
+  /\ Cardinality(Writers) = 1
   /\ published \in Int
   /\ read      \in [ Readers                -> Int                 ]
   /\ consumed  \in [ Readers                -> Seq(Nat)            ]
@@ -153,7 +154,7 @@ NoDataRaces == Buffer!NoDataRaces
 (* Properties:                                                             *)
 (***************************************************************************)
 
-Liveliness ==
+Liveness ==
   <>[] (\A r \in Readers : consumed[r] = [i \in 1..MaxPublished |-> i - 1])
 
 =============================================================================
