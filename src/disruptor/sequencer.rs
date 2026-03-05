@@ -921,6 +921,14 @@ impl Sequencer for MultiProducerSequencer {
         self.wait_strategy.signal_all_when_blocking();
     }
 
+    /// Publish a contiguous range of sequences `[low, high]`.
+    ///
+    /// For bitmap mode, each 64-slot word is XOR-flipped in a single `fetch_xor`.
+    /// Ranges spanning multiple words result in multiple atomic ops (not a single
+    /// atomic batch), which is consistent with LMAX Disruptor and disruptor-rs.
+    /// Consumers always scan for contiguity via `get_highest_published_sequence`,
+    /// so a partially-visible range simply means fewer events are consumed in that
+    /// barrier wait round — correctness is preserved.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn publish_range(&self, low: i64, high: i64) {
         if low > high {

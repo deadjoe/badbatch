@@ -1223,7 +1223,12 @@ impl<E> CloneableProducer<E>
 where
     E: Send + Sync,
 {
-    /// Publish an event using a closure (simplified API)
+    /// Publish an event using a closure (convenience API).
+    ///
+    /// **Performance note:** This creates a temporary `SimpleProducer` on each call,
+    /// incurring 2 Arc refcount increments + decrements. For hot paths, call
+    /// [`create_producer()`](Self::create_producer) once and reuse the returned
+    /// `SimpleProducer` directly.
     pub fn try_publish<F>(
         &self,
         update: F,
@@ -1235,7 +1240,11 @@ where
         producer.try_publish(update)
     }
 
-    /// Publish an event, spinning until space is available
+    /// Publish an event, spinning until space is available (convenience API).
+    ///
+    /// **Performance note:** This creates a temporary `SimpleProducer` on each call.
+    /// For hot paths, call [`create_producer()`](Self::create_producer) once and
+    /// reuse the returned `SimpleProducer` directly.
     pub fn publish<F>(&self, update: F)
     where
         F: FnOnce(&mut E),
@@ -1244,7 +1253,11 @@ where
         producer.publish(update);
     }
 
-    /// Try to publish a batch of events
+    /// Try to publish a batch of events (convenience API).
+    ///
+    /// **Performance note:** This creates a temporary `SimpleProducer` on each call.
+    /// For hot paths, call [`create_producer()`](Self::create_producer) once and
+    /// reuse the returned `SimpleProducer` directly.
     pub fn try_batch_publish<F>(
         &self,
         n: usize,
@@ -1257,7 +1270,11 @@ where
         producer.try_batch_publish(n, update)
     }
 
-    /// Publish a batch of events, spinning until space is available
+    /// Publish a batch of events, spinning until space is available (convenience API).
+    ///
+    /// **Performance note:** This creates a temporary `SimpleProducer` on each call.
+    /// For hot paths, call [`create_producer()`](Self::create_producer) once and
+    /// reuse the returned `SimpleProducer` directly.
     pub fn batch_publish<F>(&self, n: usize, update: F)
     where
         F: for<'a> FnOnce(crate::disruptor::ring_buffer::BatchIterMut<'a, E>),
