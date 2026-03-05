@@ -137,6 +137,10 @@ pub enum DisruptorError {
     #[error("Alert exception")]
     Alert,
 
+    /// Returned when start() or run() is called on an already-running component.
+    #[error("Already running")]
+    AlreadyRunning,
+
     /// Returned when shutdown encounters an unrecoverable error.
     #[error("Shutdown error: {0}")]
     ShutdownError(String),

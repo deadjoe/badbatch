@@ -226,7 +226,7 @@ where
     /// Returns an error if already started or if starting fails
     pub fn start(&mut self) -> Result<()> {
         if self.started {
-            return Err(DisruptorError::InvalidSequence(-1)); // Already started
+            return Err(DisruptorError::AlreadyRunning);
         }
 
         // Reset shutdown flag
