@@ -58,28 +58,34 @@ impl Sequence {
         self.value.load(Ordering::Acquire)
     }
 
-    /// Set the sequence value with relaxed ordering (lazy-set).
+    /// Set the sequence value with Release ordering (lazy-set).
     ///
-    /// Equivalent to Java's `UNSAFE.putOrderedLong` / `lazySet`.
-    /// Use when the store only needs to be eventually visible to other threads
-    /// (e.g., producer cursor updates that will be followed by a signal).
+    /// Equivalent to Java's `UNSAFE.putOrderedLong` / `lazySet`, which
+    /// provides a StoreStore barrier: all prior writes (e.g., event data
+    /// written to the ring buffer) are guaranteed visible before this
+    /// store becomes visible to other threads loading with `Acquire`.
+    ///
+    /// This is weaker than a volatile write (`set_volatile`) because it
+    /// does not provide StoreLoad ordering — the store may not be
+    /// immediately visible to other threads, but ordering of prior
+    /// writes is preserved.
     ///
     /// # Arguments
     /// * `value` - The new sequence value
     pub fn set(&self, value: i64) {
-        self.value.store(value, Ordering::Relaxed);
+        self.value.store(value, Ordering::Release);
     }
 
-    /// Set the sequence value with volatile (Release) semantics.
+    /// Set the sequence value with volatile (SeqCst) semantics.
     ///
-    /// Ensures all prior writes are visible to threads that subsequently
-    /// load with `Acquire`. Equivalent to Java's volatile write.
-    /// Use for consumer sequence updates that must be immediately visible.
+    /// Equivalent to Java's volatile write, which provides a full memory
+    /// barrier (StoreStore + StoreLoad). Use when the store must be
+    /// immediately visible to all threads.
     ///
     /// # Arguments
     /// * `value` - The new sequence value
     pub fn set_volatile(&self, value: i64) {
-        self.value.store(value, Ordering::Release);
+        self.value.store(value, Ordering::SeqCst);
     }
 
     /// Compare and swap the sequence value
