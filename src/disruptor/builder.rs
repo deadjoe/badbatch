@@ -6,8 +6,8 @@
 use crate::disruptor::{
     event_factory::ClosureEventFactory,
     producer::{Producer, SimpleProducer},
-    sequence_barrier::{ProcessingSequenceBarrier, SimpleSequenceBarrier},
-    sequencer::{MultiProducerSequencer, SingleProducerSequencer},
+    sequence_barrier::ProcessingSequenceBarrier,
+    sequencer::{MultiProducerSequencer, SequencerEnum, SingleProducerSequencer},
     EventHandler, RingBuffer, Sequence, SequenceBarrier, Sequencer, WaitStrategy,
 };
 use std::marker::PhantomData;
@@ -25,8 +25,8 @@ use std::thread::{self, JoinHandle};
 pub struct DisruptorCore<E> {
     /// Shared ring buffer storing all events managed by the disruptor.
     pub ring_buffer: Arc<RingBuffer<E>>,
-    /// Sequencer coordinating producer access to the ring buffer.
-    pub sequencer: Arc<dyn Sequencer>,
+    /// Sequencer coordinating producer access to the ring buffer (enum dispatch, no vtable).
+    pub sequencer: SequencerEnum,
     /// Consumer handles that process published events.
     pub consumers: Vec<Consumer>,
     /// Shared flag signaling graceful shutdown to consumer threads.
@@ -41,7 +41,7 @@ where
     /// Create a new DisruptorCore with the given components
     pub fn new(
         ring_buffer: Arc<RingBuffer<E>>,
-        sequencer: Arc<dyn Sequencer>,
+        sequencer: SequencerEnum,
         consumers: Vec<Consumer>,
         shutdown_flag: Arc<AtomicBool>,
         gating_sequences: Vec<Arc<Sequence>>,
@@ -122,13 +122,13 @@ where
     let wait_strategy_arc: Arc<dyn WaitStrategy> = Arc::new(wait_strategy);
 
     // Create the appropriate sequencer
-    let sequencer: Arc<dyn Sequencer> = if is_multi_producer {
-        Arc::new(MultiProducerSequencer::new(size, wait_strategy_arc.clone()))
+    let sequencer: SequencerEnum = if is_multi_producer {
+        SequencerEnum::Multi(Arc::new(MultiProducerSequencer::new(size, wait_strategy_arc.clone())))
     } else {
-        Arc::new(SingleProducerSequencer::new(
+        SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
             size,
             wait_strategy_arc.clone(),
-        ))
+        )))
     };
 
     // Create shutdown flag
@@ -175,22 +175,16 @@ where
         } = consumer_info;
 
         // Create a sequence barrier for this consumer.
-        // Important: For multi-producer sequencers we must always use ProcessingSequenceBarrier
-        // to ensure contiguous publication checks via get_highest_published_sequence.
+        // Always use ProcessingSequenceBarrier for uniform contiguous-publication
+        // checking. For single-producer, get_highest_published_sequence is a trivial
+        // pass-through so there is no overhead.
         let sequence_barrier: Arc<dyn SequenceBarrier> =
-            if dependent_sequences.is_empty() && !is_multi_producer {
-                Arc::new(SimpleSequenceBarrier::new(
-                    sequencer.get_cursor(),
-                    wait_strategy_arc.clone(),
-                ))
-            } else {
-                Arc::new(ProcessingSequenceBarrier::new(
-                    sequencer.get_cursor(),
-                    wait_strategy_arc.clone(),
-                    dependent_sequences,
-                    sequencer.clone(),
-                ))
-            };
+            Arc::new(ProcessingSequenceBarrier::new(
+                sequencer.get_cursor(),
+                wait_strategy_arc.clone(),
+                dependent_sequences,
+                sequencer.clone(),
+            ));
 
         // Start the consumer thread
         let (consumer_sequence, consumer) = start_consumer_thread(
@@ -1199,7 +1193,7 @@ where
     E: Send + Sync,
 {
     ring_buffer: Arc<RingBuffer<E>>,
-    sequencer: Arc<dyn Sequencer>,
+    sequencer: SequencerEnum,
 }
 
 impl<E> CloneableProducer<E>
@@ -1209,7 +1203,7 @@ where
     /// Creates a new CloneableProducer with the given ring buffer and sequencer
     ///
     /// This constructor allows creating custom producer instances from existing components
-    pub fn new(ring_buffer: Arc<RingBuffer<E>>, sequencer: Arc<dyn Sequencer>) -> Self {
+    pub fn new(ring_buffer: Arc<RingBuffer<E>>, sequencer: SequencerEnum) -> Self {
         Self {
             ring_buffer,
             sequencer,

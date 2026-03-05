@@ -13,128 +13,6 @@ use std::convert::TryFrom;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// Wrapper to break circular dependency between Sequencer and SequenceBarrier
-///
-/// This wrapper provides a limited sequencer interface that can be used
-/// by sequence barriers without creating circular dependencies.
-///
-/// # Safety Invariant
-///
-/// The `sequencer_ptr` raw pointer **must** outlive this wrapper. This is upheld
-/// because `new_barrier()` is called on a sequencer that lives inside an `Arc`
-/// which is shared with the returned barrier. The barrier (and thus this wrapper)
-/// cannot outlive the `Arc<dyn Sequencer>` that created it, since they share the
-/// same `Arc` reference. Callers must not construct a `SequencerWrapper` with a
-/// pointer to a stack-local sequencer that may be dropped while the wrapper is
-/// still alive (test code excepted, where lifetimes are scoped together).
-#[derive(Debug)]
-struct SequencerWrapper {
-    buffer_size: usize,
-    cursor: Arc<Sequence>,
-    /// Unsafe back-reference to the real sequencer for delegation.
-    /// This is required so the barrier can query publication continuity
-    /// without changing the public Sequencer API surface.
-    sequencer_ptr: *const (dyn Sequencer + 'static),
-}
-
-// SAFETY: The raw pointer is only used to delegate read-only queries
-// to the underlying sequencer and is expected to outlive the wrapper
-// (in production held by Arc, in tests by stack within the same scope).
-// No mutation is performed through this pointer.
-unsafe impl Send for SequencerWrapper {}
-unsafe impl Sync for SequencerWrapper {}
-
-impl SequencerWrapper {
-    fn new(
-        buffer_size: usize,
-        sequencer_ptr: *const (dyn Sequencer + 'static),
-    ) -> Self {
-        Self {
-            buffer_size,
-            cursor: Arc::new(Sequence::new(-1)),
-            sequencer_ptr,
-        }
-    }
-}
-
-impl Sequencer for SequencerWrapper {
-    fn get_cursor(&self) -> Arc<Sequence> {
-        self.cursor.clone()
-    }
-
-    fn get_buffer_size(&self) -> usize {
-        self.buffer_size
-    }
-
-    fn next(&self) -> Result<i64> {
-        panic!("SequencerWrapper is a read-only proxy for barrier queries; next() must not be called")
-    }
-
-    fn next_n(&self, _n: i64) -> Result<i64> {
-        panic!("SequencerWrapper is a read-only proxy for barrier queries; next_n() must not be called")
-    }
-
-    fn try_next(&self) -> Option<i64> {
-        panic!("SequencerWrapper is a read-only proxy for barrier queries; try_next() must not be called")
-    }
-
-    fn try_next_n(&self, _n: i64) -> Option<i64> {
-        panic!("SequencerWrapper is a read-only proxy for barrier queries; try_next_n() must not be called")
-    }
-
-    fn publish(&self, _sequence: i64) {
-        panic!("SequencerWrapper is a read-only proxy for barrier queries; publish() must not be called")
-    }
-
-    fn publish_range(&self, _low: i64, _high: i64) {
-        panic!("SequencerWrapper is a read-only proxy for barrier queries; publish_range() must not be called")
-    }
-
-    fn has_available_capacity(&self, _required_capacity: usize) -> bool {
-        panic!("SequencerWrapper is a read-only proxy for barrier queries; has_available_capacity() must not be called")
-    }
-
-    fn is_available(&self, sequence: i64) -> bool {
-        // Delegate to the real sequencer if possible
-        let ptr = self.sequencer_ptr;
-        if ptr.is_null() {
-            return false;
-        }
-        // SAFETY: The underlying sequencer is owned elsewhere (Arc in production
-        // paths or stack in tests) and outlives the barrier created here.
-        unsafe { (&*ptr).is_available(sequence) }
-    }
-
-    fn get_highest_published_sequence(&self, next_sequence: i64, available_sequence: i64) -> i64 {
-        let ptr = self.sequencer_ptr;
-        if ptr.is_null() {
-            return available_sequence;
-        }
-        // SAFETY: See note above.
-        unsafe { (&*ptr).get_highest_published_sequence(next_sequence, available_sequence) }
-    }
-
-    fn new_barrier(&self, _sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
-        panic!("SequencerWrapper is a read-only proxy for barrier queries; new_barrier() must not be called")
-    }
-
-    fn add_gating_sequences(&self, _gating_sequences: &[Arc<Sequence>]) {
-        panic!("SequencerWrapper is a read-only proxy for barrier queries; add_gating_sequences() must not be called")
-    }
-
-    fn remove_gating_sequence(&self, _sequence: Arc<Sequence>) -> bool {
-        panic!("SequencerWrapper is a read-only proxy for barrier queries; remove_gating_sequence() must not be called")
-    }
-
-    fn get_minimum_sequence(&self) -> i64 {
-        panic!("SequencerWrapper is a read-only proxy for barrier queries; get_minimum_sequence() must not be called")
-    }
-
-    fn remaining_capacity(&self) -> i64 {
-        panic!("SequencerWrapper is a read-only proxy for barrier queries; remaining_capacity() must not be called")
-    }
-}
-
 /// Trait for sequencers that coordinate access to the ring buffer
 ///
 /// This trait defines the interface for sequencers, which are responsible
@@ -267,6 +145,125 @@ pub trait Sequencer: Send + Sync + std::fmt::Debug {
     fn has_available_capacity(&self, required_capacity: usize) -> bool;
 }
 
+/// Enum-based sequencer dispatch that eliminates vtable indirection.
+///
+/// Only two concrete sequencer types exist, so enum dispatch provides
+/// the same runtime polymorphism as `Arc<dyn Sequencer>` but with
+/// inline match dispatch instead of vtable lookups on every call.
+#[derive(Debug, Clone)]
+pub enum SequencerEnum {
+    /// Single-producer sequencer variant
+    Single(Arc<SingleProducerSequencer>),
+    /// Multi-producer sequencer variant
+    Multi(Arc<MultiProducerSequencer>),
+}
+
+impl SequencerEnum {
+    /// Create a new sequence barrier using this sequencer.
+    ///
+    /// Unlike the trait method, this passes the concrete `Arc` directly
+    /// to `ProcessingSequenceBarrier`, eliminating the unsafe `SequencerWrapper`.
+    pub fn new_barrier(&self, sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
+        match self {
+            SequencerEnum::Single(s) => s.new_barrier_typed(sequences_to_track),
+            SequencerEnum::Multi(m) => m.new_barrier_typed(sequences_to_track),
+        }
+    }
+}
+
+/// Macro to delegate all Sequencer trait methods via match dispatch.
+macro_rules! dispatch_sequencer {
+    ($self:ident, $method:ident $(, $arg:expr)*) => {
+        match $self {
+            SequencerEnum::Single(s) => s.$method($($arg),*),
+            SequencerEnum::Multi(m) => m.$method($($arg),*),
+        }
+    };
+}
+
+impl Sequencer for SequencerEnum {
+    #[inline]
+    fn get_cursor(&self) -> Arc<Sequence> {
+        dispatch_sequencer!(self, get_cursor)
+    }
+
+    #[inline]
+    fn get_buffer_size(&self) -> usize {
+        dispatch_sequencer!(self, get_buffer_size)
+    }
+
+    #[inline]
+    fn next(&self) -> Result<i64> {
+        dispatch_sequencer!(self, next)
+    }
+
+    #[inline]
+    fn next_n(&self, n: i64) -> Result<i64> {
+        dispatch_sequencer!(self, next_n, n)
+    }
+
+    #[inline]
+    fn try_next(&self) -> Option<i64> {
+        dispatch_sequencer!(self, try_next)
+    }
+
+    #[inline]
+    fn try_next_n(&self, n: i64) -> Option<i64> {
+        dispatch_sequencer!(self, try_next_n, n)
+    }
+
+    #[inline]
+    fn publish(&self, sequence: i64) {
+        dispatch_sequencer!(self, publish, sequence);
+    }
+
+    #[inline]
+    fn publish_range(&self, low: i64, high: i64) {
+        dispatch_sequencer!(self, publish_range, low, high);
+    }
+
+    #[inline]
+    fn is_available(&self, sequence: i64) -> bool {
+        dispatch_sequencer!(self, is_available, sequence)
+    }
+
+    #[inline]
+    fn get_highest_published_sequence(&self, next_sequence: i64, available_sequence: i64) -> i64 {
+        dispatch_sequencer!(self, get_highest_published_sequence, next_sequence, available_sequence)
+    }
+
+    #[inline]
+    fn add_gating_sequences(&self, gating_sequences: &[Arc<Sequence>]) {
+        dispatch_sequencer!(self, add_gating_sequences, gating_sequences);
+    }
+
+    #[inline]
+    fn remove_gating_sequence(&self, sequence: Arc<Sequence>) -> bool {
+        dispatch_sequencer!(self, remove_gating_sequence, sequence)
+    }
+
+    #[inline]
+    fn new_barrier(&self, sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
+        // Use the typed barrier creation that avoids SequencerWrapper
+        SequencerEnum::new_barrier(self, sequences_to_track)
+    }
+
+    #[inline]
+    fn get_minimum_sequence(&self) -> i64 {
+        dispatch_sequencer!(self, get_minimum_sequence)
+    }
+
+    #[inline]
+    fn remaining_capacity(&self) -> i64 {
+        dispatch_sequencer!(self, remaining_capacity)
+    }
+
+    #[inline]
+    fn has_available_capacity(&self, required_capacity: usize) -> bool {
+        dispatch_sequencer!(self, has_available_capacity, required_capacity)
+    }
+}
+
 /// Single producer sequencer
 ///
 /// This sequencer is optimized for scenarios where only one thread will be
@@ -312,6 +309,21 @@ impl SingleProducerSequencer {
             next_value: AtomicI64::new(-1),
             cached_value: AtomicI64::new(-1),
         }
+    }
+
+    /// Create a barrier that holds a `SequencerEnum::Single` reference back to this sequencer.
+    ///
+    /// This avoids the unsafe `SequencerWrapper` by passing the concrete `Arc` directly.
+    pub fn new_barrier_typed(
+        self: &Arc<Self>,
+        sequences_to_track: Vec<Arc<Sequence>>,
+    ) -> Arc<dyn SequenceBarrier> {
+        Arc::new(ProcessingSequenceBarrier::new(
+            self.cursor.clone(),
+            Arc::clone(&self.wait_strategy),
+            sequences_to_track,
+            SequencerEnum::Single(Arc::clone(self)),
+        ))
     }
 
     /// Check if there's available capacity for the required number of sequences
@@ -453,20 +465,8 @@ impl Sequencer for SingleProducerSequencer {
         }
     }
 
-    fn new_barrier(&self, sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
-        // Create a processing barrier with proper dependency tracking
-        // Delegate continuity queries through a thin wrapper that
-        // holds an unsafe back-reference to this sequencer.
-        let self_ptr: *const (dyn Sequencer + 'static) = self as &dyn Sequencer;
-        Arc::new(ProcessingSequenceBarrier::new(
-            self.cursor.clone(),
-            Arc::clone(&self.wait_strategy),
-            sequences_to_track,
-            Arc::new(SequencerWrapper::new(
-                self.buffer_size,
-                self_ptr,
-            )) as Arc<dyn Sequencer>,
-        ))
+    fn new_barrier(&self, _sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
+        panic!("Use SequencerEnum::new_barrier() or SingleProducerSequencer::new_barrier_typed() instead")
     }
 
     fn get_minimum_sequence(&self) -> i64 {
@@ -603,6 +603,21 @@ impl MultiProducerSequencer {
             cached_gating_sequence: CachePadded::new(AtomicI64::new(-1)),
             available_buffer,
         }
+    }
+
+    /// Create a barrier that holds a `SequencerEnum::Multi` reference back to this sequencer.
+    ///
+    /// This avoids the unsafe `SequencerWrapper` by passing the concrete `Arc` directly.
+    pub fn new_barrier_typed(
+        self: &Arc<Self>,
+        sequences_to_track: Vec<Arc<Sequence>>,
+    ) -> Arc<dyn SequenceBarrier> {
+        Arc::new(ProcessingSequenceBarrier::new(
+            self.cursor.clone(),
+            Arc::clone(&self.wait_strategy),
+            sequences_to_track,
+            SequencerEnum::Multi(Arc::clone(self)),
+        ))
     }
 
     /// Calculate the index in the available buffer for a given sequence
@@ -978,19 +993,8 @@ impl Sequencer for MultiProducerSequencer {
         }
     }
 
-    fn new_barrier(&self, sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
-        // Create a processing barrier with proper dependency tracking.
-        // The wrapper delegates continuity queries to the real sequencer.
-        let self_ptr: *const (dyn Sequencer + 'static) = self as &dyn Sequencer;
-        Arc::new(ProcessingSequenceBarrier::new(
-            self.cursor.clone(),
-            Arc::clone(&self.wait_strategy),
-            sequences_to_track,
-            Arc::new(SequencerWrapper::new(
-                self.buffer_size,
-                self_ptr,
-            )) as Arc<dyn Sequencer>,
-        ))
+    fn new_barrier(&self, _sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
+        panic!("Use SequencerEnum::new_barrier() or MultiProducerSequencer::new_barrier_typed() instead")
     }
 
     fn get_minimum_sequence(&self) -> i64 {
@@ -1220,10 +1224,10 @@ mod tests {
     #[test]
     fn test_single_producer_sequencer_barrier() {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = SingleProducerSequencer::new(8, wait_strategy);
+        let sequencer = Arc::new(SingleProducerSequencer::new(8, wait_strategy));
 
         let dep_seq = Arc::new(Sequence::new(0));
-        let barrier = sequencer.new_barrier(vec![dep_seq]);
+        let barrier = sequencer.new_barrier_typed(vec![dep_seq]);
 
         assert_eq!(barrier.get_cursor().get(), -1);
         assert!(!barrier.is_alerted());
@@ -1350,10 +1354,10 @@ mod tests {
     #[test]
     fn test_multi_producer_sequencer_barrier() {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = MultiProducerSequencer::new(8, wait_strategy);
+        let sequencer = Arc::new(MultiProducerSequencer::new(8, wait_strategy));
 
         let dep_seq = Arc::new(Sequence::new(0));
-        let barrier = sequencer.new_barrier(vec![dep_seq]);
+        let barrier = sequencer.new_barrier_typed(vec![dep_seq]);
 
         assert_eq!(barrier.get_cursor().get(), -1);
         assert!(!barrier.is_alerted());
@@ -1417,48 +1421,6 @@ mod tests {
 
         sequencer.publish(seq);
         assert!(sequencer.is_available(seq));
-    }
-
-    #[test]
-    fn test_sequencer_wrapper_functionality() {
-        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-
-        // Backing sequencer for delegation
-        let sp = SingleProducerSequencer::new(8, wait_strategy.clone());
-        let sp_ptr: *const (dyn Sequencer + 'static) = &sp as &dyn Sequencer;
-
-        // Test single producer wrapper — read-only queries that delegate
-        let wrapper = SequencerWrapper::new(8, sp_ptr);
-        assert_eq!(wrapper.get_buffer_size(), 8);
-        assert_eq!(wrapper.get_cursor().get(), -1);
-        // Delegated is_available should reflect real sequencer state (initially unpublished)
-        assert!(!wrapper.is_available(0));
-        assert_eq!(wrapper.get_highest_published_sequence(0, 5), 5);
-
-        // Test multi producer wrapper
-        let sp2 = SingleProducerSequencer::new(16, Arc::new(BlockingWaitStrategy::new()));
-        let ptr2: *const (dyn Sequencer + 'static) = &sp2 as &dyn Sequencer;
-        let wrapper = SequencerWrapper::new(16, ptr2);
-        assert_eq!(wrapper.get_buffer_size(), 16);
-        assert_eq!(wrapper.get_cursor().get(), -1);
-    }
-
-    #[test]
-    #[should_panic(expected = "read-only proxy")]
-    fn test_sequencer_wrapper_panics_on_next() {
-        let sp = SingleProducerSequencer::new(8, Arc::new(BlockingWaitStrategy::new()));
-        let ptr: *const (dyn Sequencer + 'static) = &sp as &dyn Sequencer;
-        let wrapper = SequencerWrapper::new(8, ptr);
-        let _ = wrapper.next();
-    }
-
-    #[test]
-    #[should_panic(expected = "read-only proxy")]
-    fn test_sequencer_wrapper_panics_on_publish() {
-        let sp = SingleProducerSequencer::new(8, Arc::new(BlockingWaitStrategy::new()));
-        let ptr: *const (dyn Sequencer + 'static) = &sp as &dyn Sequencer;
-        let wrapper = SequencerWrapper::new(8, ptr);
-        wrapper.publish(0);
     }
 
     #[test]
