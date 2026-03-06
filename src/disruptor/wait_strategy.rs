@@ -394,7 +394,10 @@ impl WaitStrategy for BlockingWaitStrategy {
     }
 
     fn signal_all_when_blocking(&self) {
-        // Signal all waiting threads using condvar
+        // Coordinate with the same mutex used by waiters so a producer cannot
+        // notify in the narrow window between the consumer's cursor check and
+        // its transition into the condvar wait state.
+        let _guard = self.mutex.lock();
         self.condvar.notify_all();
     }
 }
@@ -961,6 +964,43 @@ mod tests {
 
         // Test that signal_all_when_blocking doesn't panic
         strategy.signal_all_when_blocking();
+    }
+
+    #[test]
+    fn test_blocking_wait_strategy_signal_coordinates_with_waiter_mutex() {
+        use std::sync::mpsc::sync_channel;
+
+        let strategy = Arc::new(BlockingWaitStrategy::new());
+        let mut guard = strategy.mutex.lock();
+        let (ready_tx, ready_rx) = sync_channel(1);
+        let completed = Arc::new(AtomicBool::new(false));
+
+        let strategy_clone = Arc::clone(&strategy);
+        let completed_clone = Arc::clone(&completed);
+        let handle = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            strategy_clone.signal_all_when_blocking();
+            completed_clone.store(true, Ordering::Release);
+        });
+
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        thread::sleep(Duration::from_millis(10));
+
+        // `signal_all_when_blocking()` must synchronize with the same mutex used by
+        // waiters; otherwise the notify can be emitted before a waiter actually
+        // transitions into the condvar wait state, leading to lost wakeups.
+        assert!(
+            !completed.load(Ordering::Acquire),
+            "signal_all_when_blocking returned before the waiter released the mutex"
+        );
+
+        let timeout_result = strategy
+            .condvar
+            .wait_for(&mut guard, Duration::from_millis(100));
+        assert!(!timeout_result.timed_out());
+
+        handle.join().unwrap();
+        assert!(completed.load(Ordering::Acquire));
     }
 
     #[test]
