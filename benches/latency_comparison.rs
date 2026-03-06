@@ -11,13 +11,14 @@
 //! This benchmark suite compares the latency characteristics of the BadBatch
 //! Disruptor against other concurrency primitives like channels.
 
-use criterion::Throughput;
-use criterion::{criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion};
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::mpsc;
-use std::sync::Arc;
+use criterion::measurement::WallTime;
+use criterion::{
+    criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
+};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use badbatch::disruptor::{
     event_translator::ClosureEventTranslator, BusySpinWaitStrategy, DefaultEventFactory, Disruptor,
@@ -26,31 +27,29 @@ use badbatch::disruptor::{
 
 // Benchmark configuration constants
 const BUFFER_SIZE: usize = 1024;
-const SAMPLE_COUNT: usize = 500; // Reduced from 1000 to improve speed
+const BATCH_SIZE: usize = 500; // Batch size per Criterion iteration
 
 #[derive(Debug, Default, Clone, Copy)]
 struct LatencyEvent {
     id: i64,
     send_time: u64,
-    #[allow(dead_code)]
-    process_time: u64,
 }
 
-/// Event handler that measures processing latency
-struct LatencyHandler {
+/// Shared state for recording per-event latencies.
+struct LatencyState {
     latencies: Arc<Vec<AtomicI64>>,
-    processed: Arc<AtomicI64>,
-    write_index: Arc<AtomicI64>,
+    write_index: Arc<AtomicUsize>,
+    processed: Arc<AtomicUsize>,
 }
 
-impl LatencyHandler {
+impl LatencyState {
     fn new(capacity: usize) -> Self {
         let latencies: Vec<AtomicI64> = (0..capacity).map(|_| AtomicI64::new(0)).collect();
 
         Self {
             latencies: Arc::new(latencies),
-            processed: Arc::new(AtomicI64::new(0)),
-            write_index: Arc::new(AtomicI64::new(0)),
+            write_index: Arc::new(AtomicUsize::new(0)),
+            processed: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -58,16 +57,27 @@ impl LatencyHandler {
         Arc::clone(&self.latencies)
     }
 
-    fn processed_counter(&self) -> Arc<AtomicI64> {
-        Arc::clone(&self.processed)
-    }
-
-    fn write_index(&self) -> Arc<AtomicI64> {
+    fn write_index(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.write_index)
     }
 
-    fn capacity(&self) -> i64 {
-        self.latencies.len() as i64
+    fn processed(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.processed)
+    }
+
+    fn capacity(&self) -> usize {
+        self.latencies.len()
+    }
+}
+
+/// Disruptor event handler that records end-to-end publish→on_event latency.
+struct LatencyHandler {
+    state: LatencyState,
+}
+
+impl LatencyHandler {
+    fn new(state: LatencyState) -> Self {
+        Self { state }
     }
 }
 
@@ -81,17 +91,14 @@ impl EventHandler<LatencyEvent> for LatencyHandler {
         let process_time = get_timestamp_nanos();
         let latency = process_time - event.send_time;
 
-        let capacity = self.capacity();
+        let capacity = self.state.capacity();
         if capacity == 0 {
             return Ok(());
         }
 
-        let index = self.write_index.fetch_add(1, Ordering::Release) % capacity;
-        if index >= 0 {
-            self.latencies[index as usize].store(latency as i64, Ordering::Release);
-        }
-
-        self.processed.fetch_add(1, Ordering::Release);
+        let index = self.state.write_index.fetch_add(1, Ordering::Relaxed) % capacity;
+        self.state.latencies[index].store(latency as i64, Ordering::Relaxed);
+        self.state.processed.fetch_add(1, Ordering::Release);
         Ok(())
     }
 }
@@ -135,13 +142,41 @@ fn calculate_latency_stats(latencies: &[i64]) -> (f64, f64, f64, f64, f64) {
     (mean, median, p95, p99, max)
 }
 
+fn wait_for_processed(processed: &AtomicUsize, target: usize) {
+    while processed.load(Ordering::Acquire) < target {
+        std::hint::spin_loop();
+    }
+}
+
+fn collect_latencies(state: &LatencyState, expected: usize) -> Vec<i64> {
+    let count = state.write_index.load(Ordering::Acquire).min(expected);
+    state
+        .latencies
+        .iter()
+        .take(count)
+        .map(|lat| lat.load(Ordering::Acquire))
+        .filter(|&lat| lat > 0)
+        .collect()
+}
+
+fn print_latency_stats(label: &str, latencies: &[i64]) {
+    let (mean, median, p95, p99, max) = calculate_latency_stats(latencies);
+    println!("\n{label} Latency Statistics (nanoseconds):");
+    println!("  Mean: {mean:.2}");
+    println!("  Median: {median:.2}");
+    println!("  95th percentile: {p95:.2}");
+    println!("  99th percentile: {p99:.2}");
+    println!("  Max: {max:.2}");
+}
+
 /// Benchmark Disruptor latency with BusySpinWaitStrategy
-fn benchmark_disruptor_latency(group: &mut BenchmarkGroup<criterion::measurement::WallTime>) {
+fn benchmark_disruptor_latency(group: &mut BenchmarkGroup<WallTime>) {
     let factory = DefaultEventFactory::<LatencyEvent>::new();
-    let handler = LatencyHandler::new(SAMPLE_COUNT);
-    let latencies = handler.latencies();
-    let processed = handler.processed_counter();
-    let write_index = handler.write_index();
+    let state = LatencyState::new(BATCH_SIZE);
+    let latencies = state.latencies();
+    let processed = state.processed();
+    let write_index = state.write_index();
+    let handler = LatencyHandler::new(state);
 
     let mut disruptor = Disruptor::new(
         factory,
@@ -157,20 +192,16 @@ fn benchmark_disruptor_latency(group: &mut BenchmarkGroup<criterion::measurement
 
     let benchmark_id = BenchmarkId::new("Disruptor", "BusySpin");
 
-    group.throughput(Throughput::Elements(SAMPLE_COUNT as u64));
+    group.throughput(Throughput::Elements(BATCH_SIZE as u64));
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
-            use std::time::Instant;
             let mut total = Duration::ZERO;
             for _ in 0..iters {
-                processed.store(0, Ordering::Release);
-                write_index.store(0, Ordering::Release);
-                for latency in latencies.iter() {
-                    latency.store(0, Ordering::Release);
-                }
+                let start_processed = processed.load(Ordering::Acquire);
+                let target = start_processed + BATCH_SIZE;
 
                 let iter_start = Instant::now();
-                for sample in 0..SAMPLE_COUNT {
+                for sample in 0..BATCH_SIZE {
                     let send_time = get_timestamp_nanos();
                     let sample_id = sample as i64;
                     disruptor
@@ -183,9 +214,7 @@ fn benchmark_disruptor_latency(group: &mut BenchmarkGroup<criterion::measurement
                         .unwrap();
                 }
 
-                while processed.load(Ordering::Acquire) < SAMPLE_COUNT as i64 {
-                    std::hint::spin_loop();
-                }
+                wait_for_processed(&processed, target);
 
                 total += iter_start.elapsed();
             }
@@ -193,101 +222,150 @@ fn benchmark_disruptor_latency(group: &mut BenchmarkGroup<criterion::measurement
         });
     });
 
-    // Print latency statistics
-    let collected_latencies: Vec<i64> = latencies
-        .iter()
-        .map(|lat| lat.load(Ordering::Acquire))
-        .filter(|&lat| lat > 0)
-        .collect();
-
-    let (mean, median, p95, p99, max) = calculate_latency_stats(&collected_latencies);
-
-    println!("\nDisruptor Latency Statistics (nanoseconds):");
-    println!("  Mean: {mean:.2}");
-    println!("  Median: {median:.2}");
-    println!("  95th percentile: {p95:.2}");
-    println!("  99th percentile: {p99:.2}");
-    println!("  Max: {max:.2}");
+    // Collect a fresh latency distribution sample outside the timed section.
+    write_index.store(0, Ordering::Relaxed);
+    let start_processed = processed.load(Ordering::Acquire);
+    let target = start_processed + BATCH_SIZE;
+    for sample in 0..BATCH_SIZE {
+        let send_time = get_timestamp_nanos();
+        let sample_id = sample as i64;
+        disruptor
+            .publish_event(ClosureEventTranslator::new(
+                move |event: &mut LatencyEvent, _seq: i64| {
+                    event.id = std::hint::black_box(sample_id);
+                    event.send_time = send_time;
+                },
+            ))
+            .unwrap();
+    }
+    wait_for_processed(&processed, target);
+    let collected_latencies = collect_latencies(
+        &LatencyState {
+            latencies,
+            write_index,
+            processed,
+        },
+        BATCH_SIZE,
+    );
+    print_latency_stats("Disruptor", &collected_latencies);
 
     disruptor.shutdown().unwrap();
 }
 
-/// Benchmark std::sync::mpsc channel latency
-fn benchmark_mpsc_latency(group: &mut BenchmarkGroup<criterion::measurement::WallTime>) {
-    let benchmark_id = BenchmarkId::new("MPSC", "Channel");
+/// Benchmark std::sync::mpsc::sync_channel latency (steady-state, no per-iter thread spawn).
+fn benchmark_std_mpsc_latency(group: &mut BenchmarkGroup<WallTime>) {
+    let benchmark_id = BenchmarkId::new("StdMpsc", "sync_channel");
 
+    let state = LatencyState::new(BATCH_SIZE);
+    let processed = state.processed();
+    let write_index = state.write_index();
+
+    let (sender, receiver) = mpsc::sync_channel::<(i64, u64)>(BUFFER_SIZE);
+    let latencies = state.latencies();
+
+    let receiver_handle = thread::spawn(move || {
+        for (_id, send_time) in receiver.iter() {
+            let process_time = get_timestamp_nanos();
+            let latency = process_time - send_time;
+
+            let index = write_index.fetch_add(1, Ordering::Relaxed) % BATCH_SIZE;
+            latencies[index].store(latency as i64, Ordering::Relaxed);
+            processed.fetch_add(1, Ordering::Release);
+        }
+    });
+
+    group.throughput(Throughput::Elements(BATCH_SIZE as u64));
     group.bench_function(benchmark_id, |b| {
-        b.iter(|| {
-            // Create fresh channel and thread for single measurement
-            let (sender, receiver) = mpsc::channel();
-            let counter = Arc::new(AtomicI64::new(0));
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let start_processed = state.processed.load(Ordering::Acquire);
+                let target = start_processed + BATCH_SIZE;
 
-            let counter_clone = counter.clone();
-            let receiver_handle = thread::spawn(move || {
-                if let Ok((_id, _send_time)) = receiver.recv() {
-                    counter_clone.store(1, Ordering::Release);
+                let iter_start = Instant::now();
+                for i in 0..BATCH_SIZE {
+                    let send_time = get_timestamp_nanos();
+                    sender.send((i as i64, send_time)).unwrap();
                 }
-            });
-
-            // Measure single event latency
-            let _send_time = get_timestamp_nanos();
-            if sender.send((std::hint::black_box(1), _send_time)).is_ok() {
-                // Wait for the single event to be processed
-                while counter.load(Ordering::Acquire) < 1 {
-                    std::hint::spin_loop();
-                }
+                wait_for_processed(&state.processed, target);
+                total += iter_start.elapsed();
             }
-
-            // Close sender to signal receiver to stop
-            drop(sender);
-            receiver_handle.join().unwrap();
-
-            std::hint::black_box(())
+            total
         })
     });
 
-    // Note: Individual latency statistics are not printed for MPSC channel
-    // because latencies are measured inside each iteration. The timing
-    // information is captured by Criterion's measurement framework.
+    // Collect a fresh latency distribution sample outside the timed section.
+    state.write_index.store(0, Ordering::Relaxed);
+    let start_processed = state.processed.load(Ordering::Acquire);
+    let target = start_processed + BATCH_SIZE;
+    for i in 0..BATCH_SIZE {
+        let send_time = get_timestamp_nanos();
+        sender.send((i as i64, send_time)).unwrap();
+    }
+    wait_for_processed(&state.processed, target);
+    let collected_latencies = collect_latencies(&state, BATCH_SIZE);
+    print_latency_stats("StdMpsc", &collected_latencies);
+
+    drop(sender);
+    receiver_handle.join().unwrap();
 }
 
-/// Benchmark crossbeam channel latency for comparison
-fn benchmark_crossbeam_latency(group: &mut BenchmarkGroup<criterion::measurement::WallTime>) {
-    let benchmark_id = BenchmarkId::new("Crossbeam", "Channel");
+/// Benchmark crossbeam bounded channel latency (steady-state, no per-iter thread spawn).
+fn benchmark_crossbeam_latency(group: &mut BenchmarkGroup<WallTime>) {
+    let benchmark_id = BenchmarkId::new("Crossbeam", "bounded");
 
+    let state = LatencyState::new(BATCH_SIZE);
+    let processed = state.processed();
+    let write_index = state.write_index();
+
+    let (sender, receiver) = crossbeam::channel::bounded::<(i64, u64)>(BUFFER_SIZE);
+    let latencies = state.latencies();
+
+    let receiver_handle = thread::spawn(move || {
+        while let Ok((_id, send_time)) = receiver.recv() {
+            let process_time = get_timestamp_nanos();
+            let latency = process_time - send_time;
+
+            let index = write_index.fetch_add(1, Ordering::Relaxed) % BATCH_SIZE;
+            latencies[index].store(latency as i64, Ordering::Relaxed);
+            processed.fetch_add(1, Ordering::Release);
+        }
+    });
+
+    group.throughput(Throughput::Elements(BATCH_SIZE as u64));
     group.bench_function(benchmark_id, |b| {
-        b.iter(|| {
-            // Create fresh channel and thread for single measurement
-            let (sender, receiver) = crossbeam::channel::bounded(BUFFER_SIZE);
-            let counter = Arc::new(AtomicI64::new(0));
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let start_processed = state.processed.load(Ordering::Acquire);
+                let target = start_processed + BATCH_SIZE;
 
-            let counter_clone = counter.clone();
-            let receiver_handle = thread::spawn(move || {
-                if let Ok((_id, _send_time)) = receiver.recv() {
-                    counter_clone.store(1, Ordering::Release);
+                let iter_start = Instant::now();
+                for i in 0..BATCH_SIZE {
+                    let send_time = get_timestamp_nanos();
+                    sender.send((i as i64, send_time)).unwrap();
                 }
-            });
-
-            // Measure single event latency
-            let _send_time = get_timestamp_nanos();
-            if sender.send((std::hint::black_box(1), _send_time)).is_ok() {
-                // Wait for the single event to be processed
-                while counter.load(Ordering::Acquire) < 1 {
-                    std::hint::spin_loop();
-                }
+                wait_for_processed(&state.processed, target);
+                total += iter_start.elapsed();
             }
-
-            // Close sender to signal receiver to stop
-            drop(sender);
-            receiver_handle.join().unwrap();
-
-            std::hint::black_box(())
+            total
         })
     });
 
-    // Note: Individual latency statistics are not printed for Crossbeam channel
-    // because latencies are measured inside each iteration. The timing
-    // information is captured by Criterion's measurement framework.
+    // Collect a fresh latency distribution sample outside the timed section.
+    state.write_index.store(0, Ordering::Relaxed);
+    let start_processed = state.processed.load(Ordering::Acquire);
+    let target = start_processed + BATCH_SIZE;
+    for i in 0..BATCH_SIZE {
+        let send_time = get_timestamp_nanos();
+        sender.send((i as i64, send_time)).unwrap();
+    }
+    wait_for_processed(&state.processed, target);
+    let collected_latencies = collect_latencies(&state, BATCH_SIZE);
+    print_latency_stats("Crossbeam", &collected_latencies);
+
+    drop(sender);
+    receiver_handle.join().unwrap();
 }
 
 /// Main latency comparison benchmark function
@@ -300,7 +378,7 @@ pub fn latency_benchmark(c: &mut Criterion) {
     group.sample_size(20); // Smaller sample size for latency tests
 
     benchmark_disruptor_latency(&mut group);
-    benchmark_mpsc_latency(&mut group);
+    benchmark_std_mpsc_latency(&mut group);
     benchmark_crossbeam_latency(&mut group);
 
     group.finish();

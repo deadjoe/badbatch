@@ -64,7 +64,7 @@ impl EventHandler<PipelineEvent> for Stage1Handler {
     ) -> DisruptorResult<()> {
         // Simulate input validation and normalization
         event.stage1_result = std::hint::black_box(event.id * 2 + 1);
-        self.processed_count.fetch_add(1, Ordering::Release);
+        self.processed_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -95,7 +95,7 @@ impl EventHandler<PipelineEvent> for Stage2Handler {
     ) -> DisruptorResult<()> {
         // Simulate business logic processing
         event.stage2_result = std::hint::black_box(event.stage1_result * 3 + event.id);
-        self.processed_count.fetch_add(1, Ordering::Release);
+        self.processed_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -126,7 +126,7 @@ impl EventHandler<PipelineEvent> for Stage3Handler {
     ) -> DisruptorResult<()> {
         // Simulate aggregation and enrichment
         event.stage3_result = std::hint::black_box(event.stage2_result + event.stage1_result / 2);
-        self.processed_count.fetch_add(1, Ordering::Release);
+        self.processed_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -163,8 +163,8 @@ impl EventHandler<PipelineEvent> for FinalHandler {
     ) -> DisruptorResult<()> {
         // Simulate final processing and output
         event.final_result = std::hint::black_box(event.stage3_result + event.stage2_result);
-        self.last_id.store(event.id, Ordering::Release);
-        self.processed_count.fetch_add(1, Ordering::Release);
+        self.last_id.store(event.id, Ordering::Relaxed);
+        self.processed_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -174,11 +174,11 @@ fn wait_for_pipeline_completion(counter: &Arc<AtomicI64>, expected: i64, timeout
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
 
-    while counter.load(Ordering::Acquire) < expected {
+    while counter.load(Ordering::Relaxed) < expected {
         if start.elapsed() > timeout {
             eprintln!(
                 "WARNING: Pipeline stage timed out waiting for {expected} events, got {}",
-                counter.load(Ordering::Acquire)
+                counter.load(Ordering::Relaxed)
             );
             return false;
         }
@@ -226,8 +226,8 @@ fn benchmark_two_stage_pipeline(
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                stage1_count.store(0, Ordering::Release);
-                stage2_count.store(0, Ordering::Release);
+                stage1_count.store(0, Ordering::Relaxed);
+                stage2_count.store(0, Ordering::Relaxed);
 
                 for i in 1..=burst_size {
                     disruptor
@@ -299,7 +299,7 @@ fn benchmark_three_stage_pipeline(
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                stage3_count.store(0, Ordering::Release);
+                stage3_count.store(0, Ordering::Relaxed);
 
                 for i in 1..=burst_size {
                     disruptor
@@ -374,8 +374,8 @@ fn benchmark_four_stage_pipeline(
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                final_count.store(0, Ordering::Release);
-                last_id.store(0, Ordering::Release);
+                final_count.store(0, Ordering::Relaxed);
+                last_id.store(0, Ordering::Relaxed);
 
                 for i in 1..=burst_size {
                     disruptor

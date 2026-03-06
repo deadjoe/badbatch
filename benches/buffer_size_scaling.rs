@@ -81,8 +81,8 @@ impl EventHandler<ScalingEvent> for ScalingHandler {
         let sum: i64 = event.data.iter().sum();
         std::hint::black_box(sum);
 
-        self.last_id.store(event.id, Ordering::Release);
-        self.counter.fetch_add(1, Ordering::Release);
+        self.last_id.store(event.id, Ordering::Relaxed);
+        self.counter.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -92,11 +92,11 @@ fn wait_for_completion(last_id: &Arc<AtomicI64>, expected: i64, timeout_ms: u64)
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
 
-    while last_id.load(Ordering::Acquire) < expected {
+    while last_id.load(Ordering::Relaxed) < expected {
         if start.elapsed() > timeout {
             eprintln!(
                 "WARNING: Benchmark timed out waiting for {expected} events, got {}",
-                last_id.load(Ordering::Acquire)
+                last_id.load(Ordering::Relaxed)
             );
             return false;
         }
@@ -110,11 +110,11 @@ fn wait_for_completion_yielding(last_id: &Arc<AtomicI64>, expected: i64, timeout
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
 
-    while last_id.load(Ordering::Acquire) < expected {
+    while last_id.load(Ordering::Relaxed) < expected {
         if start.elapsed() > timeout {
             eprintln!(
                 "WARNING: Benchmark timed out waiting for {expected} events, got {}",
-                last_id.load(Ordering::Acquire)
+                last_id.load(Ordering::Relaxed)
             );
             return false;
         }
@@ -128,11 +128,11 @@ fn wait_for_completion_sleeping(last_id: &Arc<AtomicI64>, expected: i64, timeout
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
 
-    while last_id.load(Ordering::Acquire) < expected {
+    while last_id.load(Ordering::Relaxed) < expected {
         if start.elapsed() > timeout {
             eprintln!(
                 "WARNING: Benchmark timed out waiting for {expected} events, got {}",
-                last_id.load(Ordering::Acquire)
+                last_id.load(Ordering::Relaxed)
             );
             return false;
         }
@@ -150,12 +150,12 @@ fn wait_for_counter_increase(
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
 
-    while counter.load(Ordering::Acquire) <= initial_count {
+    while counter.load(Ordering::Relaxed) <= initial_count {
         if start.elapsed() > timeout {
             eprintln!(
                 "WARNING: Counter timeout, expected > {}, got {}",
                 initial_count,
-                counter.load(Ordering::Acquire)
+                counter.load(Ordering::Relaxed)
             );
             return false;
         }
@@ -175,43 +175,48 @@ fn benchmark_fast_processing_scaling(
 
     group.throughput(Throughput::Elements(workload_size));
     group.bench_function(benchmark_id, |b| {
-        b.iter(|| {
-            // Create fresh Disruptor instance for each benchmark run
-            let factory = DefaultEventFactory::<ScalingEvent>::new();
-            let handler = ScalingHandler::new(0); // No artificial processing delay
-            let _counter = handler.get_counter();
-            let last_id = handler.get_last_id();
+        let factory = DefaultEventFactory::<ScalingEvent>::new();
+        let handler = ScalingHandler::new(0); // No artificial processing delay
+        let last_id = handler.get_last_id();
 
-            let mut disruptor = Disruptor::new(
-                factory,
-                buffer_size,
-                ProducerType::Single,
-                Box::new(BusySpinWaitStrategy::new()),
-            )
-            .unwrap()
-            .handle_events_with(handler)
-            .build();
+        let mut disruptor = Disruptor::new(
+            factory,
+            buffer_size,
+            ProducerType::Single,
+            Box::new(BusySpinWaitStrategy::new()),
+        )
+        .unwrap()
+        .handle_events_with(handler)
+        .build();
 
-            disruptor.start().unwrap();
+        disruptor.start().unwrap();
 
-            for i in 1..=workload_size {
-                disruptor
-                    .publish_event(ClosureEventTranslator::new(
-                        move |event: &mut ScalingEvent, _seq: i64| {
-                            event.id = std::hint::black_box(i as i64);
-                            event.data = vec![i as i64; 4]; // Small payload
-                        },
-                    ))
-                    .unwrap();
+        b.iter_custom(|iters| {
+            let start = Instant::now();
+            for _ in 0..iters {
+                last_id.store(0, Ordering::Relaxed);
+
+                for i in 1..=workload_size {
+                    disruptor
+                        .publish_event(ClosureEventTranslator::new(
+                            move |event: &mut ScalingEvent, _seq: i64| {
+                                event.id = std::hint::black_box(i as i64);
+                                event.data.clear();
+                                event.data.resize(4, i as i64); // Small payload (steady-state, no re-alloc)
+                            },
+                        ))
+                        .unwrap();
+                }
+
+                // Wait for all events to be processed with timeout
+                if !wait_for_completion(&last_id, workload_size as i64, TIMEOUT_MS) {
+                    panic!("Fast processing benchmark failed: events not processed within timeout");
+                }
             }
+            start.elapsed()
+        });
 
-            // Wait for all events to be processed with timeout
-            if !wait_for_completion(&last_id, workload_size as i64, TIMEOUT_MS) {
-                panic!("Fast processing benchmark failed: events not processed within timeout");
-            }
-
-            disruptor.shutdown().unwrap();
-        })
+        disruptor.shutdown().unwrap();
     });
 }
 
@@ -226,43 +231,50 @@ fn benchmark_medium_processing_scaling(
 
     group.throughput(Throughput::Elements(workload_size));
     group.bench_function(benchmark_id, |b| {
-        b.iter(|| {
-            // Create fresh Disruptor instance for each benchmark run
-            let factory = DefaultEventFactory::<ScalingEvent>::new();
-            let handler = ScalingHandler::new(1_000); // 1 microsecond processing delay
-            let _counter = handler.get_counter();
-            let last_id = handler.get_last_id();
+        let factory = DefaultEventFactory::<ScalingEvent>::new();
+        let handler = ScalingHandler::new(1_000); // 1 microsecond processing delay
+        let last_id = handler.get_last_id();
 
-            let mut disruptor = Disruptor::new(
-                factory,
-                buffer_size,
-                ProducerType::Single,
-                Box::new(YieldingWaitStrategy::new()),
-            )
-            .unwrap()
-            .handle_events_with(handler)
-            .build();
+        let mut disruptor = Disruptor::new(
+            factory,
+            buffer_size,
+            ProducerType::Single,
+            Box::new(YieldingWaitStrategy::new()),
+        )
+        .unwrap()
+        .handle_events_with(handler)
+        .build();
 
-            disruptor.start().unwrap();
+        disruptor.start().unwrap();
 
-            for i in 1..=workload_size {
-                disruptor
-                    .publish_event(ClosureEventTranslator::new(
-                        move |event: &mut ScalingEvent, _seq: i64| {
-                            event.id = std::hint::black_box(i as i64);
-                            event.data = vec![i as i64; 16]; // Medium payload
-                        },
-                    ))
-                    .unwrap();
+        b.iter_custom(|iters| {
+            let start = Instant::now();
+            for _ in 0..iters {
+                last_id.store(0, Ordering::Relaxed);
+
+                for i in 1..=workload_size {
+                    disruptor
+                        .publish_event(ClosureEventTranslator::new(
+                            move |event: &mut ScalingEvent, _seq: i64| {
+                                event.id = std::hint::black_box(i as i64);
+                                event.data.clear();
+                                event.data.resize(16, i as i64); // Medium payload (steady-state)
+                            },
+                        ))
+                        .unwrap();
+                }
+
+                // Wait for all events to be processed with timeout and yielding
+                if !wait_for_completion_yielding(&last_id, workload_size as i64, TIMEOUT_MS) {
+                    panic!(
+                        "Medium processing benchmark failed: events not processed within timeout"
+                    );
+                }
             }
+            start.elapsed()
+        });
 
-            // Wait for all events to be processed with timeout and yielding
-            if !wait_for_completion_yielding(&last_id, workload_size as i64, TIMEOUT_MS) {
-                panic!("Medium processing benchmark failed: events not processed within timeout");
-            }
-
-            disruptor.shutdown().unwrap();
-        })
+        disruptor.shutdown().unwrap();
     });
 }
 
@@ -277,43 +289,48 @@ fn benchmark_slow_processing_scaling(
 
     group.throughput(Throughput::Elements(workload_size));
     group.bench_function(benchmark_id, |b| {
-        b.iter(|| {
-            // Create fresh Disruptor instance for each benchmark run
-            let factory = DefaultEventFactory::<ScalingEvent>::new();
-            let handler = ScalingHandler::new(10_000); // 10 microseconds processing delay
-            let _counter = handler.get_counter();
-            let last_id = handler.get_last_id();
+        let factory = DefaultEventFactory::<ScalingEvent>::new();
+        let handler = ScalingHandler::new(10_000); // 10 microseconds processing delay
+        let last_id = handler.get_last_id();
 
-            let mut disruptor = Disruptor::new(
-                factory,
-                buffer_size,
-                ProducerType::Single,
-                Box::new(YieldingWaitStrategy::new()),
-            )
-            .unwrap()
-            .handle_events_with(handler)
-            .build();
+        let mut disruptor = Disruptor::new(
+            factory,
+            buffer_size,
+            ProducerType::Single,
+            Box::new(YieldingWaitStrategy::new()),
+        )
+        .unwrap()
+        .handle_events_with(handler)
+        .build();
 
-            disruptor.start().unwrap();
+        disruptor.start().unwrap();
 
-            for i in 1..=workload_size {
-                disruptor
-                    .publish_event(ClosureEventTranslator::new(
-                        move |event: &mut ScalingEvent, _seq: i64| {
-                            event.id = std::hint::black_box(i as i64);
-                            event.data = vec![i as i64; 64]; // Large payload
-                        },
-                    ))
-                    .unwrap();
+        b.iter_custom(|iters| {
+            let start = Instant::now();
+            for _ in 0..iters {
+                last_id.store(0, Ordering::Relaxed);
+
+                for i in 1..=workload_size {
+                    disruptor
+                        .publish_event(ClosureEventTranslator::new(
+                            move |event: &mut ScalingEvent, _seq: i64| {
+                                event.id = std::hint::black_box(i as i64);
+                                event.data.clear();
+                                event.data.resize(64, i as i64); // Large payload (steady-state)
+                            },
+                        ))
+                        .unwrap();
+                }
+
+                // Wait for all events to be processed with timeout and sleeping
+                if !wait_for_completion_sleeping(&last_id, workload_size as i64, TIMEOUT_MS) {
+                    panic!("Slow processing benchmark failed: events not processed within timeout");
+                }
             }
+            start.elapsed()
+        });
 
-            // Wait for all events to be processed with timeout and sleeping
-            if !wait_for_completion_sleeping(&last_id, workload_size as i64, TIMEOUT_MS) {
-                panic!("Slow processing benchmark failed: events not processed within timeout");
-            }
-
-            disruptor.shutdown().unwrap();
-        })
+        disruptor.shutdown().unwrap();
     });
 }
 
@@ -342,6 +359,10 @@ fn benchmark_memory_scaling(group: &mut BenchmarkGroup<WallTime>, buffer_size: u
 
             // Test memory allocation patterns by creating events with different payload sizes
             for payload_size in [1, 10, 100] {
+                // Capture the counter *before* publishing to avoid a race where the event is
+                // processed before we read `initial_count`.
+                let initial_count = counter.load(Ordering::Relaxed);
+
                 let success = disruptor.try_publish_event(ClosureEventTranslator::new(
                     move |event: &mut ScalingEvent, _seq: i64| {
                         event.id = std::hint::black_box(1);
@@ -351,7 +372,6 @@ fn benchmark_memory_scaling(group: &mut BenchmarkGroup<WallTime>, buffer_size: u
 
                 if success {
                     // Wait for event to be processed with timeout
-                    let initial_count = counter.load(Ordering::Acquire);
                     if !wait_for_counter_increase(&counter, initial_count, TIMEOUT_MS) {
                         eprintln!(
                             "WARNING: Memory scaling timeout for payload_size {payload_size}"
@@ -377,51 +397,53 @@ fn benchmark_buffer_utilization(
 
     group.throughput(Throughput::Elements(burst_size));
     group.bench_function(benchmark_id, |b| {
-        b.iter(|| {
-            // Create fresh Disruptor instance for each benchmark run
-            let factory = DefaultEventFactory::<ScalingEvent>::new();
-            let handler = ScalingHandler::new(5_000); // 5 microseconds delay to create backpressure
-            let _counter = handler.get_counter();
-            let last_id = handler.get_last_id();
+        let factory = DefaultEventFactory::<ScalingEvent>::new();
+        let handler = ScalingHandler::new(5_000); // 5 microseconds delay to create backpressure
+        let last_id = handler.get_last_id();
 
-            let mut disruptor = Disruptor::new(
-                factory,
-                buffer_size,
-                ProducerType::Single,
-                Box::new(BusySpinWaitStrategy::new()),
-            )
-            .unwrap()
-            .handle_events_with(handler)
-            .build();
+        let mut disruptor = Disruptor::new(
+            factory,
+            buffer_size,
+            ProducerType::Single,
+            Box::new(BusySpinWaitStrategy::new()),
+        )
+        .unwrap()
+        .handle_events_with(handler)
+        .build();
 
-            disruptor.start().unwrap();
+        disruptor.start().unwrap();
 
-            // Publish a burst of events
-            for i in 1..=burst_size {
-                // Use try_publish to test buffer utilization
-                loop {
-                    let success = disruptor.try_publish_event(ClosureEventTranslator::new(
+        b.iter_custom(|iters| {
+            let start = Instant::now();
+            for _ in 0..iters {
+                last_id.store(0, Ordering::Relaxed);
+
+                // Publish a burst of events
+                for i in 1..=burst_size {
+                    // Use try_publish to test buffer utilization
+                    while !disruptor.try_publish_event(ClosureEventTranslator::new(
                         move |event: &mut ScalingEvent, _seq: i64| {
                             event.id = std::hint::black_box(i as i64);
-                            event.data = vec![i as i64; 8];
+                            event.data.clear();
+                            event.data.resize(8, i as i64);
                         },
-                    ));
-
-                    if success {
-                        break;
+                    )) {
+                        // Buffer is full, brief wait
+                        std::hint::spin_loop();
                     }
-                    // Buffer is full, brief wait
-                    std::hint::spin_loop();
+                }
+
+                // Wait for all events to be processed with timeout
+                if !wait_for_completion(&last_id, burst_size as i64, TIMEOUT_MS) {
+                    panic!(
+                        "Buffer utilization benchmark failed: events not processed within timeout"
+                    );
                 }
             }
+            start.elapsed()
+        });
 
-            // Wait for all events to be processed with timeout
-            if !wait_for_completion(&last_id, burst_size as i64, TIMEOUT_MS) {
-                panic!("Buffer utilization benchmark failed: events not processed within timeout");
-            }
-
-            disruptor.shutdown().unwrap();
-        })
+        disruptor.shutdown().unwrap();
     });
 }
 

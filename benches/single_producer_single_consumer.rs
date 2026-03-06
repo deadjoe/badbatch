@@ -20,9 +20,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use badbatch::disruptor::{
-    event_translator::ClosureEventTranslator, BlockingWaitStrategy, BusySpinWaitStrategy,
-    DefaultEventFactory, Disruptor, EventHandler, ProducerType, Result as DisruptorResult,
-    SleepingWaitStrategy, YieldingWaitStrategy,
+    build_single_producer, event_translator::ClosureEventTranslator, BlockingWaitStrategy,
+    BusySpinWaitStrategy, DefaultEventFactory, Disruptor, EventHandler, ProducerType,
+    Result as DisruptorResult, SleepingWaitStrategy, YieldingWaitStrategy,
 };
 
 // Benchmark configuration constants
@@ -61,7 +61,7 @@ impl EventHandler<BenchmarkEvent> for CountingSink {
     ) -> DisruptorResult<()> {
         // Minimal processing - just increment counter
         std::hint::black_box(event.value);
-        self.counter.fetch_add(1, Ordering::Release);
+        self.counter.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -71,11 +71,11 @@ fn wait_for_completion(counter: &Arc<AtomicI64>, expected: i64, timeout_ms: u64)
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
 
-    while counter.load(Ordering::Acquire) < expected {
+    while counter.load(Ordering::Relaxed) < expected {
         if start.elapsed() > timeout {
             eprintln!(
                 "WARNING: Benchmark timed out waiting for {expected} events, got {}",
-                counter.load(Ordering::Acquire)
+                counter.load(Ordering::Relaxed)
             );
             return false;
         }
@@ -89,11 +89,11 @@ fn wait_for_completion_yielding(counter: &Arc<AtomicI64>, expected: i64, timeout
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
 
-    while counter.load(Ordering::Acquire) < expected {
+    while counter.load(Ordering::Relaxed) < expected {
         if start.elapsed() > timeout {
             eprintln!(
                 "WARNING: Benchmark timed out waiting for {expected} events, got {}",
-                counter.load(Ordering::Acquire)
+                counter.load(Ordering::Relaxed)
             );
             return false;
         }
@@ -107,11 +107,11 @@ fn wait_for_completion_sleeping(counter: &Arc<AtomicI64>, expected: i64, timeout
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
 
-    while counter.load(Ordering::Acquire) < expected {
+    while counter.load(Ordering::Relaxed) < expected {
         if start.elapsed() > timeout {
             eprintln!(
                 "WARNING: Benchmark timed out waiting for {expected} events, got {}",
-                counter.load(Ordering::Acquire)
+                counter.load(Ordering::Relaxed)
             );
             return false;
         }
@@ -130,12 +130,12 @@ fn baseline_measurement(group: &mut BenchmarkGroup<WallTime>, burst_size: u64) {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Release);
+                counter.store(0, Ordering::Relaxed);
                 for i in 1..=burst_size {
-                    counter.store(std::hint::black_box(i as i64), Ordering::Release);
+                    counter.store(std::hint::black_box(i as i64), Ordering::Relaxed);
                 }
                 // Simple verification
-                assert_eq!(counter.load(Ordering::Acquire), burst_size as i64);
+                assert_eq!(counter.load(Ordering::Relaxed), burst_size as i64);
             }
             start.elapsed()
         })
@@ -173,7 +173,7 @@ fn benchmark_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pa
 
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Release); // Reset counter for each iteration
+                counter.store(0, Ordering::Relaxed); // Reset counter for each iteration
 
                 for i in 1..=burst_size {
                     disruptor
@@ -231,7 +231,7 @@ fn benchmark_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
 
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Release); // Reset counter for each iteration
+                counter.store(0, Ordering::Relaxed); // Reset counter for each iteration
 
                 for i in 1..=burst_size {
                     disruptor
@@ -289,7 +289,7 @@ fn benchmark_blocking(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
 
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Release); // Reset counter for each iteration
+                counter.store(0, Ordering::Relaxed); // Reset counter for each iteration
 
                 for i in 1..=burst_size {
                     disruptor
@@ -347,7 +347,7 @@ fn benchmark_sleeping(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
 
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Release); // Reset counter for each iteration
+                counter.store(0, Ordering::Relaxed); // Reset counter for each iteration
 
                 for i in 1..=burst_size {
                     disruptor
@@ -369,9 +369,109 @@ fn benchmark_sleeping(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
         })
     });
 
-    // WORKAROUND: SleepingWaitStrategy.shutdown() hangs indefinitely
-    // This is a known issue - we intentionally leak the Disruptor instance to avoid hanging
-    std::mem::forget(disruptor);
+    if let Err(e) = disruptor.shutdown() {
+        eprintln!("WARNING: Sleeping shutdown failed: {e:?}");
+    }
+}
+
+/// Reference-aligned benchmark that claims and publishes the whole burst in one batch.
+///
+/// This is closer to the LMAX raw throughput tests and the disruptor-rs benches, which
+/// primarily exercise range-claim publication rather than per-event translator calls.
+fn benchmark_batch_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pause_ms: u64) {
+    let param = format!("batch_burst:{burst_size}_pause:{pause_ms}ms");
+    let benchmark_id = BenchmarkId::new("BatchBusySpin", param);
+
+    let counter = Arc::new(AtomicI64::new(0));
+    let mut disruptor = build_single_producer(
+        BUFFER_SIZE,
+        BenchmarkEvent::default,
+        BusySpinWaitStrategy::new(),
+    )
+    .handle_events_with({
+        let counter = Arc::clone(&counter);
+        move |event: &mut BenchmarkEvent, _sequence, _end_of_batch| {
+            std::hint::black_box(event.value);
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    })
+    .build();
+
+    group.throughput(Throughput::Elements(burst_size));
+    group.bench_function(benchmark_id, |b| {
+        b.iter_custom(|iters| {
+            if pause_ms > 0 {
+                std::thread::sleep(Duration::from_millis(pause_ms));
+            }
+
+            let start = Instant::now();
+            for _ in 0..iters {
+                counter.store(0, Ordering::Relaxed);
+
+                disruptor.batch_publish(burst_size as usize, |iter| {
+                    for (index, event) in iter.enumerate() {
+                        let value = (index + 1) as i64;
+                        event.value = std::hint::black_box(value);
+                    }
+                });
+
+                if !wait_for_completion(&counter, burst_size as i64, TIMEOUT_MS) {
+                    panic!("BatchBusySpin benchmark failed: events not processed within timeout");
+                }
+            }
+            start.elapsed()
+        })
+    });
+
+    disruptor.shutdown();
+}
+
+fn benchmark_batch_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pause_ms: u64) {
+    let param = format!("batch_burst:{burst_size}_pause:{pause_ms}ms");
+    let benchmark_id = BenchmarkId::new("BatchYielding", param);
+
+    let counter = Arc::new(AtomicI64::new(0));
+    let mut disruptor = build_single_producer(
+        BUFFER_SIZE,
+        BenchmarkEvent::default,
+        YieldingWaitStrategy::new(),
+    )
+    .handle_events_with({
+        let counter = Arc::clone(&counter);
+        move |event: &mut BenchmarkEvent, _sequence, _end_of_batch| {
+            std::hint::black_box(event.value);
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    })
+    .build();
+
+    group.throughput(Throughput::Elements(burst_size));
+    group.bench_function(benchmark_id, |b| {
+        b.iter_custom(|iters| {
+            if pause_ms > 0 {
+                std::thread::sleep(Duration::from_millis(pause_ms));
+            }
+
+            let start = Instant::now();
+            for _ in 0..iters {
+                counter.store(0, Ordering::Relaxed);
+
+                disruptor.batch_publish(burst_size as usize, |iter| {
+                    for (index, event) in iter.enumerate() {
+                        let value = (index + 1) as i64;
+                        event.value = std::hint::black_box(value);
+                    }
+                });
+
+                if !wait_for_completion_yielding(&counter, burst_size as i64, TIMEOUT_MS) {
+                    panic!("BatchYielding benchmark failed: events not processed within timeout");
+                }
+            }
+            start.elapsed()
+        })
+    });
+
+    disruptor.shutdown();
 }
 
 /// Main SPSC benchmark function
@@ -396,6 +496,8 @@ pub fn fixed_spsc_benchmark(c: &mut Criterion) {
             benchmark_yielding(&mut group, burst_size, pause_ms);
             benchmark_blocking(&mut group, burst_size, pause_ms);
             benchmark_sleeping(&mut group, burst_size, pause_ms);
+            benchmark_batch_busy_spin(&mut group, burst_size, pause_ms);
+            benchmark_batch_yielding(&mut group, burst_size, pause_ms);
         }
     }
 
