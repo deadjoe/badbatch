@@ -14,8 +14,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-const MAX_CONSECUTIVE_NO_EVENTS: u32 = 1_000;
-
 /// The main Disruptor class
 ///
 /// This is the primary entry point for using the Disruptor pattern. It provides
@@ -234,61 +232,24 @@ where
         self.shutdown_flag.store(false, Ordering::Release);
 
         // Start all event processors in their own threads
-        // Each processor runs its actual event processing logic
+        // Each processor runs its own blocking event loop.
         for (index, processor) in self.event_processors.iter().enumerate() {
             // Clone the processor for the thread
             let processor_clone = Arc::clone(processor);
-            let shutdown_flag = Arc::clone(&self.shutdown_flag);
 
             let handle = thread::spawn(move || -> Result<()> {
                 crate::internal_debug!("Event processor {index} starting");
-
-                // Start the processor's lifecycle
-                processor_clone.on_start();
-
-                // Main event processing loop - this is the real implementation
-                let mut running = true;
-                let mut consecutive_no_events = 0;
-
-                while running && !shutdown_flag.load(Ordering::Acquire) {
-                    match processor_clone.try_run_once() {
-                        Ok(true) => {
-                            // Successfully processed events, continue
-                            consecutive_no_events = 0;
-                        }
-                        Ok(false) => {
-                            // No events available, yield to prevent busy waiting
-                            consecutive_no_events += 1;
-                            if consecutive_no_events >= MAX_CONSECUTIVE_NO_EVENTS {
-                                // Check shutdown flag more frequently when no events
-                                if shutdown_flag.load(Ordering::Acquire) {
-                                    break;
-                                }
-                                consecutive_no_events = 0;
-                            }
-                            thread::yield_now();
-                        }
-                        Err(DisruptorError::Alert) => {
-                            // Processor was halted, stop processing
-                            running = false;
-                        }
-                        Err(DisruptorError::Timeout) => {
-                            // Timeout occurred, notify and continue
-                            processor_clone.notify_timeout(processor_clone.get_sequence().get());
-                        }
-                        Err(e) => {
-                            // Other errors, log and continue
-                            crate::internal_error!("Event processor {index} error: {e:?}");
-                            thread::sleep(std::time::Duration::from_millis(1));
-                        }
-                    }
-                }
-
-                // Shutdown lifecycle
-                processor_clone.on_shutdown();
+                processor_clone.run()?;
                 crate::internal_debug!("Event processor {index} shutting down");
                 Ok(())
             });
+
+            while !processor.is_running() {
+                if handle.is_finished() {
+                    break;
+                }
+                thread::yield_now();
+            }
 
             self.thread_handles.push(handle);
         }
@@ -486,7 +447,6 @@ mod tests {
     };
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
-    use std::time::Duration;
 
     #[derive(Debug, Default, Clone)]
     #[allow(dead_code)]
@@ -608,6 +568,8 @@ mod tests {
 
     #[test]
     fn test_disruptor_start_and_shutdown() {
+        use std::time::{Duration, Instant};
+
         let factory = DefaultEventFactory::<TestEvent>::new();
         let mut disruptor = Disruptor::with_defaults(factory, 32)
             .unwrap()
@@ -623,11 +585,17 @@ mod tests {
         let result = disruptor.start();
         assert!(result.is_err());
 
-        // Test shutdown - give a brief moment for threads to initialize, then shutdown immediately
-        // The key fix: don't let the event processors wait indefinitely for events that will never come
-        std::thread::sleep(Duration::from_millis(5)); // Minimal delay for thread startup
+        // Give the blocking processor time to park, then verify alert-driven shutdown.
+        std::thread::sleep(Duration::from_millis(5));
+        let shutdown_start = Instant::now();
         disruptor.shutdown().unwrap();
+        let shutdown_elapsed = shutdown_start.elapsed();
+
         assert!(!disruptor.started);
+        assert!(
+            shutdown_elapsed < Duration::from_millis(100),
+            "shutdown should interrupt blocking waits promptly, elapsed={shutdown_elapsed:?}"
+        );
 
         // Test double shutdown is ok
         disruptor.shutdown().unwrap();

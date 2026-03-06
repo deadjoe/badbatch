@@ -39,7 +39,7 @@ pub trait EventProcessor: Send + Sync + std::fmt::Debug {
     ///
     /// This starts the main event processing loop. This method typically
     /// runs in its own thread and processes events until halted.
-    fn run(&mut self) -> Result<()>;
+    fn run(&self) -> Result<()>;
 
     /// Try to run one batch of event processing
     ///
@@ -158,27 +158,55 @@ where
     /// Process events in a batch
     ///
     /// This follows the exact LMAX Disruptor BatchEventProcessor.processEvents logic
-    fn process_events(&mut self) {
+    fn process_events(&self) {
         // Start lifecycle
         self.on_start();
 
+        let mut next_sequence = self.sequence.get() + 1;
+
         // Main processing loop
         while self.running.load(Ordering::Acquire) {
-            match self.try_run_once() {
-                Ok(true) => {
-                    // Successfully processed events, continue
-                }
-                Ok(false) => {
-                    // No events available, yield to prevent busy waiting
-                    thread::yield_now();
+            match self.sequence_barrier.wait_for(next_sequence) {
+                Ok(available_sequence) => {
+                    if available_sequence < next_sequence {
+                        continue;
+                    }
+
+                    let batch_span = available_sequence - next_sequence + 1;
+
+                    // Lock the handler once for the entire batch — uncontended in practice
+                    // since each processor runs on a single dedicated thread.
+                    let mut handler = self.event_handler.lock();
+
+                    let queue_depth = available_sequence - self.sequence.get();
+                    let _ = handler.on_batch_start(batch_span, queue_depth);
+
+                    while next_sequence <= available_sequence {
+                        let end_of_batch = next_sequence == available_sequence;
+
+                        // SAFETY: This processor owns the mutable access contract for the
+                        // requested sequence and only advances its cursor after the handler
+                        // has completed.
+                        let event = unsafe { self.data_provider.get_mut(next_sequence) };
+
+                        if let Err(e) = handler.on_event(event, next_sequence, end_of_batch) {
+                            let exception_handler = &*self.exception_handler;
+                            exception_handler.handle_event_exception(e, next_sequence, event);
+                        }
+
+                        next_sequence += 1;
+                    }
+
+                    drop(handler);
+
+                    // Publish consumer progress once per completed batch, matching the
+                    // LMAX BatchEventProcessor release-store semantics.
+                    self.sequence.set(available_sequence);
                 }
                 Err(DisruptorError::Alert) => {
-                    // Processor was halted, stop processing
-                    break;
-                }
-                Err(DisruptorError::Timeout) => {
-                    // Timeout occurred, notify and continue
-                    self.notify_timeout(self.sequence.get());
+                    if !self.running.load(Ordering::Acquire) {
+                        break;
+                    }
                 }
                 Err(e) => {
                     // Other errors, log and continue
@@ -210,7 +238,7 @@ where
         self.running.load(Ordering::Acquire)
     }
 
-    fn run(&mut self) -> Result<()> {
+    fn run(&self) -> Result<()> {
         // Check if already running
         if self
             .running
@@ -236,11 +264,12 @@ where
 
         let next_sequence = self.sequence.get() + 1;
 
-        // Try to get the next available sequence with a timeout to prevent infinite blocking
-        let available_sequence = match self.sequence_barrier.wait_for_with_timeout(
-            next_sequence,
-            std::time::Duration::from_millis(1), // Very short timeout
-        ) {
+        // Probe once without blocking. This is intended for tests and polling-style
+        // integrations, not the main high-performance run loop.
+        let available_sequence = match self
+            .sequence_barrier
+            .wait_for_with_timeout(next_sequence, std::time::Duration::ZERO)
+        {
             Ok(seq) => seq,
             Err(DisruptorError::Alert) => {
                 // We've been alerted to stop
@@ -347,7 +376,7 @@ where
     ///
     /// # Returns
     /// A join handle for the spawned thread
-    pub fn spawn(mut self) -> JoinHandle<Result<()>>
+    pub fn spawn(self) -> JoinHandle<Result<()>>
     where
         T: 'static,
     {
@@ -494,6 +523,37 @@ mod tests {
         let result = processor.try_run_once();
         assert!(result.is_ok());
         assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn test_try_run_once_is_non_blocking_without_events() {
+        use std::time::{Duration, Instant};
+
+        let data_provider = Arc::new(TestDataProvider::new(8));
+        let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
+        let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
+        let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
+
+        let processor = BatchEventProcessor::new(
+            data_provider,
+            sequence_barrier,
+            event_handler,
+            exception_handler,
+        );
+
+        processor.running.store(true, Ordering::Release);
+
+        let start = Instant::now();
+        let result = processor.try_run_once();
+        let elapsed = start.elapsed();
+
+        assert!(matches!(result, Ok(false)));
+        assert!(
+            elapsed < Duration::from_millis(5),
+            "try_run_once should probe immediately, elapsed={elapsed:?}"
+        );
     }
 
     #[test]
