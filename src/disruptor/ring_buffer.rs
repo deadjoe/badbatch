@@ -35,6 +35,12 @@ impl<T> RingBuffer<T>
 where
     T: Send + Sync,
 {
+    #[inline]
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    fn slot_index(&self, sequence: i64) -> usize {
+        (sequence & self.index_mask) as usize
+    }
+
     /// Create a new ring buffer with the specified size and event factory
     ///
     /// # Arguments
@@ -84,10 +90,8 @@ where
     /// Panics if the masked sequence cannot be converted into a valid `usize`.
     #[inline]
     #[must_use]
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn get(&self, sequence: i64) -> &T {
-        // masked is always non-negative (index_mask clears sign bit) and fits usize
-        let index = (sequence & self.index_mask) as usize;
+        let index = self.slot_index(sequence);
         // SAFETY: Index is within bounds - guaranteed by invariant and index mask.
         let slot = unsafe { self.slots.get_unchecked(index) };
         unsafe { &*slot.get() }
@@ -105,9 +109,8 @@ where
     /// Panics if the masked sequence cannot be converted into a valid `usize`.
     #[inline]
     #[must_use]
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn get_mut(&mut self, sequence: i64) -> &mut T {
-        let index = (sequence & self.index_mask) as usize;
+        let index = self.slot_index(sequence);
         // SAFETY: We have exclusive access to self, so this is safe
         let slot = unsafe { self.slots.get_unchecked(index) };
         unsafe { &mut *slot.get() }
@@ -134,9 +137,8 @@ where
     /// Panics if the masked sequence cannot be converted into a valid `usize`.
     #[inline]
     #[must_use]
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub unsafe fn get_mut_unchecked(&self, sequence: i64) -> *mut T {
-        let index = (sequence & self.index_mask) as usize;
+        let index = self.slot_index(sequence);
         // SAFETY: Index is within bounds - guaranteed by invariant and index mask.
         let slot = self.slots.get_unchecked(index);
         slot.get()
@@ -161,6 +163,13 @@ where
     #[must_use]
     pub fn size(&self) -> i64 {
         i64::try_from(self.slots.len()).expect("ring buffer length must fit into i64")
+    }
+
+    /// Get the ring slot index for a given sequence.
+    #[inline]
+    #[must_use]
+    pub(crate) fn sequence_to_index(&self, sequence: i64) -> usize {
+        self.slot_index(sequence)
     }
 
     /// Check if the buffer has available capacity

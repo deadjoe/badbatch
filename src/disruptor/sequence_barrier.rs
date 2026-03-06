@@ -158,9 +158,12 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
         self.check_alert()?;
 
         // Use the wait strategy to wait for the sequence
-        let available_sequence =
-            self.wait_strategy
-                .wait_for(sequence, &self.cursor, &self.dependent_sequences)?;
+        let available_sequence = self.wait_strategy.wait_for_with_alert(
+            sequence,
+            &self.cursor,
+            &self.dependent_sequences,
+            &self.alerted,
+        )?;
 
         // Check again after waiting in case we were alerted while waiting
         self.check_alert()?;
@@ -186,12 +189,20 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
         self.check_alert()?;
 
         // Use the wait strategy with timeout to wait for the sequence
-        let available_sequence = self.wait_strategy.wait_for_with_timeout(
+        let available_sequence = match self.wait_strategy.wait_for_with_timeout_and_alert(
             sequence,
             &self.cursor,
             &self.dependent_sequences,
             timeout,
-        )?;
+            &self.alerted,
+        ) {
+            Ok(available_sequence) => available_sequence,
+            Err(DisruptorError::Timeout) => {
+                self.check_alert()?;
+                return Err(DisruptorError::Timeout);
+            }
+            Err(e) => return Err(e),
+        };
 
         // Check again after waiting in case we were alerted while waiting
         self.check_alert()?;
@@ -244,11 +255,12 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
         self.check_alert()?;
 
         // Use the wait strategy with shutdown support
-        let available_sequence = self.wait_strategy.wait_for_with_shutdown(
+        let available_sequence = self.wait_strategy.wait_for_with_shutdown_and_alert(
             sequence,
             &self.cursor,
             &self.dependent_sequences,
             shutdown_flag,
+            &self.alerted,
         )?;
 
         // Check again after waiting in case we were alerted while waiting
@@ -492,6 +504,34 @@ mod tests {
         let result = barrier.wait_for_with_shutdown(5, &shutdown_flag);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), DisruptorError::Alert));
+    }
+
+    #[test]
+    fn test_barrier_alert_interrupts_inflight_timeout_wait() {
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let cursor = Arc::new(Sequence::new(-1));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let barrier = Arc::new(create_simple_barrier(cursor, wait_strategy));
+        let barrier_clone = barrier.clone();
+
+        let start = Instant::now();
+        let handle = thread::spawn(move || {
+            barrier_clone.wait_for_with_timeout(0, Duration::from_millis(250))
+        });
+
+        thread::sleep(Duration::from_millis(20));
+        barrier.alert();
+
+        let result = handle.join().unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(matches!(result, Err(DisruptorError::Alert)));
+        assert!(
+            elapsed < Duration::from_millis(150),
+            "alert should interrupt the wait promptly, elapsed={elapsed:?}"
+        );
     }
 
     #[test]

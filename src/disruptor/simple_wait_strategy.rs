@@ -141,22 +141,29 @@ impl<S> crate::disruptor::WaitStrategy for SimpleWaitStrategyAdapter<S>
 where
     S: SimpleWaitStrategy,
 {
-    fn wait_for(
+    fn wait_for_with_alert(
         &self,
         sequence: i64,
         cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
+        alerted: &std::sync::atomic::AtomicBool,
     ) -> crate::disruptor::Result<i64> {
         // Conservatively wait until the producer cursor reaches the requested sequence
         // and all dependent sequences也达到要求，避免虚假的可用位置。
         let mut available = cursor.get();
         while available < sequence {
+            if alerted.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(crate::disruptor::DisruptorError::Alert);
+            }
             self.strategy.wait_for(sequence);
             available = cursor.get();
         }
 
         if !dependent_sequences.is_empty() {
             loop {
+                if alerted.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err(crate::disruptor::DisruptorError::Alert);
+                }
                 let min_dep = Sequence::get_minimum_sequence(dependent_sequences);
                 if min_dep >= sequence {
                     break;
@@ -174,15 +181,19 @@ where
         Ok(std::cmp::min(available, dep_min))
     }
 
-    fn wait_for_with_timeout(
+    fn wait_for_with_timeout_and_alert(
         &self,
         sequence: i64,
         cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
         timeout: std::time::Duration,
+        alerted: &std::sync::atomic::AtomicBool,
     ) -> crate::disruptor::Result<i64> {
         let start = std::time::Instant::now();
         loop {
+            if alerted.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(crate::disruptor::DisruptorError::Alert);
+            }
             let cursor_val = cursor.get();
             let dep_min = if dependent_sequences.is_empty() {
                 cursor_val
@@ -201,15 +212,19 @@ where
         }
     }
 
-    fn wait_for_with_shutdown(
+    fn wait_for_with_shutdown_and_alert(
         &self,
         sequence: i64,
         cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
         shutdown_flag: &std::sync::atomic::AtomicBool,
+        alerted: &std::sync::atomic::AtomicBool,
     ) -> crate::disruptor::Result<i64> {
         loop {
             if shutdown_flag.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(crate::disruptor::DisruptorError::Alert);
+            }
+            if alerted.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(crate::disruptor::DisruptorError::Alert);
             }
             let cursor_val = cursor.get();

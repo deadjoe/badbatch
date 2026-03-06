@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+static NEVER_ALERTED: AtomicBool = AtomicBool::new(false);
+
 /// Strategy for waiting for events to become available
 ///
 /// This trait defines how consumers wait for new events in the ring buffer.
@@ -37,6 +39,20 @@ pub trait WaitStrategy: Send + Sync + std::fmt::Debug {
         sequence: i64,
         cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
+    ) -> Result<i64> {
+        self.wait_for_with_alert(sequence, cursor, dependent_sequences, &NEVER_ALERTED)
+    }
+
+    /// Wait for the given sequence while also observing an external barrier alert.
+    ///
+    /// The extra alert flag allows `SequenceBarrier::alert()` to interrupt any
+    /// in-flight waits without requiring wait strategies to own barrier-local state.
+    fn wait_for_with_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        alerted: &AtomicBool,
     ) -> Result<i64>;
 
     /// Wait for the given sequence with timeout
@@ -62,9 +78,31 @@ pub trait WaitStrategy: Send + Sync + std::fmt::Debug {
         dependent_sequences: &[Arc<Sequence>],
         timeout: Duration,
     ) -> Result<i64> {
+        self.wait_for_with_timeout_and_alert(
+            sequence,
+            cursor,
+            dependent_sequences,
+            timeout,
+            &NEVER_ALERTED,
+        )
+    }
+
+    /// Wait for the given sequence with timeout while also observing a barrier alert.
+    fn wait_for_with_timeout_and_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        timeout: Duration,
+        alerted: &AtomicBool,
+    ) -> Result<i64> {
         // Default implementation: poll with timeout check
         let start = std::time::Instant::now();
         loop {
+            if alerted.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+
             let cursor_value = cursor.get();
             if cursor_value >= sequence {
                 let dep_min = if dependent_sequences.is_empty() {
@@ -77,8 +115,13 @@ pub trait WaitStrategy: Send + Sync + std::fmt::Debug {
                     return Ok(available);
                 }
             }
+
+            if alerted.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+
             if start.elapsed() >= timeout {
-                return Err(crate::disruptor::DisruptorError::Timeout);
+                return Err(DisruptorError::Timeout);
             }
             std::thread::yield_now();
         }
@@ -107,6 +150,24 @@ pub trait WaitStrategy: Send + Sync + std::fmt::Debug {
         dependent_sequences: &[Arc<Sequence>],
         shutdown_flag: &AtomicBool,
     ) -> Result<i64> {
+        self.wait_for_with_shutdown_and_alert(
+            sequence,
+            cursor,
+            dependent_sequences,
+            shutdown_flag,
+            &NEVER_ALERTED,
+        )
+    }
+
+    /// Wait for the given sequence with shutdown and barrier alert support.
+    fn wait_for_with_shutdown_and_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        shutdown_flag: &AtomicBool,
+        alerted: &AtomicBool,
+    ) -> Result<i64> {
         // Default implementation with periodic shutdown checks
         let check_interval = Duration::from_millis(1);
 
@@ -116,9 +177,18 @@ pub trait WaitStrategy: Send + Sync + std::fmt::Debug {
                 return Err(DisruptorError::Alert);
             }
 
+            if alerted.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+
             // Try to get the sequence with a short timeout
-            match self.wait_for_with_timeout(sequence, cursor, dependent_sequences, check_interval)
-            {
+            match self.wait_for_with_timeout_and_alert(
+                sequence,
+                cursor,
+                dependent_sequences,
+                check_interval,
+                alerted,
+            ) {
                 Ok(available_sequence) => return Ok(available_sequence),
                 Err(DisruptorError::Timeout) => {
                     // Timeout indicates we should re-check shutdown flag and retry.
@@ -197,14 +267,20 @@ impl BlockingWaitStrategy {
     pub fn is_alerted(&self) -> bool {
         self.mutex.lock().alerted
     }
+
+    #[inline]
+    fn is_alerted_with(&self, alerted: &AtomicBool) -> bool {
+        self.is_alerted() || alerted.load(Ordering::Acquire)
+    }
 }
 
 impl WaitStrategy for BlockingWaitStrategy {
-    fn wait_for(
+    fn wait_for_with_alert(
         &self,
         sequence: i64,
         cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
+        alerted: &AtomicBool,
     ) -> Result<i64> {
         // This follows the exact LMAX Disruptor BlockingWaitStrategy.waitFor logic
         let mut available_sequence;
@@ -215,7 +291,7 @@ impl WaitStrategy for BlockingWaitStrategy {
 
             while cursor.get() < sequence {
                 // Check for alert state (equivalent to barrier.checkAlert() in LMAX)
-                if guard.alerted {
+                if guard.alerted || alerted.load(Ordering::Acquire) {
                     return Err(DisruptorError::Alert);
                 }
 
@@ -237,7 +313,7 @@ impl WaitStrategy for BlockingWaitStrategy {
             }
 
             // Check for alert state again
-            if self.is_alerted() {
+            if self.is_alerted_with(alerted) {
                 return Err(DisruptorError::Alert);
             }
 
@@ -248,12 +324,13 @@ impl WaitStrategy for BlockingWaitStrategy {
         Ok(available_sequence)
     }
 
-    fn wait_for_with_timeout(
+    fn wait_for_with_timeout_and_alert(
         &self,
         sequence: i64,
         cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
         timeout: Duration,
+        alerted: &AtomicBool,
     ) -> Result<i64> {
         let start_time = std::time::Instant::now();
 
@@ -262,14 +339,14 @@ impl WaitStrategy for BlockingWaitStrategy {
             let mut guard = self.mutex.lock();
 
             while cursor.get() < sequence {
+                // Check for alert state first so barrier alert wins over timeout.
+                if guard.alerted || alerted.load(Ordering::Acquire) {
+                    return Err(DisruptorError::Alert);
+                }
+
                 // Check for timeout
                 if start_time.elapsed() >= timeout {
                     return Err(DisruptorError::Timeout);
-                }
-
-                // Check for alert state
-                if guard.alerted {
-                    return Err(DisruptorError::Alert);
                 }
 
                 // Calculate remaining timeout
@@ -282,6 +359,9 @@ impl WaitStrategy for BlockingWaitStrategy {
                 let timeout_result = self.condvar.wait_for(&mut guard, remaining);
 
                 if timeout_result.timed_out() {
+                    if guard.alerted || alerted.load(Ordering::Acquire) {
+                        return Err(DisruptorError::Alert);
+                    }
                     return Err(DisruptorError::Timeout);
                 }
             }
@@ -299,14 +379,14 @@ impl WaitStrategy for BlockingWaitStrategy {
                 return Ok(available_sequence);
             }
 
+            // Check for alert state first so barrier alert wins over timeout.
+            if self.is_alerted_with(alerted) {
+                return Err(DisruptorError::Alert);
+            }
+
             // Check for timeout
             if start_time.elapsed() >= timeout {
                 return Err(DisruptorError::Timeout);
-            }
-
-            // Check for alert state
-            if self.is_alerted() {
-                return Err(DisruptorError::Alert);
             }
 
             std::hint::spin_loop();
@@ -335,13 +415,18 @@ impl YieldingWaitStrategy {
 }
 
 impl WaitStrategy for YieldingWaitStrategy {
-    fn wait_for(
+    fn wait_for_with_alert(
         &self,
         sequence: i64,
         cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
+        alerted: &AtomicBool,
     ) -> Result<i64> {
         loop {
+            if alerted.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+
             let cursor_sequence = cursor.get();
             let dep_min = if dependent_sequences.is_empty() {
                 cursor_sequence
@@ -356,17 +441,22 @@ impl WaitStrategy for YieldingWaitStrategy {
         }
     }
 
-    fn wait_for_with_timeout(
+    fn wait_for_with_timeout_and_alert(
         &self,
         sequence: i64,
         cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
         timeout: Duration,
+        alerted: &AtomicBool,
     ) -> Result<i64> {
         let start_time = std::time::Instant::now();
 
         // Wait for both cursor and dependent sequences to reach the required sequence
         loop {
+            if alerted.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+
             let cursor_sequence = cursor.get();
             let minimum_dependent_sequence = if dependent_sequences.is_empty() {
                 cursor_sequence
@@ -381,6 +471,10 @@ impl WaitStrategy for YieldingWaitStrategy {
                 return Ok(available_sequence);
             }
 
+            if alerted.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+
             // Check for timeout
             if start_time.elapsed() >= timeout {
                 return Err(DisruptorError::Timeout);
@@ -390,15 +484,19 @@ impl WaitStrategy for YieldingWaitStrategy {
         }
     }
 
-    fn wait_for_with_shutdown(
+    fn wait_for_with_shutdown_and_alert(
         &self,
         sequence: i64,
         cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
         shutdown_flag: &AtomicBool,
+        alerted: &AtomicBool,
     ) -> Result<i64> {
         loop {
             if shutdown_flag.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+            if alerted.load(Ordering::Acquire) {
                 return Err(DisruptorError::Alert);
             }
             let cursor_sequence = cursor.get();
@@ -441,13 +539,18 @@ impl BusySpinWaitStrategy {
 }
 
 impl WaitStrategy for BusySpinWaitStrategy {
-    fn wait_for(
+    fn wait_for_with_alert(
         &self,
         sequence: i64,
         cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
+        alerted: &AtomicBool,
     ) -> Result<i64> {
         loop {
+            if alerted.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+
             let cursor_sequence = cursor.get();
             let dep_min = if dependent_sequences.is_empty() {
                 cursor_sequence
@@ -463,17 +566,22 @@ impl WaitStrategy for BusySpinWaitStrategy {
         }
     }
 
-    fn wait_for_with_timeout(
+    fn wait_for_with_timeout_and_alert(
         &self,
         sequence: i64,
         cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
         timeout: Duration,
+        alerted: &AtomicBool,
     ) -> Result<i64> {
         let start_time = std::time::Instant::now();
 
         // Wait for both cursor and dependent sequences to reach the required sequence
         loop {
+            if alerted.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+
             let cursor_sequence = cursor.get();
             let minimum_dependent_sequence = if dependent_sequences.is_empty() {
                 cursor_sequence
@@ -488,6 +596,10 @@ impl WaitStrategy for BusySpinWaitStrategy {
                 return Ok(available_sequence);
             }
 
+            if alerted.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+
             // Check for timeout
             if start_time.elapsed() >= timeout {
                 return Err(DisruptorError::Timeout);
@@ -498,12 +610,13 @@ impl WaitStrategy for BusySpinWaitStrategy {
         }
     }
 
-    fn wait_for_with_shutdown(
+    fn wait_for_with_shutdown_and_alert(
         &self,
         sequence: i64,
         cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
         shutdown_flag: &AtomicBool,
+        alerted: &AtomicBool,
     ) -> Result<i64> {
         // Simplified logic following LMAX Disruptor pattern
         let mut available_sequence;
@@ -516,6 +629,9 @@ impl WaitStrategy for BusySpinWaitStrategy {
             loop {
                 // Check shutdown flag
                 if shutdown_flag.load(Ordering::Acquire) {
+                    return Err(DisruptorError::Alert);
+                }
+                if alerted.load(Ordering::Acquire) {
                     return Err(DisruptorError::Alert);
                 }
 
@@ -540,6 +656,9 @@ impl WaitStrategy for BusySpinWaitStrategy {
         } {
             // Check shutdown flag
             if shutdown_flag.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+            if alerted.load(Ordering::Acquire) {
                 return Err(DisruptorError::Alert);
             }
             std::hint::spin_loop();
@@ -592,13 +711,18 @@ impl Default for SleepingWaitStrategy {
 }
 
 impl WaitStrategy for SleepingWaitStrategy {
-    fn wait_for(
+    fn wait_for_with_alert(
         &self,
         sequence: i64,
         cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
+        alerted: &AtomicBool,
     ) -> Result<i64> {
         loop {
+            if alerted.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+
             let cursor_sequence = cursor.get();
             let dep_min = if dependent_sequences.is_empty() {
                 cursor_sequence
@@ -613,15 +737,19 @@ impl WaitStrategy for SleepingWaitStrategy {
         }
     }
 
-    fn wait_for_with_shutdown(
+    fn wait_for_with_shutdown_and_alert(
         &self,
         sequence: i64,
         cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
         shutdown_flag: &AtomicBool,
+        alerted: &AtomicBool,
     ) -> Result<i64> {
         loop {
             if shutdown_flag.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+            if alerted.load(Ordering::Acquire) {
                 return Err(DisruptorError::Alert);
             }
             let cursor_sequence = cursor.get();
@@ -638,16 +766,21 @@ impl WaitStrategy for SleepingWaitStrategy {
         }
     }
 
-    fn wait_for_with_timeout(
+    fn wait_for_with_timeout_and_alert(
         &self,
         sequence: i64,
         cursor: &Sequence,
         dependent_sequences: &[Arc<Sequence>],
         timeout: Duration,
+        alerted: &AtomicBool,
     ) -> Result<i64> {
         let start_time = std::time::Instant::now();
 
         loop {
+            if alerted.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+
             // Check timeout first
             if start_time.elapsed() >= timeout {
                 return Err(DisruptorError::Timeout);
@@ -755,6 +888,37 @@ mod tests {
         let result = handle.join().unwrap();
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), DisruptorError::Alert));
+    }
+
+    #[test]
+    fn test_blocking_wait_strategy_external_alert_interrupts_wait() {
+        use std::sync::atomic::AtomicBool;
+
+        let strategy = Arc::new(BlockingWaitStrategy::new());
+        let cursor = Arc::new(Sequence::new(0));
+        let dependent_sequences = vec![];
+        let barrier_alert = Arc::new(AtomicBool::new(false));
+
+        let strategy_clone = strategy.clone();
+        let cursor_clone = cursor.clone();
+        let barrier_alert_clone = barrier_alert.clone();
+
+        let handle = thread::spawn(move || {
+            strategy_clone.wait_for_with_timeout_and_alert(
+                100,
+                &cursor_clone,
+                &dependent_sequences,
+                Duration::from_millis(250),
+                &barrier_alert_clone,
+            )
+        });
+
+        thread::sleep(Duration::from_millis(10));
+        barrier_alert.store(true, Ordering::Release);
+        strategy.signal_all_when_blocking();
+
+        let result = handle.join().unwrap();
+        assert!(matches!(result, Err(DisruptorError::Alert)));
     }
 
     #[test]
