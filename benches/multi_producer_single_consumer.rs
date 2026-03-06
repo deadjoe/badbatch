@@ -15,14 +15,15 @@ use criterion::measurement::WallTime;
 use criterion::{
     criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use badbatch::disruptor::{
-    event_translator::ClosureEventTranslator, BusySpinWaitStrategy, DefaultEventFactory, Disruptor,
-    EventHandler, ProducerType, Result as DisruptorResult,
+    build_multi_producer, event_translator::ClosureEventTranslator, BusySpinWaitStrategy,
+    DefaultEventFactory, Disruptor, EventHandler, Producer, ProducerType,
+    Result as DisruptorResult,
 };
 
 // Benchmark configuration constants
@@ -42,31 +43,17 @@ struct MPSCEvent {
 /// Event handler that counts processed events from all producers
 struct MPSCCountingSink {
     event_count: Arc<AtomicI64>,
-    last_values: Arc<Vec<AtomicI64>>, // Track last value from each producer
 }
 
 impl MPSCCountingSink {
-    fn new(producer_count: usize) -> Self {
-        let last_values = (0..producer_count)
-            .map(|_| AtomicI64::new(0))
-            .collect::<Vec<_>>();
-
+    fn new() -> Self {
         Self {
             event_count: Arc::new(AtomicI64::new(0)),
-            last_values: Arc::new(last_values),
         }
     }
 
     fn get_event_count(&self) -> Arc<AtomicI64> {
-        self.event_count.clone()
-    }
-
-    #[allow(dead_code)]
-    fn reset(&self) {
-        self.event_count.store(0, Ordering::Release);
-        for last_value in self.last_values.iter() {
-            last_value.store(0, Ordering::Release);
-        }
+        Arc::clone(&self.event_count)
     }
 }
 
@@ -77,54 +64,54 @@ impl EventHandler<MPSCEvent> for MPSCCountingSink {
         _sequence: i64,
         _end_of_batch: bool,
     ) -> DisruptorResult<()> {
-        // Update last value for this producer
-        if event.producer_id < self.last_values.len() {
-            self.last_values[event.producer_id].store(event.value, Ordering::Release);
-        }
-
+        std::hint::black_box(event.value);
         // Increment total event count
-        self.event_count.fetch_add(1, Ordering::Release);
+        self.event_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
 
-/// Improved producer thread with proper synchronization
-struct SyncProducer {
+fn pause(millis: u64) {
+    if millis > 0 {
+        thread::sleep(Duration::from_millis(millis));
+    }
+}
+
+fn wait_until_counter_reaches(counter: &AtomicI64, target: i64, timeout: Duration) {
+    let start = Instant::now();
+    while counter.load(Ordering::Relaxed) < target {
+        if start.elapsed() > timeout {
+            let current = counter.load(Ordering::Relaxed);
+            panic!("MPSC benchmark timed out: expected >= {target}, got {current}");
+        }
+        std::hint::spin_loop();
+    }
+}
+
+/// Persistent producer thread that publishes one burst per generation.
+struct BurstProducer {
     join_handle: Option<JoinHandle<()>>,
     stop_flag: Arc<AtomicBool>,
 }
 
-impl SyncProducer {
+impl BurstProducer {
     fn new(
-        producer_id: usize,
-        burst_size: u64,
-        disruptor: Arc<Disruptor<MPSCEvent>>,
-        start_barrier: Arc<Barrier>,
+        generation: Arc<AtomicUsize>,
         stop_flag: Arc<AtomicBool>,
+        mut produce_one_burst: impl FnMut() + Send + 'static,
     ) -> Self {
-        let stop_flag_clone = stop_flag.clone();
-
+        let stop_flag_for_thread = Arc::clone(&stop_flag);
         let join_handle = thread::spawn(move || {
-            // Wait for all producers to be ready
-            start_barrier.wait();
-
-            // Produce burst of events
-            for i in 1..=burst_size {
-                if stop_flag_clone.load(Ordering::Acquire) {
-                    return;
-                }
-
-                let result = disruptor.publish_event(ClosureEventTranslator::new(
-                    move |event: &mut MPSCEvent, seq: i64| {
-                        event.producer_id = producer_id;
-                        event.value = std::hint::black_box(i as i64);
-                        event.sequence = seq;
-                    },
-                ));
-
-                if result.is_err() {
-                    eprintln!("Producer {producer_id} failed to publish event {i}");
-                    return;
+            // Important: start from a fixed generation so producers cannot "miss" the first
+            // generation if the main thread increments before this thread is scheduled.
+            let mut last_seen_generation = 0usize;
+            while !stop_flag_for_thread.load(Ordering::Acquire) {
+                let current_generation = generation.load(Ordering::Acquire);
+                if current_generation != last_seen_generation {
+                    last_seen_generation = current_generation;
+                    produce_one_burst();
+                } else {
+                    std::hint::spin_loop();
                 }
             }
         });
@@ -143,167 +130,211 @@ impl SyncProducer {
     }
 }
 
-impl Drop for SyncProducer {
+impl Drop for BurstProducer {
     fn drop(&mut self) {
         self.stop();
     }
 }
 
-/// Safe wait with timeout for MPSC scenarios
-fn wait_for_mpsc_completion(counter: &Arc<AtomicI64>, expected: i64, timeout_ms: u64) -> bool {
-    let start = Instant::now();
-    let timeout = Duration::from_millis(timeout_ms);
-    let mut last_count = 0;
-    let mut stall_count = 0;
-
-    while counter.load(Ordering::Acquire) < expected {
-        if start.elapsed() > timeout {
-            let current_count = counter.load(Ordering::Acquire);
-            eprintln!(
-                "WARNING: MPSC benchmark timed out waiting for {expected} events, got {current_count}"
-            );
-            return false;
-        }
-
-        // Check for progress to detect stalls
-        let current_count = counter.load(Ordering::Acquire);
-        if current_count == last_count {
-            stall_count += 1;
-            if stall_count > 1000 {
-                eprintln!("WARNING: MPSC benchmark appears stalled at {current_count} events (expected: {expected})");
-                if stall_count == 1001 {
-                    eprintln!("DEBUG: This appears to be a sequence availability issue in MultiProducerSequencer");
-                    eprintln!("DEBUG: Multiple producers may have claimed sequences but EventProcessor can't see them as published");
-                }
-                std::thread::sleep(Duration::from_millis(1));
-                stall_count = 0;
-            }
-        } else {
-            stall_count = 0;
-        }
-        last_count = current_count;
-
-        std::hint::spin_loop();
-    }
-    true
-}
-
 /// Baseline measurement for MPSC overhead
 fn baseline_mpsc_measurement(group: &mut BenchmarkGroup<WallTime>, burst_size: u64) {
-    let event_counter = Arc::new(AtomicI64::new(0));
     let benchmark_id = BenchmarkId::new("baseline", burst_size);
+    let expected_total = (burst_size * PRODUCER_COUNT as u64) as i64;
 
-    group.throughput(Throughput::Elements(burst_size * PRODUCER_COUNT as u64));
+    group.throughput(Throughput::Elements(expected_total as u64));
     group.bench_function(benchmark_id, |b| {
+        let generation = Arc::new(AtomicUsize::new(0));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let event_counter = Arc::new(AtomicI64::new(0));
+
+        let mut producers: Vec<BurstProducer> = (0..PRODUCER_COUNT)
+            .map(|_| {
+                let generation = Arc::clone(&generation);
+                let stop_flag = Arc::clone(&stop_flag);
+                let event_counter = Arc::clone(&event_counter);
+
+                BurstProducer::new(generation, stop_flag, move || {
+                    for _ in 0..burst_size {
+                        event_counter.fetch_add(1, Ordering::Relaxed);
+                        std::hint::black_box(());
+                    }
+                })
+            })
+            .collect();
+
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                event_counter.store(0, Ordering::Release);
-
-                // Simulate multi-producer work
-                let handles: Vec<_> = (0..PRODUCER_COUNT)
-                    .map(|_| {
-                        let counter = event_counter.clone();
-                        thread::spawn(move || {
-                            for i in 1..=burst_size {
-                                counter.fetch_add(1, Ordering::Release);
-                                std::hint::black_box(i);
-                            }
-                        })
-                    })
-                    .collect();
-
-                // Wait for all threads to complete
-                for handle in handles {
-                    handle.join().unwrap();
-                }
-
-                // Verify completion
-                assert_eq!(
-                    event_counter.load(Ordering::Acquire),
-                    (burst_size * PRODUCER_COUNT as u64) as i64
+                let start_count = event_counter.load(Ordering::Relaxed);
+                let target = start_count + expected_total;
+                generation.fetch_add(1, Ordering::Release);
+                wait_until_counter_reaches(
+                    &event_counter,
+                    target,
+                    Duration::from_millis(TIMEOUT_MS),
                 );
             }
             start.elapsed()
-        })
+        });
+
+        // Clean up producers
+        producers.iter_mut().for_each(BurstProducer::stop);
     });
 }
 
 /// Benchmark MPSC with BusySpinWaitStrategy  
-/// FIXED: Use single iteration approach to avoid thread/resource accumulation
+/// Uses persistent producer threads to avoid measuring thread setup/teardown.
 fn benchmark_mpsc_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pause_ms: u64) {
     let param = format!("burst:{burst_size}_pause:{pause_ms}ms");
-    let benchmark_id = BenchmarkId::new("MPSC_BusySpin", param);
-    let expected_total = burst_size * PRODUCER_COUNT as u64;
+    let benchmark_id = BenchmarkId::new("MPSC_SingleEvent_BusySpin", param);
+    let expected_total = (burst_size * PRODUCER_COUNT as u64) as i64;
 
-    group.throughput(Throughput::Elements(expected_total));
+    group.throughput(Throughput::Elements(expected_total as u64));
     group.bench_function(benchmark_id, |b| {
-        // Use iter() instead of iter_custom() to avoid the iteration loop
-        // This eliminates the thread accumulation problem
-        b.iter(|| {
-            if pause_ms > 0 {
-                thread::sleep(Duration::from_millis(pause_ms));
-            }
+        let factory = DefaultEventFactory::<MPSCEvent>::new();
+        let handler = MPSCCountingSink::new();
+        let event_counter = handler.get_event_count();
 
-            // Create a fresh disruptor for this single iteration
-            let factory = DefaultEventFactory::<MPSCEvent>::new();
-            let handler = MPSCCountingSink::new(PRODUCER_COUNT);
-            let event_counter = handler.get_event_count();
+        let mut disruptor = Disruptor::new(
+            factory,
+            BUFFER_SIZE,
+            ProducerType::Multi,
+            Box::new(BusySpinWaitStrategy::new()),
+        )
+        .unwrap()
+        .handle_events_with(handler)
+        .build();
 
-            let mut disruptor = Disruptor::new(
-                factory,
-                BUFFER_SIZE,
-                ProducerType::Multi,
-                Box::new(BusySpinWaitStrategy::new()),
-            )
-            .unwrap()
-            .handle_events_with(handler)
-            .build();
+        disruptor.start().unwrap();
+        let disruptor_arc = Arc::new(disruptor);
 
-            disruptor.start().unwrap();
-            let disruptor_arc = Arc::new(disruptor);
+        let generation = Arc::new(AtomicUsize::new(0));
+        let stop_flag = Arc::new(AtomicBool::new(false));
 
-            // Create synchronization barrier for all producers
-            let start_barrier = Arc::new(Barrier::new(PRODUCER_COUNT));
-            let stop_flag = Arc::new(AtomicBool::new(false));
+        let mut producers: Vec<BurstProducer> = (0..PRODUCER_COUNT)
+            .map(|producer_id| {
+                let disruptor = Arc::clone(&disruptor_arc);
+                let generation = Arc::clone(&generation);
+                let stop_flag = Arc::clone(&stop_flag);
+                let stop_flag_for_burst = Arc::clone(&stop_flag);
 
-            // Create producer threads
-            let mut producers: Vec<SyncProducer> = (0..PRODUCER_COUNT)
-                .map(|producer_id| {
-                    SyncProducer::new(
-                        producer_id,
-                        burst_size,
-                        disruptor_arc.clone(),
-                        start_barrier.clone(),
-                        stop_flag.clone(),
-                    )
+                BurstProducer::new(generation, stop_flag, move || {
+                    for i in 1..=burst_size {
+                        while !disruptor.try_publish_event(ClosureEventTranslator::new(
+                            move |event: &mut MPSCEvent, seq: i64| {
+                                event.producer_id = producer_id;
+                                event.value = std::hint::black_box(i as i64);
+                                event.sequence = seq;
+                            },
+                        )) {
+                            if stop_flag_for_burst.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            std::hint::spin_loop();
+                        }
+                    }
                 })
-                .collect();
+            })
+            .collect();
 
-            // Wait for all events to be processed
-            if !wait_for_mpsc_completion(&event_counter, expected_total as i64, TIMEOUT_MS) {
-                let final_count = event_counter.load(Ordering::Acquire);
+        b.iter_custom(|iters| {
+            pause(pause_ms);
+            let start = Instant::now();
 
-                // Clean up producers before panicking
-                for producer in &mut producers {
-                    producer.stop();
-                }
-                panic!("MPSC benchmark failed: events {final_count} of {expected_total} processed within timeout");
+            for _ in 0..iters {
+                let start_count = event_counter.load(Ordering::Relaxed);
+                let target = start_count + expected_total;
+                generation.fetch_add(1, Ordering::Release);
+
+                wait_until_counter_reaches(
+                    &event_counter,
+                    target,
+                    Duration::from_millis(TIMEOUT_MS),
+                );
             }
 
-            // Clean up producers and disruptor
-            for producer in &mut producers {
-                producer.stop();
-            }
-
-            // Properly shutdown the disruptor
-            if let Ok(mut disruptor) = Arc::try_unwrap(disruptor_arc) {
-                disruptor.shutdown().unwrap();
-            }
-
-            // Return the expected count for validation
-            expected_total
+            start.elapsed()
         });
+
+        // Clean up producers and disruptor
+        producers.iter_mut().for_each(BurstProducer::stop);
+
+        // Properly shutdown the disruptor
+        if let Ok(mut disruptor) = Arc::try_unwrap(disruptor_arc) {
+            disruptor.shutdown().unwrap();
+        }
+    });
+}
+
+/// Reference-aligned MPSC benchmark that uses one batch claim per producer burst.
+///
+/// This matches the publication model used by LMAX range-claim throughput tests and the
+/// disruptor-rs Criterion benches more closely than the per-event translator API.
+fn benchmark_mpsc_batch_busy_spin(
+    group: &mut BenchmarkGroup<WallTime>,
+    burst_size: u64,
+    pause_ms: u64,
+) {
+    let param = format!("batch_burst:{burst_size}_pause:{pause_ms}ms");
+    let benchmark_id = BenchmarkId::new("MPSC_Batch_BusySpin", param);
+    let expected_total = (burst_size * PRODUCER_COUNT as u64) as i64;
+
+    group.throughput(Throughput::Elements(expected_total as u64));
+    group.bench_function(benchmark_id, |b| {
+        let event_counter = Arc::new(AtomicI64::new(0));
+        let mut disruptor =
+            build_multi_producer(BUFFER_SIZE, MPSCEvent::default, BusySpinWaitStrategy::new())
+                .handle_events_with({
+                    let event_counter = Arc::clone(&event_counter);
+                    move |event: &mut MPSCEvent, _sequence, _end_of_batch| {
+                        std::hint::black_box(event.value);
+                        event_counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+                .build();
+
+        let generation = Arc::new(AtomicUsize::new(0));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        let mut producers: Vec<BurstProducer> = (0..PRODUCER_COUNT)
+            .map(|producer_id| {
+                let generation = Arc::clone(&generation);
+                let stop_flag = Arc::clone(&stop_flag);
+                let mut producer = disruptor.create_producer();
+
+                BurstProducer::new(generation, stop_flag, move || {
+                    producer.batch_publish(burst_size as usize, |iter| {
+                        for (index, event) in iter.enumerate() {
+                            let value = (index + 1) as i64;
+                            event.producer_id = producer_id;
+                            event.value = std::hint::black_box(value);
+                        }
+                    });
+                })
+            })
+            .collect();
+
+        b.iter_custom(|iters| {
+            pause(pause_ms);
+            let start = Instant::now();
+
+            for _ in 0..iters {
+                let start_count = event_counter.load(Ordering::Relaxed);
+                let target = start_count + expected_total;
+                generation.fetch_add(1, Ordering::Release);
+
+                wait_until_counter_reaches(
+                    &event_counter,
+                    target,
+                    Duration::from_millis(TIMEOUT_MS),
+                );
+            }
+
+            start.elapsed()
+        });
+
+        producers.iter_mut().for_each(BurstProducer::stop);
+        disruptor.shutdown();
     });
 }
 
@@ -324,6 +355,7 @@ pub fn fixed_mpsc_benchmark(c: &mut Criterion) {
             // Only test reasonable combinations to avoid very long benchmarks
             if burst_size <= 100 || pause_ms == 0 {
                 benchmark_mpsc_busy_spin(&mut group, burst_size, pause_ms);
+                benchmark_mpsc_batch_busy_spin(&mut group, burst_size, pause_ms);
             }
         }
     }

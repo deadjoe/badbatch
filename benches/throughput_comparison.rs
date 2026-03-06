@@ -15,15 +15,15 @@ use criterion::measurement::WallTime;
 use criterion::{
     criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use badbatch::disruptor::{
-    event_translator::ClosureEventTranslator, BlockingWaitStrategy, BusySpinWaitStrategy,
-    DefaultEventFactory, Disruptor, EventHandler, ProducerType, Result as DisruptorResult,
-    YieldingWaitStrategy,
+    build_multi_producer, build_single_producer, event_translator::ClosureEventTranslator,
+    BlockingWaitStrategy, BusySpinWaitStrategy, DefaultEventFactory, Disruptor, EventHandler,
+    ProducerType, Result as DisruptorResult, YieldingWaitStrategy,
 };
 
 // Benchmark configuration constants
@@ -41,6 +41,20 @@ struct ThroughputEvent {
 /// High-performance event handler that just counts events
 struct ThroughputHandler {
     counter: Arc<AtomicI64>,
+}
+
+fn batch_chunk_size(buffer_size: usize) -> usize {
+    buffer_size.min(256)
+}
+
+fn counting_handler(
+    counter: &Arc<AtomicI64>,
+) -> impl FnMut(&mut ThroughputEvent, i64, bool) + Send + Sync + 'static {
+    let counter = Arc::clone(counter);
+    move |event: &mut ThroughputEvent, _sequence, _end_of_batch| {
+        std::hint::black_box(event.data[0]);
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl ThroughputHandler {
@@ -76,53 +90,88 @@ fn benchmark_disruptor_throughput(
     wait_strategy: &str,
     producer_type: ProducerType,
 ) {
-    let factory = DefaultEventFactory::<ThroughputEvent>::new();
-    let handler = ThroughputHandler::new();
-    let counter = handler.get_counter();
-
-    let wait_strategy_impl: Box<dyn badbatch::disruptor::WaitStrategy> = match wait_strategy {
-        "BusySpin" => Box::new(BusySpinWaitStrategy::new()),
-        "Yielding" => Box::new(YieldingWaitStrategy::new()),
-        "Blocking" => Box::new(BlockingWaitStrategy::new()),
-        _ => Box::new(BusySpinWaitStrategy::new()),
+    let counter = Arc::new(AtomicI64::new(0));
+    let mut disruptor = match (producer_type, wait_strategy) {
+        (ProducerType::Single, "BusySpin") => build_single_producer(
+            buffer_size,
+            ThroughputEvent::default,
+            BusySpinWaitStrategy::new(),
+        )
+        .handle_events_with(counting_handler(&counter))
+        .build(),
+        (ProducerType::Single, "Yielding") => build_single_producer(
+            buffer_size,
+            ThroughputEvent::default,
+            YieldingWaitStrategy::new(),
+        )
+        .handle_events_with(counting_handler(&counter))
+        .build(),
+        (ProducerType::Single, "Blocking") => build_single_producer(
+            buffer_size,
+            ThroughputEvent::default,
+            BlockingWaitStrategy::new(),
+        )
+        .handle_events_with(counting_handler(&counter))
+        .build(),
+        (ProducerType::Multi, "BusySpin") => build_multi_producer(
+            buffer_size,
+            ThroughputEvent::default,
+            BusySpinWaitStrategy::new(),
+        )
+        .handle_events_with(counting_handler(&counter))
+        .build(),
+        (ProducerType::Multi, "Yielding") => build_multi_producer(
+            buffer_size,
+            ThroughputEvent::default,
+            YieldingWaitStrategy::new(),
+        )
+        .handle_events_with(counting_handler(&counter))
+        .build(),
+        (ProducerType::Multi, "Blocking") => build_multi_producer(
+            buffer_size,
+            ThroughputEvent::default,
+            BlockingWaitStrategy::new(),
+        )
+        .handle_events_with(counting_handler(&counter))
+        .build(),
+        _ => unreachable!("unsupported producer/wait-strategy combination"),
     };
-
-    let mut disruptor = Disruptor::new(factory, buffer_size, producer_type, wait_strategy_impl)
-        .unwrap()
-        .handle_events_with(handler)
-        .build();
-
-    disruptor.start().unwrap();
 
     let producer_str = match producer_type {
         ProducerType::Single => "SP",
-        ProducerType::Multi => "MP",
+        // Note: this selects the multi-producer *sequencer*; this benchmark still publishes
+        // from a single thread. True multi-threaded producer benchmarks live in
+        // `benches/multi_producer_single_consumer.rs`.
+        ProducerType::Multi => "MS",
     };
 
-    let param = format!("{producer_str}_{wait_strategy}_buf{buffer_size}");
+    let param = format!("Batch_{producer_str}_{wait_strategy}_buf{buffer_size}");
     let benchmark_id = BenchmarkId::new("Disruptor", param);
+    let batch_size = batch_chunk_size(buffer_size);
 
     group.throughput(Throughput::Elements(THROUGHPUT_EVENTS));
     group.bench_function(benchmark_id, |b| {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Release);
+                counter.store(0, Ordering::Relaxed);
 
-                for i in 0..THROUGHPUT_EVENTS {
-                    // Use blocking publish for maximum throughput measurement
-                    disruptor
-                        .publish_event(ClosureEventTranslator::new(
-                            move |event: &mut ThroughputEvent, _seq: i64| {
-                                event.id = std::hint::black_box(i as i64);
-                                event.data = [i as i64; 4];
-                            },
-                        ))
-                        .unwrap();
+                let mut published = 0usize;
+                while published < THROUGHPUT_EVENTS as usize {
+                    let chunk_len = (THROUGHPUT_EVENTS as usize - published).min(batch_size);
+                    let chunk_start = published;
+                    disruptor.batch_publish(chunk_len, |iter| {
+                        for (index, event) in iter.enumerate() {
+                            let value = (chunk_start + index) as i64;
+                            event.id = std::hint::black_box(value);
+                            event.data = [value; 4];
+                        }
+                    });
+                    published += chunk_len;
                 }
 
                 // Wait for all events to be processed
-                while counter.load(Ordering::Acquire) < THROUGHPUT_EVENTS as i64 {
+                while counter.load(Ordering::Relaxed) < THROUGHPUT_EVENTS as i64 {
                     std::hint::spin_loop();
                 }
             }
@@ -130,7 +179,7 @@ fn benchmark_disruptor_throughput(
         })
     });
 
-    disruptor.shutdown().unwrap();
+    disruptor.shutdown();
 }
 
 /// Benchmark std::sync::mpsc channel throughput
@@ -140,53 +189,40 @@ fn benchmark_mpsc_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_size: 
 
     group.throughput(Throughput::Elements(THROUGHPUT_EVENTS));
     group.bench_function(benchmark_id, |b| {
+        let (sender, receiver) = mpsc::sync_channel::<ThroughputEvent>(buffer_size);
+        let processed_total = Arc::new(AtomicU64::new(0));
+
+        let processed_total_clone = Arc::clone(&processed_total);
+        let receiver_handle = thread::spawn(move || {
+            while let Ok(event) = receiver.recv() {
+                std::hint::black_box(event.data[0]);
+                processed_total_clone.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                // Create fresh channel and thread for each iteration
-                let (sender, receiver) = mpsc::sync_channel(buffer_size);
-                let counter = Arc::new(AtomicI64::new(0));
-
-                let counter_clone = counter.clone();
-                let receiver_handle = thread::spawn(move || {
-                    let mut processed = 0;
-                    while processed < THROUGHPUT_EVENTS {
-                        if let Ok(event) = receiver.recv() {
-                            // Minimal processing to match Disruptor handler
-                            let _event: ThroughputEvent = event;
-                            std::hint::black_box(_event.data[0]);
-
-                            processed += 1;
-                            counter_clone.store(processed as i64, Ordering::Relaxed);
-                        } else {
-                            // Channel closed, exit
-                            break;
-                        }
-                    }
-                });
+                let start_processed = processed_total.load(Ordering::Relaxed);
+                let target = start_processed + THROUGHPUT_EVENTS;
 
                 for i in 0..THROUGHPUT_EVENTS {
                     let event = ThroughputEvent {
                         id: std::hint::black_box(i as i64),
                         data: [i as i64; 4],
                     };
-                    if sender.send(event).is_err() {
-                        // Channel closed, stop sending
-                        break;
-                    }
+                    sender.send(event).unwrap();
                 }
 
-                // Wait for all events to be processed
-                while counter.load(Ordering::Acquire) < THROUGHPUT_EVENTS as i64 {
+                while processed_total.load(Ordering::Relaxed) < target {
                     std::hint::spin_loop();
                 }
-
-                // Close sender to signal receiver to stop
-                drop(sender);
-                receiver_handle.join().unwrap();
             }
             start.elapsed()
-        })
+        });
+
+        drop(sender);
+        receiver_handle.join().unwrap();
     });
 }
 
@@ -197,53 +233,40 @@ fn benchmark_crossbeam_throughput(group: &mut BenchmarkGroup<WallTime>, buffer_s
 
     group.throughput(Throughput::Elements(THROUGHPUT_EVENTS));
     group.bench_function(benchmark_id, |b| {
+        let (sender, receiver) = crossbeam::channel::bounded::<ThroughputEvent>(buffer_size);
+        let processed_total = Arc::new(AtomicU64::new(0));
+
+        let processed_total_clone = Arc::clone(&processed_total);
+        let receiver_handle = thread::spawn(move || {
+            while let Ok(event) = receiver.recv() {
+                std::hint::black_box(event.data[0]);
+                processed_total_clone.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                // Create fresh channel and thread for each iteration
-                let (sender, receiver) = crossbeam::channel::bounded(buffer_size);
-                let counter = Arc::new(AtomicI64::new(0));
-
-                let counter_clone = counter.clone();
-                let receiver_handle = thread::spawn(move || {
-                    let mut processed = 0;
-                    while processed < THROUGHPUT_EVENTS {
-                        if let Ok(event) = receiver.recv() {
-                            // Minimal processing to match Disruptor handler
-                            let _event: ThroughputEvent = event;
-                            std::hint::black_box(_event.data[0]);
-
-                            processed += 1;
-                            counter_clone.store(processed as i64, Ordering::Relaxed);
-                        } else {
-                            // Channel closed, exit
-                            break;
-                        }
-                    }
-                });
+                let start_processed = processed_total.load(Ordering::Relaxed);
+                let target = start_processed + THROUGHPUT_EVENTS;
 
                 for i in 0..THROUGHPUT_EVENTS {
                     let event = ThroughputEvent {
                         id: std::hint::black_box(i as i64),
                         data: [i as i64; 4],
                     };
-                    if sender.send(event).is_err() {
-                        // Channel closed, stop sending
-                        break;
-                    }
+                    sender.send(event).unwrap();
                 }
 
-                // Wait for all events to be processed
-                while counter.load(Ordering::Acquire) < THROUGHPUT_EVENTS as i64 {
+                while processed_total.load(Ordering::Relaxed) < target {
                     std::hint::spin_loop();
                 }
-
-                // Close sender to signal receiver to stop
-                drop(sender);
-                receiver_handle.join().unwrap();
             }
             start.elapsed()
-        })
+        });
+
+        drop(sender);
+        receiver_handle.join().unwrap();
     });
 }
 
@@ -273,7 +296,7 @@ fn benchmark_try_publish_throughput(group: &mut BenchmarkGroup<WallTime>, buffer
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Release);
+                counter.store(0, Ordering::Relaxed);
 
                 let mut published = 0;
                 while published < THROUGHPUT_EVENTS {
@@ -293,7 +316,7 @@ fn benchmark_try_publish_throughput(group: &mut BenchmarkGroup<WallTime>, buffer
                 }
 
                 // Wait for all events to be processed
-                while counter.load(Ordering::Acquire) < THROUGHPUT_EVENTS as i64 {
+                while counter.load(Ordering::Relaxed) < THROUGHPUT_EVENTS as i64 {
                     std::hint::spin_loop();
                 }
             }

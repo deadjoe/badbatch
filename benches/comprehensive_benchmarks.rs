@@ -56,7 +56,7 @@ mod fixed_benchmarks {
             _sequence: i64,
             _end_of_batch: bool,
         ) -> DisruptorResult<()> {
-            self.counter.fetch_add(1, Ordering::Release);
+            self.counter.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
     }
@@ -66,7 +66,7 @@ mod fixed_benchmarks {
         let start = Instant::now();
         let timeout = Duration::from_millis(timeout_ms);
 
-        while counter.load(Ordering::Acquire) < expected {
+        while counter.load(Ordering::Relaxed) < expected {
             if start.elapsed() > timeout {
                 return false;
             }
@@ -111,7 +111,7 @@ mod fixed_benchmarks {
                 b.iter_custom(|iters| {
                     let start = Instant::now();
                     for _ in 0..iters {
-                        counter.store(0, Ordering::Release);
+                        counter.store(0, Ordering::Relaxed);
 
                         for i in 0..*burst_size {
                             if disruptor
@@ -145,10 +145,12 @@ mod fixed_benchmarks {
     pub fn safe_throughput_test(c: &mut Criterion) {
         let mut group = c.benchmark_group("Safe_Throughput");
         group.measurement_time(Duration::from_secs(3));
+        let events_per_iter: i64 = 100;
 
         // Test different buffer sizes
         for buffer_size in [256, 1024].iter() {
             let benchmark_id = BenchmarkId::new("buffer", buffer_size);
+            group.throughput(Throughput::Elements(events_per_iter as u64));
 
             group.bench_function(benchmark_id, |b| {
                 let factory = DefaultEventFactory::<SafeEvent>::new();
@@ -169,12 +171,11 @@ mod fixed_benchmarks {
                     return; // Skip this test if start fails
                 }
 
-                b.iter_custom(|iters| {
-                    let events_per_iter = 100;
+                let _duration = b.iter_custom(|iters| {
                     let start = Instant::now();
 
                     for _ in 0..iters {
-                        counter.store(0, Ordering::Release);
+                        counter.store(0, Ordering::Relaxed);
 
                         for i in 0..events_per_iter {
                             if disruptor
@@ -193,10 +194,10 @@ mod fixed_benchmarks {
                             break;
                         }
                     }
-
-                    let _ = disruptor.shutdown();
                     start.elapsed()
-                })
+                });
+
+                let _ = disruptor.shutdown();
             });
         }
 
@@ -230,7 +231,7 @@ mod fixed_benchmarks {
             b.iter_custom(|iters| {
                 let start = Instant::now();
                 for i in 0..iters {
-                    counter.store(0, Ordering::Release);
+                    counter.store(0, Ordering::Relaxed);
 
                     if disruptor
                         .publish_event(ClosureEventTranslator::new(
