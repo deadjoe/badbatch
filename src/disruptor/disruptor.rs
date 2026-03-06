@@ -236,6 +236,8 @@ where
         for (index, processor) in self.event_processors.iter().enumerate() {
             // Clone the processor for the thread
             let processor_clone = Arc::clone(processor);
+            #[cfg(not(debug_assertions))]
+            let _ = index;
 
             let handle = thread::spawn(move || -> Result<()> {
                 crate::internal_debug!("Event processor {index} starting");
