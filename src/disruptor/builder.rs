@@ -137,45 +137,50 @@ where
     // Create shutdown flag
     let shutdown_flag = Arc::new(AtomicBool::new(false));
 
+    let max_stage_index = consumers.iter().map(|consumer| consumer.stage_index).max();
+    let stage_widths = max_stage_index.map_or_else(Vec::new, |max_stage| {
+        let mut widths = vec![0_usize; max_stage + 1];
+        for consumer in &consumers {
+            widths[consumer.stage_index] += 1;
+        }
+        widths
+    });
+    let slot_locks = stage_widths.iter().any(|width| *width > 1).then(|| {
+        Arc::new(
+            (0..size)
+                .map(|_| parking_lot::Mutex::new(()))
+                .collect::<Vec<_>>(),
+        )
+    });
+
     // Start consumer threads
     let mut consumer_threads: Vec<Consumer> = Vec::new();
     let mut consumer_sequences: Vec<Arc<Sequence>> = Vec::new();
+    let mut stage_sequences = stage_widths
+        .iter()
+        .map(|_| Vec::<Arc<Sequence>>::new())
+        .collect::<Vec<_>>();
 
-    for mut consumer_info in consumers {
-        // Resolve dependencies: replace placeholder sequences with actual consumer sequences
-        if !consumer_info.dependent_sequences.is_empty() {
-            let mut actual_dependencies = Vec::new();
-            let dependency_count = consumer_info.dependent_sequences.len();
-
-            // For dependency chains, take only the immediately previous consumer
-            // This ensures A -> B -> C dependency chain where B depends on A, C depends on B
-            if dependency_count == 1 && !consumer_sequences.is_empty() {
-                // Take only the last consumer sequence (immediately previous consumer)
-                let last_index = consumer_sequences.len() - 1;
-                actual_dependencies.push(consumer_sequences[last_index].clone());
-            } else {
-                // Fallback: take the last N consumer sequences as dependencies
-                let start_index = if consumer_sequences.len() >= dependency_count {
-                    consumer_sequences.len() - dependency_count
-                } else {
-                    0
-                };
-
-                for sequence in consumer_sequences.iter().skip(start_index) {
-                    actual_dependencies.push(sequence.clone());
-                }
-            }
-
-            consumer_info.dependent_sequences = actual_dependencies;
-        }
-
-        // Destructure to avoid partial moves later on
+    for consumer_info in consumers {
         let ConsumerInfo {
             handler,
             thread_name,
             cpu_affinity,
-            dependent_sequences,
+            stage_index,
         } = consumer_info;
+
+        let dependent_sequences = if stage_index == 0 {
+            Vec::new()
+        } else {
+            let previous_stage_sequences = stage_sequences
+                .get(stage_index - 1)
+                .expect("consumer stages must be contiguous");
+            assert!(
+                !previous_stage_sequences.is_empty(),
+                "dependent consumer stage must have upstream consumers"
+            );
+            previous_stage_sequences.clone()
+        };
 
         // Create a sequence barrier for this consumer.
         // Always use ProcessingSequenceBarrier for uniform contiguous-publication
@@ -193,12 +198,21 @@ where
             ring_buffer.clone(),
             sequence_barrier,
             handler,
-            thread_name,
-            cpu_affinity,
-            shutdown_flag.clone(),
+            ConsumerThreadConfig {
+                thread_name,
+                cpu_affinity,
+                shutdown_flag: shutdown_flag.clone(),
+                slot_locks: slot_locks.clone(),
+                needs_slot_lock: stage_widths.get(stage_index).copied().unwrap_or(1) > 1,
+            },
         );
 
+        let stage_sequence = consumer_sequence.clone();
         consumer_sequences.push(consumer_sequence);
+        stage_sequences
+            .get_mut(stage_index)
+            .expect("consumer stage must exist")
+            .push(stage_sequence);
         consumer_threads.push(consumer);
     }
 
@@ -416,6 +430,14 @@ impl Drop for Consumer {
     }
 }
 
+struct ConsumerThreadConfig {
+    thread_name: Option<String>,
+    cpu_affinity: Option<usize>,
+    shutdown_flag: Arc<AtomicBool>,
+    slot_locks: Option<Arc<Vec<parking_lot::Mutex<()>>>>,
+    needs_slot_lock: bool,
+}
+
 /// Start a consumer thread for processing events
 ///
 /// This function creates and starts a consumer thread that processes events
@@ -425,9 +447,7 @@ fn start_consumer_thread<E>(
     ring_buffer: Arc<RingBuffer<E>>,
     sequence_barrier: Arc<dyn SequenceBarrier>,
     mut event_handler: Box<dyn EventHandler<E> + Send + Sync>,
-    thread_name: Option<String>,
-    cpu_affinity: Option<usize>,
-    shutdown_flag: Arc<AtomicBool>,
+    config: ConsumerThreadConfig,
 ) -> (Arc<Sequence>, Consumer)
 where
     E: Send + Sync + 'static,
@@ -435,6 +455,14 @@ where
     // Create a sequence for this consumer
     let consumer_sequence = Arc::new(Sequence::new(-1));
     let consumer_sequence_clone = consumer_sequence.clone();
+
+    let ConsumerThreadConfig {
+        thread_name,
+        cpu_affinity,
+        shutdown_flag,
+        slot_locks,
+        needs_slot_lock,
+    } = config;
 
     let thread_name = thread_name.unwrap_or_else(|| "disruptor-consumer".to_string());
     let thread_name_clone = thread_name.clone();
@@ -480,30 +508,49 @@ where
                     // must be fully consumed before stopping (LMAX Disruptor contract).
                     while next_sequence <= available_sequence {
                         let end_of_batch = next_sequence == available_sequence;
+                        if needs_slot_lock {
+                            let slot_locks = slot_locks
+                                .as_ref()
+                                .expect("parallel consumer stage must have slot locks");
+                            let slot_index = ring_buffer.sequence_to_index(next_sequence);
+                            let _slot_guard = slot_locks[slot_index].lock();
 
-                        // Get the event from the ring buffer
-                        // SAFETY: We have exclusive access to this sequence range
-                        let event =
-                            unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
+                            // SAFETY: Slot-level locking ensures only one parallel consumer
+                            // creates a mutable reference for this ring slot at a time.
+                            let event =
+                                unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
 
-                        // Process the event with proper exception handling
-                        if let Err(e) =
-                            event_handler.on_event(event, next_sequence, end_of_batch)
-                        {
-                            // Log the error but continue processing
-                            // This follows LMAX Disruptor's approach of not stopping on individual event errors
-                            #[cfg(debug_assertions)]
-                            eprintln!(
-                                "Event processing error in thread '{thread_name}' at sequence {next_sequence}: {e:?}"
-                            );
-                            #[cfg(not(debug_assertions))]
-                            let _ = e;
+                            if let Err(e) =
+                                event_handler.on_event(event, next_sequence, end_of_batch)
+                            {
+                                #[cfg(debug_assertions)]
+                                eprintln!(
+                                    "Event processing error in thread '{thread_name}' at sequence {next_sequence}: {e:?}"
+                                );
+                                #[cfg(not(debug_assertions))]
+                                let _ = e;
+                            }
+                        } else {
+                            // SAFETY: We have exclusive access to this sequence range by topology.
+                            let event =
+                                unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
+
+                            if let Err(e) =
+                                event_handler.on_event(event, next_sequence, end_of_batch)
+                            {
+                                #[cfg(debug_assertions)]
+                                eprintln!(
+                                    "Event processing error in thread '{thread_name}' at sequence {next_sequence}: {e:?}"
+                                );
+                                #[cfg(not(debug_assertions))]
+                                let _ = e;
+                            }
                         }
 
                         // Update sequence AFTER event processing is completely done.
-                        // The Release store in set_volatile ensures all prior writes
-                        // (event modifications) are visible before the sequence advances.
-                        consumer_sequence_clone.set_volatile(next_sequence);
+                        // Release ordering is sufficient here: downstream consumers and
+                        // producers observe progress via Acquire loads on `Sequence::get`.
+                        consumer_sequence_clone.set(next_sequence);
 
                         next_sequence += 1;
                     }
@@ -688,8 +735,8 @@ where
     handler: Box<dyn EventHandler<E> + Send + Sync>,
     thread_name: Option<String>,
     cpu_affinity: Option<usize>,
-    /// Sequences that this consumer depends on (for dependency chains)
-    dependent_sequences: Vec<Arc<Sequence>>,
+    /// Logical stage index within the processing graph.
+    stage_index: usize,
 }
 
 /// Shared state for building disruptors
@@ -703,6 +750,8 @@ where
     consumers: Vec<ConsumerInfo<E>>,
     current_thread_name: Option<String>,
     current_cpu_affinity: Option<usize>,
+    current_stage_index: usize,
+    current_stage_width: usize,
 }
 
 /// Builder for single producer Disruptors
@@ -725,8 +774,6 @@ where
     W: WaitStrategy + Send + Sync + Clone + 'static,
 {
     builder: SingleProducerBuilder<HasConsumers, E, F, W>,
-    /// Number of consumers that this dependent consumer should wait for
-    dependency_count: usize,
 }
 
 impl<E, F, W> DependentConsumerBuilder<E, F, W>
@@ -760,21 +807,14 @@ where
     {
         let boxed_handler = Box::new(ClosureEventHandler::new(handler));
 
-        // Create a special marker to indicate this consumer has dependencies
-        // The actual dependency sequences will be resolved during build()
-        let mut dependent_sequences = Vec::new();
-        for _ in 0..self.dependency_count {
-            // Placeholder - will be replaced with actual sequences during build
-            dependent_sequences.push(Arc::new(Sequence::new(-1)));
-        }
-
         let consumer_info = ConsumerInfo {
             handler: boxed_handler,
             thread_name: self.builder.shared.current_thread_name.take(),
             cpu_affinity: self.builder.shared.current_cpu_affinity.take(),
-            dependent_sequences, // This consumer depends on previous ones
+            stage_index: self.builder.shared.current_stage_index,
         };
         self.builder.shared.consumers.push(consumer_info);
+        self.builder.shared.current_stage_width += 1;
         self.builder
     }
 
@@ -789,21 +829,14 @@ where
     {
         let boxed_handler = Box::new(handler);
 
-        // Create a special marker to indicate this consumer has dependencies
-        // The actual dependency sequences will be resolved during build()
-        let mut dependent_sequences = Vec::new();
-        for _ in 0..self.dependency_count {
-            // Placeholder - will be replaced with actual sequences during build
-            dependent_sequences.push(Arc::new(Sequence::new(-1)));
-        }
-
         let consumer_info = ConsumerInfo {
             handler: boxed_handler,
             thread_name: self.builder.shared.current_thread_name.take(),
             cpu_affinity: self.builder.shared.current_cpu_affinity.take(),
-            dependent_sequences, // This consumer depends on previous ones
+            stage_index: self.builder.shared.current_stage_index,
         };
         self.builder.shared.consumers.push(consumer_info);
+        self.builder.shared.current_stage_width += 1;
         self.builder
     }
 
@@ -828,6 +861,8 @@ where
                 consumers: Vec::new(),
                 current_thread_name: None,
                 current_cpu_affinity: None,
+                current_stage_index: 0,
+                current_stage_width: 0,
             },
             _phantom: PhantomData,
         }
@@ -882,9 +917,10 @@ where
             handler: boxed_handler,
             thread_name: self.shared.current_thread_name.take(),
             cpu_affinity: self.shared.current_cpu_affinity.take(),
-            dependent_sequences: Vec::new(), // No dependencies for first consumer
+            stage_index: self.shared.current_stage_index,
         };
         self.shared.consumers.push(consumer_info);
+        self.shared.current_stage_width = 1;
 
         SingleProducerBuilder {
             event_factory: self.event_factory,
@@ -939,9 +975,10 @@ where
             handler: boxed_handler,
             thread_name: self.shared.current_thread_name.take(),
             cpu_affinity: self.shared.current_cpu_affinity.take(),
-            dependent_sequences: Vec::new(), // No dependencies for first consumer
+            stage_index: self.shared.current_stage_index,
         };
         self.shared.consumers.push(consumer_info);
+        self.shared.current_stage_width = 1;
 
         SingleProducerBuilder {
             event_factory: self.event_factory,
@@ -982,9 +1019,10 @@ where
             handler: boxed_handler,
             thread_name: self.shared.current_thread_name.take(),
             cpu_affinity: self.shared.current_cpu_affinity.take(),
-            dependent_sequences: Vec::new(), // No dependencies for parallel consumers
+            stage_index: self.shared.current_stage_index,
         };
         self.shared.consumers.push(consumer_info);
+        self.shared.current_stage_width += 1;
         self
     }
 
@@ -999,17 +1037,17 @@ where
             handler: boxed_handler,
             thread_name: self.shared.current_thread_name.take(),
             cpu_affinity: self.shared.current_cpu_affinity.take(),
-            dependent_sequences: Vec::new(), // No dependencies for parallel consumers
+            stage_index: self.shared.current_stage_index,
         };
         self.shared.consumers.push(consumer_info);
+        self.shared.current_stage_width += 1;
         self
     }
 
-    /// Create a dependency chain - the next consumer will depend on the previous consumer
+    /// Advance to the next processing stage.
     ///
-    /// This method allows creating consumer dependency chains similar to disruptor-rs.
-    /// The next consumer added will wait for the immediately previous consumer to complete
-    /// before processing events.
+    /// All consumers added after this call will wait for the entire current stage
+    /// to complete before they start processing.
     ///
     /// # Examples
     ///
@@ -1032,15 +1070,11 @@ where
     ///     .build();
     /// # drop(producer); // Clean shutdown
     /// ```
-    pub fn and_then(self) -> DependentConsumerBuilder<E, F, W> {
-        // Mark that the next consumer should depend on only the previous consumer
-        // In a dependency chain: A -> B -> C, B depends on A, C depends on B
-        let dependency_count = 1; // Only depend on the immediately previous consumer
+    pub fn and_then(mut self) -> DependentConsumerBuilder<E, F, W> {
+        self.shared.current_stage_index += 1;
+        self.shared.current_stage_width = 0;
 
-        DependentConsumerBuilder {
-            builder: self,
-            dependency_count,
-        }
+        DependentConsumerBuilder { builder: self }
     }
 
     /// Build the Disruptor and return a DisruptorHandle
@@ -1087,6 +1121,8 @@ where
                 consumers: Vec::new(),
                 current_thread_name: None,
                 current_cpu_affinity: None,
+                current_stage_index: 0,
+                current_stage_width: 0,
             },
             _phantom: PhantomData,
         }
@@ -1120,9 +1156,10 @@ where
             handler: boxed_handler,
             thread_name: self.shared.current_thread_name.take(),
             cpu_affinity: self.shared.current_cpu_affinity.take(),
-            dependent_sequences: Vec::new(), // No dependencies for first consumer
+            stage_index: self.shared.current_stage_index,
         };
         self.shared.consumers.push(consumer_info);
+        self.shared.current_stage_width = 1;
 
         MultiProducerBuilder {
             event_factory: self.event_factory,
@@ -1163,9 +1200,10 @@ where
             handler: boxed_handler,
             thread_name: self.shared.current_thread_name.take(),
             cpu_affinity: self.shared.current_cpu_affinity.take(),
-            dependent_sequences: Vec::new(), // No dependencies for parallel consumers
+            stage_index: self.shared.current_stage_index,
         };
         self.shared.consumers.push(consumer_info);
+        self.shared.current_stage_width += 1;
         self
     }
 
@@ -2704,6 +2742,126 @@ mod tests {
 
         println!("✅ Robust dependency chain test completed successfully!");
         println!("   All {num_events} events processed correctly through dependency chain");
+    }
+
+    #[test]
+    fn test_parallel_stage_then_waits_for_all_upstream_handlers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let downstream_processed = Arc::new(AtomicUsize::new(0));
+        let downstream_processed_clone = downstream_processed.clone();
+
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .thread_name("parallel-slow")
+                .handle_events_with(
+                    move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        std::thread::sleep(Duration::from_millis(25));
+                        event.data.push_str("|slow");
+                    },
+                )
+                .thread_name("parallel-fast")
+                .handle_events_with(
+                    move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        event.data.push_str("|fast");
+                    },
+                )
+                .and_then()
+                .thread_name("downstream")
+                .handle_events_with(
+                    move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        assert!(
+                            event.data.contains("|slow"),
+                            "downstream stage must wait for the slow upstream handler"
+                        );
+                        assert!(
+                            event.data.contains("|fast"),
+                            "downstream stage must observe every parallel upstream mutation"
+                        );
+                        downstream_processed_clone.fetch_add(1, Ordering::SeqCst);
+                    },
+                )
+                .build();
+
+        disruptor_handle.publish(|event| {
+            event.value = 1;
+            event.data.clear();
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while downstream_processed.load(Ordering::SeqCst) < 1 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        disruptor_handle.shutdown();
+        assert_eq!(downstream_processed.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_parallel_consumers_in_dependent_stage_share_upstream_barrier() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let final_stage_processed = Arc::new(AtomicUsize::new(0));
+        let final_stage_processed_clone = final_stage_processed.clone();
+
+        let mut disruptor_handle =
+            build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .thread_name("root")
+                .handle_events_with(
+                    move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        event.data.push_str("|root");
+                    },
+                )
+                .and_then()
+                .thread_name("left")
+                .handle_events_with(
+                    move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        assert!(
+                    event.data.contains("|root"),
+                    "every handler in the dependent stage must wait for the full upstream stage"
+                );
+                        std::thread::sleep(Duration::from_millis(20));
+                        event.data.push_str("|left");
+                    },
+                )
+                .thread_name("right")
+                .handle_events_with(
+                    move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        assert!(
+                    event.data.contains("|root"),
+                    "parallel handlers in the same dependent stage must share the upstream barrier"
+                );
+                        event.data.push_str("|right");
+                    },
+                )
+                .and_then()
+                .thread_name("final")
+                .handle_events_with(
+                    move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
+                        assert!(event.data.contains("|root"));
+                        assert!(event.data.contains("|left"));
+                        assert!(event.data.contains("|right"));
+                        final_stage_processed_clone.fetch_add(1, Ordering::SeqCst);
+                    },
+                )
+                .build();
+
+        disruptor_handle.publish(|event| {
+            event.value = 7;
+            event.data.clear();
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while final_stage_processed.load(Ordering::SeqCst) < 1 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        disruptor_handle.shutdown();
+        assert_eq!(final_stage_processed.load(Ordering::SeqCst), 1);
     }
 
     #[test]
