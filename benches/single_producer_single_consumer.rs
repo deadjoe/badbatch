@@ -102,10 +102,18 @@ fn wait_for_completion_yielding(counter: &Arc<AtomicI64>, expected: i64, timeout
     true
 }
 
-/// Safe wait with timeout and sleeping
-fn wait_for_completion_sleeping(counter: &Arc<AtomicI64>, expected: i64, timeout_ms: u64) -> bool {
+/// Safe wait with timeout that avoids millisecond-scale polling artifacts.
+///
+/// This is used by the Blocking/Sleeping benchmarks so the benchmark harness
+/// does not dominate the measured end-to-end latency with its own `sleep(1ms)`.
+fn wait_for_completion_cooperative(
+    counter: &Arc<AtomicI64>,
+    expected: i64,
+    timeout_ms: u64,
+) -> bool {
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
+    let mut spin_budget = 0_u32;
 
     while counter.load(Ordering::Relaxed) < expected {
         if start.elapsed() > timeout {
@@ -115,7 +123,14 @@ fn wait_for_completion_sleeping(counter: &Arc<AtomicI64>, expected: i64, timeout
             );
             return false;
         }
-        std::thread::sleep(Duration::from_millis(1));
+
+        if spin_budget < 1024 {
+            spin_budget += 1;
+            std::hint::spin_loop();
+        } else {
+            spin_budget = 0;
+            std::thread::yield_now();
+        }
     }
     true
 }
@@ -173,7 +188,8 @@ fn benchmark_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pa
 
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Relaxed); // Reset counter for each iteration
+                let start_count = counter.load(Ordering::Relaxed);
+                let target = start_count + burst_size as i64;
 
                 for i in 1..=burst_size {
                     disruptor
@@ -187,7 +203,7 @@ fn benchmark_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pa
                 }
 
                 // Wait for all events to be processed with timeout
-                if !wait_for_completion(&counter, burst_size as i64, TIMEOUT_MS) {
+                if !wait_for_completion(&counter, target, TIMEOUT_MS) {
                     panic!("BusySpin benchmark failed: events not processed within timeout");
                 }
             }
@@ -231,7 +247,8 @@ fn benchmark_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
 
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Relaxed); // Reset counter for each iteration
+                let start_count = counter.load(Ordering::Relaxed);
+                let target = start_count + burst_size as i64;
 
                 for i in 1..=burst_size {
                     disruptor
@@ -245,7 +262,7 @@ fn benchmark_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
                 }
 
                 // Wait for all events to be processed with timeout and yielding
-                if !wait_for_completion_yielding(&counter, burst_size as i64, TIMEOUT_MS) {
+                if !wait_for_completion_yielding(&counter, target, TIMEOUT_MS) {
                     panic!("Yielding benchmark failed: events not processed within timeout");
                 }
             }
@@ -289,7 +306,8 @@ fn benchmark_blocking(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
 
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Relaxed); // Reset counter for each iteration
+                let start_count = counter.load(Ordering::Relaxed);
+                let target = start_count + burst_size as i64;
 
                 for i in 1..=burst_size {
                     disruptor
@@ -302,8 +320,9 @@ fn benchmark_blocking(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
                         .unwrap();
                 }
 
-                // Wait for all events to be processed with timeout and sleeping
-                if !wait_for_completion_sleeping(&counter, burst_size as i64, TIMEOUT_MS) {
+                // Use a cooperative waiter so the benchmark does not add a 1ms polling tax
+                // on top of the BlockingWaitStrategy's own behavior.
+                if !wait_for_completion_cooperative(&counter, target, TIMEOUT_MS) {
                     panic!("Blocking benchmark failed: events not processed within timeout");
                 }
             }
@@ -347,7 +366,8 @@ fn benchmark_sleeping(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
 
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Relaxed); // Reset counter for each iteration
+                let start_count = counter.load(Ordering::Relaxed);
+                let target = start_count + burst_size as i64;
 
                 for i in 1..=burst_size {
                     disruptor
@@ -360,8 +380,9 @@ fn benchmark_sleeping(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
                         .unwrap();
                 }
 
-                // Wait for all events to be processed with timeout and sleeping
-                if !wait_for_completion_sleeping(&counter, burst_size as i64, TIMEOUT_MS) {
+                // Use a cooperative waiter so the benchmark does not add a 1ms polling tax
+                // on top of the SleepingWaitStrategy's own behavior.
+                if !wait_for_completion_cooperative(&counter, target, TIMEOUT_MS) {
                     panic!("Sleeping benchmark failed: events not processed within timeout");
                 }
             }
@@ -406,7 +427,8 @@ fn benchmark_batch_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u
 
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Relaxed);
+                let start_count = counter.load(Ordering::Relaxed);
+                let target = start_count + burst_size as i64;
 
                 disruptor.batch_publish(burst_size as usize, |iter| {
                     for (index, event) in iter.enumerate() {
@@ -415,7 +437,7 @@ fn benchmark_batch_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u
                     }
                 });
 
-                if !wait_for_completion(&counter, burst_size as i64, TIMEOUT_MS) {
+                if !wait_for_completion(&counter, target, TIMEOUT_MS) {
                     panic!("BatchBusySpin benchmark failed: events not processed within timeout");
                 }
             }
@@ -454,7 +476,8 @@ fn benchmark_batch_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u6
 
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Relaxed);
+                let start_count = counter.load(Ordering::Relaxed);
+                let target = start_count + burst_size as i64;
 
                 disruptor.batch_publish(burst_size as usize, |iter| {
                     for (index, event) in iter.enumerate() {
@@ -463,7 +486,7 @@ fn benchmark_batch_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u6
                     }
                 });
 
-                if !wait_for_completion_yielding(&counter, burst_size as i64, TIMEOUT_MS) {
+                if !wait_for_completion_yielding(&counter, target, TIMEOUT_MS) {
                     panic!("BatchYielding benchmark failed: events not processed within timeout");
                 }
             }
