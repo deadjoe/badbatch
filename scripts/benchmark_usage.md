@@ -60,24 +60,19 @@ The benchmark runner has been completely rewritten with safety and reliability i
 ./scripts/run_benchmarks.sh optimize   # System optimization (requires sudo)
 ```
 
-## Expected Performance
+## Notes on Results
 
-Based on recent test runs (June 2025):
+Benchmark numbers are inherently machine- and workload-dependent:
+- CPU model, core count, and frequency scaling (laptop battery vs AC)
+- OS scheduling and background load
+- Rust version, build flags, and target features (e.g. `+lse` on AArch64)
 
-### MPSC Performance (3 producers)
-| Wait Strategy | Burst Size | Throughput | Notes |
-|---------------|------------|------------|--------|
-| BusySpin      | 10 events  | 3.8-4.1 Melem/s | Highest performance |
-| Yielding      | 10 events  | 4.1-4.4 Melem/s | Good scaling |
-| Blocking      | 10 events  | 1.8-1.9 Melem/s | Lower CPU usage |
-| Yielding      | 100 events | 4.6-5.0 Melem/s | Excellent scaling |
-| BusySpin      | 500 events | 3.9-4.1 Melem/s | High throughput |
+Treat results as **relative comparisons on the same machine and git revision**, not absolute targets.
 
-### Performance Characteristics
-- **Low Latency**: Individual events processed in microseconds
-- **High Throughput**: Millions of events per second
-- **Consistent Performance**: Low variance across test runs
-- **Excellent Scaling**: Performance maintained with larger burst sizes
+Different suites answer different questions:
+- `single_producer_single_consumer` / `multi_producer_single_consumer`: mixes API-path realism (single-event publication) with reference-aligned batch cases.
+- `throughput_comparison`: favors batch publication on the Disruptor side to approximate peak steady-state throughput comparable to LMAX Disruptor and `disruptor-rs`.
+- Script summaries label the best non-baseline result as `Peak Case`; use the detailed case list for full context.
 
 ## System Optimization
 
@@ -180,18 +175,18 @@ export LOG_DIR=ci_logs       # Custom log directory
 - **Duration**: 2-5 minutes
 - **Use Case**: Development validation, CI/CD
 
-### 2. Minimal (minimal_test)
-- **Purpose**: Quick debugging and hang detection
-- **Duration**: < 1 minute
+### 2. Minimal (comprehensive_benchmarks, short Criterion timings)
+- **Purpose**: Fast sanity run for debugging (short warm-up/measurement/sample size)
+- **Duration**: ~30-90 seconds (machine-dependent)
 - **Use Case**: Rapid iteration, troubleshooting
 
 ### 3. SPSC (single_producer_single_consumer)
-- **Purpose**: Single producer performance with all wait strategies
+- **Purpose**: Single producer performance with all wait strategies, covering both per-event API calls and batch publication
 - **Duration**: 5-10 minutes
 - **Use Case**: Wait strategy comparison, SPSC optimization
 
 ### 4. MPSC (multi_producer_single_consumer)
-- **Purpose**: Multi-producer coordination and scalability
+- **Purpose**: Multi-producer coordination and scalability with both per-event and batch publication paths
 - **Duration**: 10-15 minutes
 - **Use Case**: Multi-producer optimization, coordination testing
 
@@ -206,7 +201,7 @@ export LOG_DIR=ci_logs       # Custom log directory
 - **Use Case**: Latency analysis, competitive benchmarking
 
 ### 7. Throughput (throughput_comparison)
-- **Purpose**: Raw throughput vs other implementations
+- **Purpose**: Peak steady-state throughput vs other implementations
 - **Duration**: 15-20 minutes
 - **Use Case**: Throughput analysis, performance comparison
 
@@ -226,6 +221,6 @@ All benchmarks are verified to:
 
 ---
 
-**Last Updated**: June 25, 2025  
+**Last Updated**: 2026-03-06  
 **Script Version**: Enhanced with timeout protection and error recovery  
 **Benchmark Files**: 8 (optimized from 12 original files)
