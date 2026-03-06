@@ -5,6 +5,7 @@
 # Enhanced version combining comprehensive functionality with timeout protection
 
 set -e
+set -o pipefail
 
 # Colors for output
 RED='\033[0;31m'
@@ -14,10 +15,10 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-TIMEOUT_SECONDS=600  # 10 minutes timeout per benchmark (longer for comprehensive tests)
-SPSC_TIMEOUT=900     # 15 minutes for SPSC (longer due to many wait strategies)
-SCALING_TIMEOUT=900  # 15 minutes for buffer scaling (tests multiple sizes)
-LOG_DIR="benchmark_logs"
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-600}"  # 10 minutes timeout per benchmark (longer for comprehensive tests)
+SPSC_TIMEOUT="${SPSC_TIMEOUT:-900}"        # 15 minutes for SPSC (longer due to many wait strategies)
+SCALING_TIMEOUT="${SCALING_TIMEOUT:-900}"  # 15 minutes for buffer scaling (tests multiple sizes)
+LOG_DIR="${LOG_DIR:-benchmark_logs}"
 
 # Function to print colored output
 print_status() {
@@ -55,9 +56,9 @@ check_dependencies() {
 
 # Function to run benchmark with timeout protection
 run_benchmark_safe() {
-    local bench_name="$1"
-    local description="$2"
-    local timeout_override="$3"  # Optional override timeout
+    local bench_name="${1:?bench_name is required}"
+    local description="${2:?description is required}"
+    local timeout_override="${3:-}"  # Optional override timeout
     local log_file="$LOG_DIR/${bench_name}.log"
     
     print_status "Running $description..."
@@ -90,6 +91,14 @@ run_benchmark_safe() {
             
             # Display friendly results
             display_single_benchmark_results "$log_file" "$bench_name"
+
+            # Surface warnings emitted by benchmark code (does not fail the run).
+            local warning_count
+            warning_count=$(grep -c "^WARNING:" "$log_file" 2>/dev/null || true)
+            warning_count=${warning_count:-0}
+            if [ "$warning_count" -gt 0 ]; then
+                print_warning "$bench_name produced ${warning_count} WARNING lines (see $log_file)"
+            fi
             return 0
         else
             local exit_code=$?
@@ -122,6 +131,44 @@ run_quick() {
     print_status "This takes about 2-5 minutes and tests basic functionality."
     
     run_benchmark_safe "comprehensive_benchmarks" "Quick comprehensive test suite"
+}
+
+# Function to run minimal benchmarks (fast debugging)
+run_minimal() {
+    print_status "Running minimal benchmark suite..."
+    print_status "This is a fast sanity run for debugging (short Criterion timings)."
+
+    local bench_name="comprehensive_benchmarks"
+    local log_file="$LOG_DIR/${bench_name}_minimal.log"
+
+    # Use timeout if available (GNU timeout or gtimeout on macOS)
+    local timeout_cmd=""
+    if command -v timeout >/dev/null 2>&1; then
+        timeout_cmd="timeout 120s"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        timeout_cmd="gtimeout 120s"
+    fi
+
+    local start_time=$(date +%s)
+    if [ -n "$timeout_cmd" ]; then
+        if $timeout_cmd cargo bench --bench "$bench_name" -- --sample-size 10 --warm-up-time 1 --measurement-time 1 > "$log_file" 2>&1; then
+            local end_time=$(date +%s)
+            local duration=$((end_time - start_time))
+            print_success "${bench_name} (minimal) completed successfully in ${duration}s"
+            display_single_benchmark_results "$log_file" "${bench_name} (minimal)"
+            return 0
+        fi
+    else
+        if cargo bench --bench "$bench_name" -- --sample-size 10 --warm-up-time 1 --measurement-time 1 > "$log_file" 2>&1; then
+            print_success "${bench_name} (minimal) completed successfully"
+            display_single_benchmark_results "$log_file" "${bench_name} (minimal)"
+            return 0
+        fi
+    fi
+
+    print_error "${bench_name} (minimal) failed"
+    print_warning "Check log file: $log_file"
+    return 1
 }
 
 # Function to run SPSC benchmarks
@@ -338,6 +385,7 @@ show_help() {
     echo ""
     echo "Commands:"
     echo "  quick      Run quick benchmark suite (2-5 minutes) - RECOMMENDED for CI"
+    echo "  minimal    Run minimal benchmark suite (fast sanity run)"
     echo "  spsc       Run Single Producer Single Consumer benchmarks"
     echo "  mpsc       Run Multi Producer Single Consumer benchmarks"
     echo "  pipeline   Run Pipeline Processing benchmarks"
@@ -383,6 +431,10 @@ main() {
         quick)
             check_dependencies
             run_quick
+            ;;
+        minimal)
+            check_dependencies
+            run_minimal
             ;;
         spsc)
             check_dependencies
