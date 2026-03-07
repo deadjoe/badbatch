@@ -24,12 +24,14 @@ use badbatch::disruptor::{
     SequenceBarrier, Sequencer, SequencerEnum,
 };
 
-fn create_barrier(buffer_size: usize) -> (
-    Arc<MultiProducerSequencer>,
-    Arc<ProcessingSequenceBarrier>,
-) {
+fn create_barrier(
+    buffer_size: usize,
+) -> (Arc<MultiProducerSequencer>, Arc<ProcessingSequenceBarrier>) {
     let wait_strategy = Arc::new(BusySpinWaitStrategy::new());
-    let sequencer = Arc::new(MultiProducerSequencer::new(buffer_size, wait_strategy.clone()));
+    let sequencer = Arc::new(MultiProducerSequencer::new(
+        buffer_size,
+        wait_strategy.clone(),
+    ));
     let barrier = Arc::new(ProcessingSequenceBarrier::new(
         sequencer.get_cursor(),
         wait_strategy,
@@ -53,18 +55,24 @@ fn assert_gap_blocks_progress_until_fill(buffer_size: usize) {
     sequencer.publish(sequences[3]);
 
     assert_eq!(
-        barrier.wait_for_with_timeout(0, Duration::from_millis(5)).unwrap(),
+        barrier
+            .wait_for_with_timeout(0, Duration::from_millis(5))
+            .unwrap(),
         0
     );
     assert_eq!(
-        barrier.wait_for_with_timeout(1, Duration::from_millis(5)).unwrap(),
+        barrier
+            .wait_for_with_timeout(1, Duration::from_millis(5))
+            .unwrap(),
         0,
         "the barrier must not advance past the missing sequence 1"
     );
 
     sequencer.publish(sequences[1]);
     assert_eq!(
-        barrier.wait_for_with_timeout(1, Duration::from_millis(5)).unwrap(),
+        barrier
+            .wait_for_with_timeout(1, Duration::from_millis(5))
+            .unwrap(),
         3,
         "once the gap is filled the full contiguous prefix must become visible"
     );

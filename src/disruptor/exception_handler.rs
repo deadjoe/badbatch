@@ -277,18 +277,14 @@ mod tests {
         let shutdown_calls = calls.clone();
         let handler = ClosureExceptionHandler::new(
             move |error, sequence, event: &TestEvent| {
-                event_calls
-                    .event
-                    .lock()
-                    .unwrap()
-                    .push((format!("{error:?}"), sequence, event.value));
+                event_calls.event.lock().unwrap().push((
+                    format!("{error:?}"),
+                    sequence,
+                    event.value,
+                ));
             },
             move |error| {
-                start_calls
-                    .start
-                    .lock()
-                    .unwrap()
-                    .push(format!("{error:?}"));
+                start_calls.start.lock().unwrap().push(format!("{error:?}"));
             },
             move |error| {
                 shutdown_calls
@@ -309,10 +305,7 @@ mod tests {
             vec![("BufferFull".to_string(), 1, 42)]
         );
         assert_eq!(*calls.start.lock().unwrap(), vec!["Shutdown".to_string()]);
-        assert_eq!(
-            *calls.shutdown.lock().unwrap(),
-            vec!["Timeout".to_string()]
-        );
+        assert_eq!(*calls.shutdown.lock().unwrap(), vec!["Timeout".to_string()]);
     }
 
     #[test]

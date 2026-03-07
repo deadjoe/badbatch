@@ -8,11 +8,11 @@ use crate::disruptor::{
     event_factory::DefaultEventFactory,
     event_translator::ClosureEventTranslator,
     ring_buffer::RingBuffer,
-    sequence_barrier::ProcessingSequenceBarrier,
     sequence::Sequence,
+    sequence_barrier::ProcessingSequenceBarrier,
     sequencer::{MultiProducerSequencer, Sequencer, SequencerEnum, SingleProducerSequencer},
-    BlockingWaitStrategy, EventHandler, ProducerType, Result, SequenceBarrier,
     wait_strategy::BusySpinWaitStrategy,
+    BlockingWaitStrategy, EventHandler, ProducerType, Result, SequenceBarrier,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestCaseResult};
@@ -276,7 +276,10 @@ mod processing_sequence_barrier_properties {
         keys: &[u8],
     ) -> TestCaseResult {
         let wait_strategy = Arc::new(BusySpinWaitStrategy::new());
-        let sequencer = Arc::new(MultiProducerSequencer::new(buffer_size, wait_strategy.clone()));
+        let sequencer = Arc::new(MultiProducerSequencer::new(
+            buffer_size,
+            wait_strategy.clone(),
+        ));
         let barrier = ProcessingSequenceBarrier::new(
             sequencer.get_cursor(),
             wait_strategy,
