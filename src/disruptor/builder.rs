@@ -1375,6 +1375,7 @@ mod tests {
     use super::*;
     use crate::disruptor::wait_strategy::{BusySpinWaitStrategy, YieldingWaitStrategy};
     use std::sync::{mpsc, Arc, Mutex};
+    use std::time::Duration;
 
     macro_rules! println {
         ($($arg:tt)*) => {
@@ -1399,6 +1400,20 @@ mod tests {
 
     fn test_event_factory() -> TestEvent {
         TestEvent::default()
+    }
+
+    fn wait_until<F>(timeout: Duration, mut condition: F, description: &str)
+    where
+        F: FnMut() -> bool,
+    {
+        let start = std::time::Instant::now();
+        while !condition() {
+            assert!(
+                start.elapsed() < timeout,
+                "timed out waiting for {description} after {timeout:?}"
+            );
+            std::thread::yield_now();
+        }
     }
 
     #[test]
@@ -1627,8 +1642,9 @@ mod tests {
             event.data = "test3".to_string();
         });
 
-        // Give time for processing
-        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(rx1.recv_timeout(Duration::from_secs(1)).unwrap(), 0);
+        assert_eq!(rx2.recv_timeout(Duration::from_secs(1)).unwrap(), 0);
+        assert_eq!(rx3.recv_timeout(Duration::from_secs(1)).unwrap(), 0);
 
         // Properly shutdown all disruptors
         disruptor1.shutdown();
@@ -2037,8 +2053,11 @@ mod tests {
             });
         }
 
-        // Give consumers time to process
-        std::thread::sleep(Duration::from_millis(100));
+        wait_until(
+            Duration::from_secs(1),
+            || counter2.load(Ordering::SeqCst) == 5,
+            "dependency chain to process all events",
+        );
 
         // Shutdown
         disruptor_handle.shutdown();
@@ -2120,8 +2139,11 @@ mod tests {
             });
         }
 
-        // Give consumer time to process
-        std::thread::sleep(Duration::from_millis(100));
+        wait_until(
+            Duration::from_secs(1),
+            || total_processed.load(Ordering::SeqCst) == 10,
+            "stateful handler to process all events",
+        );
 
         // Shutdown
         disruptor_handle.shutdown();
@@ -2200,8 +2222,14 @@ mod tests {
             });
         }
 
-        // Give consumers time to process
-        std::thread::sleep(Duration::from_millis(100));
+        wait_until(
+            Duration::from_secs(1),
+            || {
+                closure_total.load(Ordering::SeqCst) == 5
+                    && stateful_total.load(Ordering::SeqCst) == 5
+            },
+            "both mixed handlers to process all events",
+        );
 
         // Shutdown
         disruptor_handle.shutdown();
@@ -2290,8 +2318,11 @@ mod tests {
             println!("Published event {i}");
         }
 
-        // Give time for processing
-        std::thread::sleep(Duration::from_millis(200));
+        wait_until(
+            Duration::from_secs(1),
+            || stage1_count.load(Ordering::SeqCst) == 1 && stage2_count.load(Ordering::SeqCst) == 1,
+            "simple dependency chain to process the published event",
+        );
 
         println!("Shutting down...");
         let shutdown_start = std::time::Instant::now();
@@ -2377,8 +2408,11 @@ mod tests {
         });
         println!("📤 Event published");
 
-        // Give time for processing
-        std::thread::sleep(Duration::from_millis(100));
+        wait_until(
+            Duration::from_secs(1),
+            || stage2_count.load(Ordering::SeqCst) == 1,
+            "debug dependency chain to process the published event",
+        );
 
         println!("🛑 Shutting down...");
         disruptor_handle.shutdown();
@@ -2499,9 +2533,16 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        // Give time for processing
         println!("⏳ Waiting for processing...");
-        std::thread::sleep(Duration::from_millis(200));
+        wait_until(
+            Duration::from_secs(1),
+            || {
+                stage_counts
+                    .iter()
+                    .all(|count| count.load(Ordering::SeqCst) == num_events as usize)
+            },
+            "four-stage dependency chain to process all events",
+        );
 
         println!("🛑 Shutting down...");
         disruptor_handle.shutdown();
@@ -2718,9 +2759,15 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
 
-        // Give plenty of time for processing
         println!("⏳ Waiting for processing to complete...");
-        std::thread::sleep(Duration::from_millis(200));
+        wait_until(
+            Duration::from_secs(1),
+            || {
+                stage1_count.load(Ordering::SeqCst) == num_events as usize
+                    && stage2_count.load(Ordering::SeqCst) == num_events as usize
+            },
+            "robust dependency chain to process all events",
+        );
 
         println!("🛑 Shutting down...");
         disruptor_handle.shutdown();
@@ -2931,7 +2978,14 @@ mod tests {
             });
         }
 
-        std::thread::sleep(Duration::from_millis(100));
+        let wait_start = std::time::Instant::now();
+        while total_processed.load(Ordering::SeqCst) < 5 {
+            assert!(
+                wait_start.elapsed() < Duration::from_secs(1),
+                "timed out waiting for stateful handler to process all events"
+            );
+            std::thread::yield_now();
+        }
         disruptor_handle.shutdown();
 
         assert_eq!(total_processed.load(Ordering::SeqCst), 5);
@@ -2970,15 +3024,27 @@ mod tests {
             });
         }
 
-        std::thread::sleep(Duration::from_millis(100));
+        let wait_start = std::time::Instant::now();
+        while stage2_count.load(Ordering::SeqCst) < 3 {
+            assert!(
+                wait_start.elapsed() < Duration::from_secs(1),
+                "timed out waiting for both pipeline stages to process all events"
+            );
+            std::thread::yield_now();
+        }
         disruptor_handle.shutdown();
 
-        // Both stages should process events (dependency logic may need refinement)
         let stage1_processed = stage1_count.load(Ordering::SeqCst);
         let stage2_processed = stage2_count.load(Ordering::SeqCst);
 
-        assert!(stage1_processed > 0, "Stage 1 should process events");
-        assert!(stage2_processed > 0, "Stage 2 should process events");
+        assert_eq!(
+            stage1_processed, 3,
+            "Stage 1 should process all published events"
+        );
+        assert_eq!(
+            stage2_processed, 3,
+            "Stage 2 should process all published events"
+        );
         println!(
             "✅ and_then() structure test passed: stage1={stage1_processed}, stage2={stage2_processed}"
         );
@@ -3024,8 +3090,11 @@ mod tests {
             });
         }
 
-        // Give time for processing
-        std::thread::sleep(Duration::from_millis(100));
+        wait_until(
+            Duration::from_secs(1),
+            || processed_count.load(Ordering::SeqCst) == 5,
+            "builder API consumer to process all events",
+        );
 
         // Shutdown
         builder_disruptor.shutdown();
@@ -3121,8 +3190,11 @@ mod tests {
             event.data = "test_single".to_string();
         });
 
-        // Wait for processing to complete
-        std::thread::sleep(Duration::from_millis(100));
+        wait_until(
+            Duration::from_secs(1),
+            || stage3_processed.load(Ordering::SeqCst) == 1,
+            "single event to traverse all three pipeline stages",
+        );
 
         assert_eq!(stage1_processed.load(Ordering::SeqCst), 1);
         assert_eq!(stage2_processed.load(Ordering::SeqCst), 1);
@@ -3262,8 +3334,11 @@ mod tests {
             });
         }
 
-        // Give time for processing
-        std::thread::sleep(Duration::from_millis(100));
+        wait_until(
+            Duration::from_secs(1),
+            || processed_count.load(Ordering::SeqCst) == 5,
+            "CPU-affinity consumer to process all events",
+        );
 
         // Shutdown
         disruptor_handle.shutdown();
@@ -3325,8 +3400,14 @@ mod tests {
             });
         }
 
-        // Give time for processing
-        std::thread::sleep(Duration::from_millis(200));
+        wait_until(
+            Duration::from_secs(1),
+            || {
+                consumer1_count.load(Ordering::SeqCst) == 10
+                    && consumer2_count.load(Ordering::SeqCst) == 10
+            },
+            "both parallel consumers to process all events",
+        );
 
         // Shutdown
         disruptor_handle.shutdown();
@@ -3334,9 +3415,6 @@ mod tests {
         // Verify both consumers processed events
         let consumer1_processed = consumer1_count.load(Ordering::SeqCst);
         let consumer2_processed = consumer2_count.load(Ordering::SeqCst);
-
-        assert!(consumer1_processed > 0, "Consumer 1 should process events");
-        assert!(consumer2_processed > 0, "Consumer 2 should process events");
 
         // In LMAX Disruptor, parallel consumers each process all events
         // So each consumer should process all 10 events
@@ -3533,8 +3611,11 @@ mod tests {
             });
         }
 
-        // Give the pipeline time to process all events through all stages
-        std::thread::sleep(Duration::from_millis(500));
+        wait_until(
+            Duration::from_secs(2),
+            || final_total.load(Ordering::SeqCst) == 8,
+            "comprehensive four-stage pipeline to process all events",
+        );
 
         println!("Shutting down disruptor...");
         let shutdown_start = std::time::Instant::now();

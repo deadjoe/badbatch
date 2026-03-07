@@ -20,8 +20,8 @@ use badbatch::disruptor::{
     ProducerType, Result, Sequencer,
 };
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Default, Clone)]
 struct TestEvent {
@@ -34,6 +34,7 @@ struct CountingEventHandler {
     name: String,
     count: Arc<AtomicUsize>,
     last_sequence: Arc<AtomicI64>,
+    processed_sequences: Arc<Mutex<Vec<i64>>>,
     should_fail_on: Option<i64>, // Sequence number to fail on for exception testing
 }
 
@@ -44,6 +45,7 @@ impl CountingEventHandler {
             name: name.to_string(),
             count: Arc::new(AtomicUsize::new(0)),
             last_sequence: Arc::new(AtomicI64::new(-1)),
+            processed_sequences: Arc::new(Mutex::new(Vec::new())),
             should_fail_on: None,
         }
     }
@@ -53,6 +55,7 @@ impl CountingEventHandler {
             name: name.to_string(),
             count: Arc::new(AtomicUsize::new(0)),
             last_sequence: Arc::new(AtomicI64::new(-1)),
+            processed_sequences: Arc::new(Mutex::new(Vec::new())),
             should_fail_on: Some(fail_on_sequence),
         }
     }
@@ -64,6 +67,20 @@ impl CountingEventHandler {
     #[allow(dead_code)]
     fn get_last_sequence(&self) -> i64 {
         self.last_sequence.load(Ordering::Acquire)
+    }
+}
+
+fn wait_until<F>(timeout: Duration, mut condition: F, description: &str)
+where
+    F: FnMut() -> bool,
+{
+    let start = Instant::now();
+    while !condition() {
+        assert!(
+            start.elapsed() < timeout,
+            "timed out waiting for {description} after {timeout:?}"
+        );
+        std::thread::yield_now();
     }
 }
 
@@ -87,6 +104,7 @@ impl EventHandler<TestEvent> for CountingEventHandler {
         event.processed_by = self.name.clone();
         self.count.fetch_add(1, Ordering::Release);
         self.last_sequence.store(sequence, Ordering::Release);
+        self.processed_sequences.lock().unwrap().push(sequence);
 
         Ok(())
     }
@@ -108,6 +126,7 @@ fn test_real_event_processing_single_consumer() {
     let handler = CountingEventHandler::new("consumer1");
     let count_ref = handler.count.clone();
     let sequence_ref = handler.last_sequence.clone();
+    let processed_sequences = handler.processed_sequences.clone();
 
     let mut disruptor = Disruptor::new(
         factory,
@@ -122,9 +141,6 @@ fn test_real_event_processing_single_consumer() {
     // Start the disruptor
     disruptor.start().unwrap();
 
-    // Give the processor time to start
-    std::thread::sleep(Duration::from_millis(10));
-
     // Publish some events
     for i in 0..10 {
         disruptor
@@ -136,18 +152,25 @@ fn test_real_event_processing_single_consumer() {
             .unwrap();
     }
 
-    // Wait for processing to complete
-    std::thread::sleep(Duration::from_millis(100));
+    wait_until(
+        Duration::from_secs(1),
+        || count_ref.load(Ordering::Acquire) == 10,
+        "single consumer to process all events",
+    );
 
     // Check that events were processed
     let processed_count = count_ref.load(Ordering::Acquire);
     let last_sequence = sequence_ref.load(Ordering::Acquire);
+    let seen_sequences = processed_sequences.lock().unwrap().clone();
 
     badbatch::test_log!("Processed {processed_count} events, last sequence: {last_sequence}");
 
-    // We should have processed some events (exact count depends on timing)
-    assert!(processed_count > 0, "No events were processed");
-    assert!(last_sequence >= 0, "Invalid last sequence");
+    assert_eq!(
+        processed_count, 10,
+        "single consumer should process all events"
+    );
+    assert_eq!(last_sequence, 9, "last processed sequence should be 9");
+    assert_eq!(seen_sequences, (0..10).collect::<Vec<_>>());
 
     // Shutdown
     disruptor.shutdown().unwrap();
@@ -161,6 +184,8 @@ fn test_real_event_processing_multiple_consumers() {
 
     let count1_ref = handler1.count.clone();
     let count2_ref = handler2.count.clone();
+    let sequences1 = handler1.processed_sequences.clone();
+    let sequences2 = handler2.processed_sequences.clone();
 
     let mut disruptor = Disruptor::new(
         factory,
@@ -176,9 +201,6 @@ fn test_real_event_processing_multiple_consumers() {
     // Start the disruptor
     disruptor.start().unwrap();
 
-    // Give processors time to start
-    std::thread::sleep(Duration::from_millis(20));
-
     // Publish events
     for i in 0..5 {
         disruptor
@@ -190,17 +212,24 @@ fn test_real_event_processing_multiple_consumers() {
             .unwrap();
     }
 
-    // Wait for processing
-    std::thread::sleep(Duration::from_millis(100));
+    wait_until(
+        Duration::from_secs(1),
+        || count2_ref.load(Ordering::Acquire) == 5,
+        "sequential second-stage consumer to process all events",
+    );
 
     // Check results
     let count1 = count1_ref.load(Ordering::Acquire);
     let count2 = count2_ref.load(Ordering::Acquire);
+    let seen_sequences1 = sequences1.lock().unwrap().clone();
+    let seen_sequences2 = sequences2.lock().unwrap().clone();
 
     badbatch::test_log!("Consumer1 processed: {count1}, Consumer2 processed: {count2}");
 
-    assert!(count1 > 0, "First consumer didn't process events");
-    assert!(count2 > 0, "Second consumer didn't process events");
+    assert_eq!(count1, 5, "first consumer should process every event");
+    assert_eq!(count2, 5, "second consumer should process every event");
+    assert_eq!(seen_sequences1, (0..5).collect::<Vec<_>>());
+    assert_eq!(seen_sequences2, (0..5).collect::<Vec<_>>());
 
     disruptor.shutdown().unwrap();
 }
@@ -212,6 +241,8 @@ fn test_exception_handling_continues_processing() {
     // Create a handler that will fail on sequence 3
     let handler = CountingEventHandler::new_with_failure("failing_consumer", 3);
     let count_ref = handler.count.clone();
+    let sequence_ref = handler.last_sequence.clone();
+    let processed_sequences = handler.processed_sequences.clone();
 
     let mut disruptor = Disruptor::new(
         factory,
@@ -224,7 +255,6 @@ fn test_exception_handling_continues_processing() {
     .build();
 
     disruptor.start().unwrap();
-    std::thread::sleep(Duration::from_millis(10));
 
     // Publish events including the one that will fail
     for i in 0..8 {
@@ -237,21 +267,29 @@ fn test_exception_handling_continues_processing() {
             .unwrap();
     }
 
-    // Wait for processing
-    std::thread::sleep(Duration::from_millis(100));
+    wait_until(
+        Duration::from_secs(1),
+        || count_ref.load(Ordering::Acquire) == 7,
+        "processor to continue after a handler error",
+    );
 
     let processed_count = count_ref.load(Ordering::Acquire);
+    let last_sequence = sequence_ref.load(Ordering::Acquire);
+    let seen_sequences = processed_sequences.lock().unwrap().clone();
 
     badbatch::test_log!(
         "Processed {processed_count} events (should be 7, since sequence 3 failed)"
     );
 
-    // Should have processed all events except the failing one
-    // Note: The exact count depends on implementation details, but should be > 0
-    assert!(
-        processed_count > 0,
-        "No events were processed despite exception handling"
+    assert_eq!(
+        processed_count, 7,
+        "all non-failing events should be processed"
     );
+    assert_eq!(
+        last_sequence, 7,
+        "processing should continue past the failed event"
+    );
+    assert_eq!(seen_sequences, vec![0, 1, 2, 4, 5, 6, 7]);
 
     disruptor.shutdown().unwrap();
 }
@@ -278,6 +316,8 @@ fn test_try_run_once_functionality() {
 
     let handler = CountingEventHandler::new("test_handler");
     let count_ref = handler.count.clone();
+    let sequence_ref = handler.last_sequence.clone();
+    let processed_sequences = handler.processed_sequences.clone();
 
     let processor = BatchEventProcessor::new(
         ring_buffer.clone() as Arc<dyn DataProvider<TestEvent>>,
@@ -285,6 +325,8 @@ fn test_try_run_once_functionality() {
         Box::new(handler),
         Box::new(DefaultExceptionHandler::new()),
     );
+
+    processor.on_start();
 
     // Publish an event first
     let seq = sequencer.next().unwrap();
@@ -294,25 +336,16 @@ fn test_try_run_once_functionality() {
     }
     sequencer.publish(seq);
 
-    // Test try_run_once
-    match processor.try_run_once() {
-        Ok(true) => {
-            badbatch::test_log!("try_run_once processed events successfully");
-            // Give it a moment to complete
-            std::thread::sleep(Duration::from_millis(10));
-            assert_eq!(
-                count_ref.load(Ordering::Acquire),
-                1,
-                "Event should have been processed"
-            );
-        }
-        Ok(false) => {
-            badbatch::test_log!("try_run_once found no events (this is also valid)");
-        }
-        Err(e) => {
-            panic!("try_run_once failed: {e:?}");
-        }
-    }
+    assert_eq!(
+        processor.try_run_once().unwrap(),
+        true,
+        "try_run_once should process the published event"
+    );
+    assert_eq!(count_ref.load(Ordering::Acquire), 1);
+    assert_eq!(sequence_ref.load(Ordering::Acquire), 0);
+    assert_eq!(*processed_sequences.lock().unwrap(), vec![0]);
+
+    processor.on_shutdown();
 }
 
 #[test]
@@ -327,41 +360,27 @@ fn test_sequence_barrier_dependency_resolution() {
     let barrier = sequencer.new_barrier_typed(vec![dep_sequence.clone()]);
 
     // Verify the barrier was created successfully
-    assert!(barrier.get_cursor().get() == -1); // Initial cursor value
+    assert_eq!(barrier.get_cursor().get(), -1);
 
-    // Test that barrier doesn't allow processing beyond dependencies
-    // Use a timeout to prevent infinite waiting
-    match barrier.wait_for_with_timeout(10, Duration::from_millis(100)) {
-        Ok(_) => {
-            badbatch::test_log!(
-                "Barrier unexpectedly succeeded - this means dependencies are working"
-            );
-        }
-        Err(badbatch::disruptor::DisruptorError::Timeout) => {
-            badbatch::test_log!("Barrier correctly timed out waiting for unavailable sequence");
-        }
-        Err(e) => {
-            badbatch::test_log!("Barrier failed with error: {e:?}");
-        }
-    }
-
-    // Test that barrier works when sequence is available
-    // First advance the cursor past the dependency
     let cursor = sequencer.get_cursor();
-    cursor.set(15); // Now cursor is beyond both dependency (5) and request (10)
+    cursor.set(15);
 
-    match barrier.wait_for_with_timeout(5, Duration::from_millis(10)) {
-        Ok(available) => {
-            badbatch::test_log!("Barrier correctly returned available sequence: {available}");
-            assert!(
-                available >= 5,
-                "Should return at least the requested sequence"
-            );
-        }
-        Err(e) => {
-            badbatch::test_log!("Unexpected error when sequence should be available: {e:?}");
-        }
-    }
+    assert!(
+        matches!(
+            barrier.wait_for_with_timeout(10, Duration::from_millis(20)),
+            Err(badbatch::disruptor::DisruptorError::Timeout)
+        ),
+        "barrier should not bypass lagging dependencies"
+    );
+
+    dep_sequence.set(12);
+    assert_eq!(
+        barrier
+            .wait_for_with_timeout(10, Duration::from_millis(20))
+            .unwrap(),
+        12,
+        "barrier should expose the minimum available dependent sequence"
+    );
 }
 
 #[test]
@@ -370,6 +389,7 @@ fn test_complete_event_flow() {
     let handler = CountingEventHandler::new("complete_flow");
     let count_ref = handler.count.clone();
     let sequence_ref = handler.last_sequence.clone();
+    let processed_sequences = handler.processed_sequences.clone();
 
     let mut disruptor = Disruptor::with_defaults(factory, 32)
         .unwrap()
@@ -377,7 +397,6 @@ fn test_complete_event_flow() {
         .build();
 
     disruptor.start().unwrap();
-    std::thread::sleep(Duration::from_millis(10));
 
     // Test both publish_event and try_publish_event
     for i in 0..3 {
@@ -399,17 +418,24 @@ fn test_complete_event_flow() {
         assert!(success, "try_publish_event should succeed");
     }
 
-    // Wait for processing
-    std::thread::sleep(Duration::from_millis(100));
+    wait_until(
+        Duration::from_secs(1),
+        || count_ref.load(Ordering::Acquire) == 6,
+        "complete event flow to process all events",
+    );
 
     let final_count = count_ref.load(Ordering::Acquire);
     let final_sequence = sequence_ref.load(Ordering::Acquire);
+    let seen_sequences = processed_sequences.lock().unwrap().clone();
 
     badbatch::test_log!("Final count: {final_count}, final sequence: {final_sequence}");
 
-    // Verify we processed events
-    assert!(final_count > 0, "Should have processed some events");
-    assert!(final_sequence >= 0, "Should have valid final sequence");
+    assert_eq!(final_count, 6, "all published events should be processed");
+    assert_eq!(
+        final_sequence, 5,
+        "last processed sequence should match final publish"
+    );
+    assert_eq!(seen_sequences, (0..6).collect::<Vec<_>>());
 
     disruptor.shutdown().unwrap();
 }

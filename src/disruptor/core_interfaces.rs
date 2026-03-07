@@ -236,5 +236,11 @@ mod tests {
         assert_eq!(*provider.get(0), 1);
         assert_eq!(*provider.get(2), 3);
         assert_eq!(*provider.get(7), 3); // Wraps around
+
+        unsafe {
+            *provider.get_mut(7) = 99;
+        }
+
+        assert_eq!(*provider.get(2), 99);
     }
 }
