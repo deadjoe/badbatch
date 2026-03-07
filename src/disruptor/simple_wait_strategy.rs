@@ -279,6 +279,10 @@ pub fn sleeping_with_nanos(sleep_nanos: u64) -> SimpleWaitStrategyAdapter<Sleepi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::disruptor::{DisruptorError, Sequence, WaitStrategy};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     #[test]
     fn test_busy_spin_strategy() {
@@ -323,9 +327,6 @@ mod tests {
 
     #[test]
     fn test_adapter_functionality() {
-        use crate::disruptor::{Sequence, WaitStrategy};
-        use std::sync::Arc;
-
         let adapter = busy_spin();
         let cursor = Arc::new(Sequence::new(50)); // Set cursor ahead of requested sequence
         let dependent_sequences = vec![Arc::new(Sequence::new(45))]; // Set dependency ahead too
@@ -334,5 +335,61 @@ mod tests {
         assert!(result.is_ok());
         // Should return min(cursor=50, dep_min=45) = 45, but since we requested 42, should return 45
         assert_eq!(result.unwrap(), 45);
+    }
+
+    #[test]
+    fn test_adapter_times_out_when_dependency_does_not_advance() {
+        let adapter = busy_spin_with_hint();
+        let cursor = Arc::new(Sequence::new(50));
+        let dependent_sequences = vec![Arc::new(Sequence::new(40))];
+
+        let result = adapter.wait_for_with_timeout(
+            42,
+            &cursor,
+            &dependent_sequences,
+            Duration::from_millis(5),
+        );
+
+        assert!(matches!(result, Err(DisruptorError::Timeout)));
+    }
+
+    #[test]
+    fn test_adapter_alert_interrupts_wait_immediately() {
+        let adapter = yielding_with_tries(1);
+        let cursor = Arc::new(Sequence::new(0));
+        let dependent_sequences = Vec::new();
+        let alerted = AtomicBool::new(true);
+
+        let result = adapter.wait_for_with_alert(1, &cursor, &dependent_sequences, &alerted);
+        assert!(matches!(result, Err(DisruptorError::Alert)));
+    }
+
+    #[test]
+    fn test_adapter_shutdown_interrupts_wait_immediately() {
+        let adapter = sleeping_with_nanos(1_000);
+        let cursor = Arc::new(Sequence::new(0));
+        let dependent_sequences = Vec::new();
+        let shutdown = AtomicBool::new(true);
+        let alerted = AtomicBool::new(false);
+
+        let result = adapter.wait_for_with_shutdown_and_alert(
+            1,
+            &cursor,
+            &dependent_sequences,
+            &shutdown,
+            &alerted,
+        );
+
+        assert!(matches!(result, Err(DisruptorError::Alert)));
+    }
+
+    #[test]
+    fn test_adapter_returns_minimum_of_cursor_and_dependencies() {
+        let adapter = yielding_with_tries(1);
+        let cursor = Arc::new(Sequence::new(15));
+        let dependent_sequences = vec![Arc::new(Sequence::new(12)), Arc::new(Sequence::new(18))];
+
+        let result = adapter.wait_for(10, &cursor, &dependent_sequences).unwrap();
+        assert_eq!(result, 12);
     }
 }

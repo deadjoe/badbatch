@@ -28,6 +28,20 @@ struct TestEvent {
     pub producer_id: u32,
 }
 
+fn wait_until<F>(timeout: Duration, mut condition: F, description: &str)
+where
+    F: FnMut() -> bool,
+{
+    let start = Instant::now();
+    while !condition() {
+        assert!(
+            start.elapsed() < timeout,
+            "timed out waiting for {description} after {timeout:?}"
+        );
+        thread::yield_now();
+    }
+}
+
 /// Test basic MPMC functionality with continuity verification
 /// This verifies that the P0 fixes for MPMC continuity convergence work correctly
 #[test]
@@ -56,8 +70,11 @@ fn test_mpmc_basic_functionality() {
             .expect("Failed to publish single-threaded event");
     }
 
-    // Allow processing
-    thread::sleep(Duration::from_millis(50));
+    wait_until(
+        Duration::from_secs(1),
+        || processed_count.load(Ordering::SeqCst) == 5,
+        "single-threaded MPMC path to process all events",
+    );
 
     assert_eq!(
         processed_count.load(Ordering::SeqCst),
@@ -157,8 +174,11 @@ fn test_mpmc_sequence_continuity() {
         });
     }
 
-    // Allow processing to complete
-    thread::sleep(Duration::from_millis(100));
+    wait_until(
+        Duration::from_secs(1),
+        || sequences.lock().unwrap().len() == 8,
+        "sequence continuity consumer to process all events",
+    );
 
     let final_sequences = sequences.lock().unwrap();
     assert_eq!(final_sequences.len(), 8, "Should process exactly 8 events");
@@ -214,8 +234,11 @@ fn test_mpmc_continuity_under_load() {
         }
     }
 
-    // Allow final processing
-    thread::sleep(Duration::from_millis(200));
+    wait_until(
+        Duration::from_secs(1),
+        || sequences.lock().unwrap().len() == num_events,
+        "continuity-under-load consumer to process all events",
+    );
 
     let final_sequences = sequences.lock().unwrap();
     assert_eq!(
@@ -363,8 +386,11 @@ fn test_mpmc_builder_api() {
         });
     }
 
-    // Allow processing
-    thread::sleep(Duration::from_millis(50));
+    wait_until(
+        Duration::from_secs(1),
+        || event_count.load(Ordering::SeqCst) == 3,
+        "MPMC builder API consumer to process all events",
+    );
 
     assert_eq!(
         event_count.load(Ordering::SeqCst),

@@ -387,13 +387,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::disruptor::sequencer::Sequencer;
     use crate::disruptor::SingleProducerSequencer;
     use crate::disruptor::{
-        BlockingWaitStrategy, DefaultExceptionHandler, NoOpEventHandler, ProcessingSequenceBarrier,
+        BlockingWaitStrategy, DefaultEventFactory, DefaultExceptionHandler, DisruptorError,
+        ExceptionHandler, NoOpEventHandler, ProcessingSequenceBarrier, RingBuffer, SequencerEnum,
         INITIAL_CURSOR_VALUE,
     };
     use std::convert::TryFrom;
-    use std::sync::atomic::AtomicI64;
+    use std::sync::atomic::{AtomicI64, AtomicUsize};
+    use std::time::{Duration, Instant};
 
     // Helper function to create a test sequence barrier
     fn create_test_sequence_barrier(
@@ -449,6 +452,20 @@ mod tests {
             let index = usize::try_from(normalized).expect("normalized index must fit");
             // This is unsafe but acceptable for testing
             &mut *self.events.as_ptr().add(index).cast_mut()
+        }
+    }
+
+    fn wait_until<F>(timeout: Duration, mut condition: F, description: &str)
+    where
+        F: FnMut() -> bool,
+    {
+        let start = Instant::now();
+        while !condition() {
+            assert!(
+                start.elapsed() < timeout,
+                "timed out waiting for {description} after {timeout:?}"
+            );
+            std::thread::yield_now();
         }
     }
 
@@ -628,67 +645,317 @@ mod tests {
         assert!(debug_str.contains("running"));
     }
 
-    // Custom event handler for testing event processing
-    #[allow(dead_code)]
-    struct CountingEventHandler {
-        count: Arc<AtomicI64>,
-        processed_sequences: Arc<Mutex<Vec<i64>>>,
+    #[derive(Default)]
+    struct HandlerState {
+        successful_events: AtomicI64,
+        processed_sequences: Mutex<Vec<i64>>,
+        batch_starts: Mutex<Vec<(i64, i64)>>,
+        start_calls: AtomicUsize,
+        shutdown_calls: AtomicUsize,
+        last_timeout_sequence: AtomicI64,
     }
 
-    impl CountingEventHandler {
-        #[allow(dead_code)]
-        fn new() -> (Self, Arc<AtomicI64>, Arc<Mutex<Vec<i64>>>) {
-            let count = Arc::new(AtomicI64::new(0));
-            let sequences = Arc::new(Mutex::new(Vec::new()));
-            let handler = Self {
-                count: count.clone(),
-                processed_sequences: sequences.clone(),
-            };
-            (handler, count, sequences)
+    struct TrackingEventHandler {
+        state: Arc<HandlerState>,
+        fail_on_sequence: Option<i64>,
+        fail_on_start: bool,
+        fail_on_shutdown: bool,
+    }
+
+    impl TrackingEventHandler {
+        fn new(state: Arc<HandlerState>) -> Self {
+            Self {
+                state,
+                fail_on_sequence: None,
+                fail_on_start: false,
+                fail_on_shutdown: false,
+            }
+        }
+
+        fn failing_on_sequence(state: Arc<HandlerState>, sequence: i64) -> Self {
+            Self {
+                state,
+                fail_on_sequence: Some(sequence),
+                fail_on_start: false,
+                fail_on_shutdown: false,
+            }
+        }
+
+        fn failing_lifecycle(
+            state: Arc<HandlerState>,
+            fail_on_start: bool,
+            fail_on_shutdown: bool,
+        ) -> Self {
+            Self {
+                state,
+                fail_on_sequence: None,
+                fail_on_start,
+                fail_on_shutdown,
+            }
         }
     }
 
-    impl EventHandler<TestEvent> for CountingEventHandler {
+    impl EventHandler<TestEvent> for TrackingEventHandler {
         fn on_event(
             &mut self,
-            _event: &mut TestEvent,
+            event: &mut TestEvent,
             sequence: i64,
             _end_of_batch: bool,
         ) -> Result<()> {
-            self.count.fetch_add(1, Ordering::Relaxed);
-            self.processed_sequences.lock().unwrap().push(sequence);
+            if self.fail_on_sequence == Some(sequence) {
+                return Err(DisruptorError::InvalidSequence(sequence));
+            }
+
+            self.state.successful_events.fetch_add(1, Ordering::Relaxed);
+            self.state
+                .processed_sequences
+                .lock()
+                .unwrap()
+                .push(sequence);
+            event.value.store(sequence, Ordering::Relaxed);
             Ok(())
         }
 
         fn on_start(&mut self) -> Result<()> {
+            self.state.start_calls.fetch_add(1, Ordering::Relaxed);
+            if self.fail_on_start {
+                return Err(DisruptorError::Shutdown);
+            }
             Ok(())
         }
 
         fn on_shutdown(&mut self) -> Result<()> {
+            self.state.shutdown_calls.fetch_add(1, Ordering::Relaxed);
+            if self.fail_on_shutdown {
+                return Err(DisruptorError::Shutdown);
+            }
             Ok(())
         }
 
-        fn on_timeout(&mut self, _available_sequence: i64) -> Result<()> {
+        fn on_timeout(&mut self, available_sequence: i64) -> Result<()> {
+            self.state
+                .last_timeout_sequence
+                .store(available_sequence, Ordering::Relaxed);
             Ok(())
         }
 
-        fn on_batch_start(&mut self, _batch_size: i64, _available_size: i64) -> Result<()> {
+        fn on_batch_start(&mut self, batch_size: i64, available_size: i64) -> Result<()> {
+            self.state
+                .batch_starts
+                .lock()
+                .unwrap()
+                .push((batch_size, available_size));
             Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct ExceptionState {
+        event_error_sequences: Mutex<Vec<i64>>,
+        start_errors: AtomicUsize,
+        shutdown_errors: AtomicUsize,
+    }
+
+    struct RecordingExceptionHandler {
+        state: Arc<ExceptionState>,
+    }
+
+    impl RecordingExceptionHandler {
+        fn new(state: Arc<ExceptionState>) -> Self {
+            Self { state }
+        }
+    }
+
+    impl ExceptionHandler<TestEvent> for RecordingExceptionHandler {
+        fn handle_event_exception(
+            &self,
+            _error: DisruptorError,
+            sequence: i64,
+            _event: &TestEvent,
+        ) {
+            self.state
+                .event_error_sequences
+                .lock()
+                .unwrap()
+                .push(sequence);
+        }
+
+        fn handle_on_start_exception(&self, _error: DisruptorError) {
+            self.state.start_errors.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn handle_on_shutdown_exception(&self, _error: DisruptorError) {
+            self.state.shutdown_errors.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     use std::sync::Mutex;
 
-    // Note: process_batch is now an internal method and is tested through try_run_once
+    #[test]
+    fn test_try_run_once_processes_available_batch_and_updates_sequence() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let ring_buffer = Arc::new(RingBuffer::new(16, factory).unwrap());
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone()));
+        let barrier = Arc::new(ProcessingSequenceBarrier::new(
+            sequencer.get_cursor(),
+            wait_strategy,
+            vec![],
+            SequencerEnum::Single(sequencer.clone()),
+        ));
 
-    // Note: exception handling is now internal and tested through integration tests
+        let handler_state = Arc::new(HandlerState::default());
+        let exception_state = Arc::new(ExceptionState::default());
+        let processor = BatchEventProcessor::new(
+            ring_buffer.clone() as Arc<dyn DataProvider<TestEvent>>,
+            barrier,
+            Box::new(TrackingEventHandler::new(handler_state.clone())),
+            Box::new(RecordingExceptionHandler::new(exception_state.clone())),
+        );
 
-    // Note: notify_timeout is now tested through integration tests
+        processor.on_start();
+
+        for sequence in 0..=1 {
+            let claimed = sequencer.next().unwrap();
+            assert_eq!(claimed, sequence);
+            unsafe {
+                ring_buffer
+                    .get_mut(claimed)
+                    .value
+                    .store(sequence, Ordering::Relaxed);
+            }
+            sequencer.publish(claimed);
+        }
+
+        assert!(processor.try_run_once().unwrap());
+        assert_eq!(processor.get_sequence().get(), 1);
+        assert_eq!(handler_state.successful_events.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            *handler_state.processed_sequences.lock().unwrap(),
+            vec![0, 1]
+        );
+        assert_eq!(*handler_state.batch_starts.lock().unwrap(), vec![(2, 2)]);
+        assert!(exception_state
+            .event_error_sequences
+            .lock()
+            .unwrap()
+            .is_empty());
+
+        processor.on_shutdown();
+    }
 
     #[test]
-    fn test_processor_spawn_method_exists() {
-        // This test just verifies that the spawn method exists and can be called
-        // We don't actually run the spawned thread to avoid test complexity
+    fn test_try_run_once_forwards_event_exceptions_and_continues_batch() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let ring_buffer = Arc::new(RingBuffer::new(16, factory).unwrap());
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone()));
+        let barrier = Arc::new(ProcessingSequenceBarrier::new(
+            sequencer.get_cursor(),
+            wait_strategy,
+            vec![],
+            SequencerEnum::Single(sequencer.clone()),
+        ));
+
+        let handler_state = Arc::new(HandlerState::default());
+        let exception_state = Arc::new(ExceptionState::default());
+        let processor = BatchEventProcessor::new(
+            ring_buffer.clone() as Arc<dyn DataProvider<TestEvent>>,
+            barrier,
+            Box::new(TrackingEventHandler::failing_on_sequence(
+                handler_state.clone(),
+                0,
+            )),
+            Box::new(RecordingExceptionHandler::new(exception_state.clone())),
+        );
+
+        processor.on_start();
+
+        for sequence in 0..=1 {
+            let claimed = sequencer.next().unwrap();
+            unsafe {
+                ring_buffer
+                    .get_mut(claimed)
+                    .value
+                    .store(sequence + 10, Ordering::Relaxed);
+            }
+            sequencer.publish(claimed);
+        }
+
+        assert!(processor.try_run_once().unwrap());
+        assert_eq!(processor.get_sequence().get(), 1);
+        assert_eq!(handler_state.successful_events.load(Ordering::Relaxed), 1);
+        assert_eq!(*handler_state.processed_sequences.lock().unwrap(), vec![1]);
+        assert_eq!(
+            *exception_state.event_error_sequences.lock().unwrap(),
+            vec![0]
+        );
+
+        processor.on_shutdown();
+    }
+
+    #[test]
+    fn test_run_processes_events_and_invokes_lifecycle_hooks() {
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let ring_buffer = Arc::new(RingBuffer::new(16, factory).unwrap());
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone()));
+        let barrier = Arc::new(ProcessingSequenceBarrier::new(
+            sequencer.get_cursor(),
+            wait_strategy,
+            vec![],
+            SequencerEnum::Single(sequencer.clone()),
+        ));
+
+        let handler_state = Arc::new(HandlerState::default());
+        let processor = Arc::new(BatchEventProcessor::new(
+            ring_buffer.clone() as Arc<dyn DataProvider<TestEvent>>,
+            barrier,
+            Box::new(TrackingEventHandler::new(handler_state.clone())),
+            Box::new(DefaultExceptionHandler::<TestEvent>::new()),
+        ));
+
+        let processor_thread = {
+            let processor = Arc::clone(&processor);
+            std::thread::spawn(move || processor.run())
+        };
+
+        wait_until(
+            Duration::from_secs(1),
+            || processor.is_running(),
+            "processor to enter running state",
+        );
+
+        for sequence in 0..=2 {
+            let claimed = sequencer.next().unwrap();
+            unsafe {
+                ring_buffer
+                    .get_mut(claimed)
+                    .value
+                    .store(sequence, Ordering::Relaxed);
+            }
+            sequencer.publish(claimed);
+        }
+
+        wait_until(
+            Duration::from_secs(1),
+            || handler_state.successful_events.load(Ordering::Relaxed) == 3,
+            "processor run loop to consume all published events",
+        );
+
+        processor.halt();
+        processor_thread.join().unwrap().unwrap();
+
+        assert_eq!(handler_state.start_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(handler_state.shutdown_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            *handler_state.processed_sequences.lock().unwrap(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn test_run_returns_already_running_when_invoked_twice() {
         let data_provider = Arc::new(TestDataProvider::new(8));
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
@@ -703,12 +970,66 @@ mod tests {
             exception_handler,
         );
 
-        // Test that spawn method exists and returns a JoinHandle
-        // We immediately halt the processor to prevent infinite loop
-        processor.halt();
-        let _handle = processor.spawn();
+        processor.running.store(true, Ordering::Release);
+        assert!(matches!(
+            processor.run(),
+            Err(DisruptorError::AlreadyRunning)
+        ));
+    }
 
-        // Note: We don't join the handle to avoid blocking the test
-        // The spawned thread should exit quickly due to the halt() call
+    #[test]
+    fn test_notify_timeout_invokes_handler() {
+        let data_provider = Arc::new(TestDataProvider::new(8));
+        let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
+        let handler_state = Arc::new(HandlerState::default());
+        let processor = BatchEventProcessor::new(
+            data_provider,
+            sequence_barrier,
+            Box::new(TrackingEventHandler::new(handler_state.clone())),
+            Box::new(DefaultExceptionHandler::<TestEvent>::new()),
+        );
+
+        processor.notify_timeout(42);
+        assert_eq!(
+            handler_state.last_timeout_sequence.load(Ordering::Relaxed),
+            42
+        );
+    }
+
+    #[test]
+    fn test_lifecycle_errors_are_forwarded_to_exception_handler() {
+        let data_provider = Arc::new(TestDataProvider::new(8));
+        let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
+        let handler_state = Arc::new(HandlerState::default());
+        let exception_state = Arc::new(ExceptionState::default());
+        let processor = BatchEventProcessor::new(
+            data_provider,
+            sequence_barrier,
+            Box::new(TrackingEventHandler::failing_lifecycle(
+                handler_state.clone(),
+                true,
+                true,
+            )),
+            Box::new(RecordingExceptionHandler::new(exception_state.clone())),
+        );
+
+        processor.on_start();
+        processor.on_shutdown();
+
+        assert_eq!(handler_state.start_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(handler_state.shutdown_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(exception_state.start_errors.load(Ordering::Relaxed), 1);
+        assert_eq!(exception_state.shutdown_errors.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_processor_spawn_method_exists() {
+        let spawn_fn: fn(BatchEventProcessor<TestEvent>) -> JoinHandle<Result<()>> =
+            BatchEventProcessor::spawn;
+        let _ = spawn_fn;
     }
 }

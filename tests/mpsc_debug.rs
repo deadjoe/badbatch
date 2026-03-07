@@ -10,7 +10,7 @@
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use badbatch::disruptor::{
     event_translator::ClosureEventTranslator, BusySpinWaitStrategy, DefaultEventFactory, Disruptor,
@@ -57,6 +57,20 @@ impl EventHandler<DebugEvent> for DebugHandler {
     }
 }
 
+fn wait_until<F>(timeout: Duration, mut condition: F, description: &str)
+where
+    F: FnMut() -> bool,
+{
+    let start = Instant::now();
+    while !condition() {
+        assert!(
+            start.elapsed() < timeout,
+            "timed out waiting for {description} after {timeout:?}"
+        );
+        thread::yield_now();
+    }
+}
+
 #[test]
 fn test_mpsc_simple_case() {
     badbatch::test_log!("=== MPSC Simple Debug Test ===");
@@ -90,8 +104,11 @@ fn test_mpsc_simple_case() {
 
     assert!(result.is_ok(), "Single event publish should succeed");
 
-    // Wait for processing
-    thread::sleep(Duration::from_millis(100));
+    wait_until(
+        Duration::from_secs(1),
+        || counter.load(Ordering::Acquire) == 1,
+        "simple MPSC debug path to process the first event",
+    );
     let count = counter.load(Ordering::Acquire);
     badbatch::test_log!("DEBUG: Events processed: {count}");
 
@@ -109,7 +126,11 @@ fn test_mpsc_simple_case() {
         assert!(result.is_ok(), "Event {i} should publish successfully");
     }
 
-    thread::sleep(Duration::from_millis(100));
+    wait_until(
+        Duration::from_secs(1),
+        || counter.load(Ordering::Acquire) == 4,
+        "simple MPSC debug path to process all sequential events",
+    );
     let count = counter.load(Ordering::Acquire);
     badbatch::test_log!("DEBUG: Events processed after sequential: {count}");
     assert_eq!(count, 4, "Should have processed 4 events total");
@@ -193,8 +214,11 @@ fn test_mpsc_concurrent_producers() {
 
     assert!(all_success, "All producers should complete successfully");
 
-    // Wait for event processing
-    thread::sleep(Duration::from_millis(200));
+    wait_until(
+        Duration::from_secs(1),
+        || counter.load(Ordering::Acquire) == 4,
+        "concurrent MPSC debug path to process all producer events",
+    );
     let final_count = counter.load(Ordering::Acquire);
     badbatch::test_log!("DEBUG: Final event count: {final_count}");
 

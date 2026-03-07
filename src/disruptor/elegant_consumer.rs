@@ -601,8 +601,14 @@ mod tests {
         )
         .unwrap();
 
-        // Give some time for processing
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        let start = std::time::Instant::now();
+        while *sum_result.lock().unwrap() == 0 {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(1),
+                "timed out waiting for stateful consumer to update state"
+            );
+            std::thread::yield_now();
+        }
 
         consumer
             .shutdown()
@@ -610,7 +616,10 @@ mod tests {
 
         // Check that state was updated
         let final_sum = *sum_result.lock().unwrap();
-        assert!(final_sum >= 0, "State should have been updated");
+        assert!(
+            final_sum > 0,
+            "stateful consumer should accumulate positive state"
+        );
     }
 
     #[test]
