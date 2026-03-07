@@ -816,6 +816,7 @@ impl WaitStrategy for SleepingWaitStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc::sync_channel;
     use std::thread;
     use std::time::Instant;
 
@@ -872,17 +873,20 @@ mod tests {
         let strategy = Arc::new(BlockingWaitStrategy::new());
         let cursor = Arc::new(Sequence::new(0)); // Start with low sequence
         let dependent_sequences = vec![];
+        let guard = strategy.mutex.lock();
+        let (ready_tx, ready_rx) = sync_channel(1);
 
         let strategy_clone = strategy.clone();
         let cursor_clone = cursor.clone();
 
         // Spawn a thread that will wait for a high sequence
         let handle = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
             strategy_clone.wait_for(100, &cursor_clone, &dependent_sequences)
         });
 
-        // Give the thread time to start waiting
-        thread::sleep(Duration::from_millis(10));
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        drop(guard);
 
         // Alert the strategy
         strategy.alert();
@@ -901,12 +905,15 @@ mod tests {
         let cursor = Arc::new(Sequence::new(0));
         let dependent_sequences = vec![];
         let barrier_alert = Arc::new(AtomicBool::new(false));
+        let guard = strategy.mutex.lock();
+        let (ready_tx, ready_rx) = sync_channel(1);
 
         let strategy_clone = strategy.clone();
         let cursor_clone = cursor.clone();
         let barrier_alert_clone = barrier_alert.clone();
 
         let handle = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
             strategy_clone.wait_for_with_timeout_and_alert(
                 100,
                 &cursor_clone,
@@ -916,7 +923,8 @@ mod tests {
             )
         });
 
-        thread::sleep(Duration::from_millis(10));
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        drop(guard);
         barrier_alert.store(true, Ordering::Release);
         strategy.signal_all_when_blocking();
 
@@ -984,7 +992,6 @@ mod tests {
         });
 
         ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        thread::sleep(Duration::from_millis(10));
 
         // `signal_all_when_blocking()` must synchronize with the same mutex used by
         // waiters; otherwise the notify can be emitted before a waiter actually
@@ -1435,26 +1442,38 @@ mod tests {
     fn test_blocking_wait_strategy_with_delayed_sequence_update() {
         let strategy = Arc::new(BlockingWaitStrategy::new());
         let cursor = Arc::new(Sequence::new(-1)); // Start with no events available
+        let guard = strategy.mutex.lock();
+        let (ready_tx, ready_rx) = sync_channel(1);
+        let (release_tx, release_rx) = sync_channel(1);
 
-        // Spawn a thread that will update the cursor after a delay
+        // Spawn a thread that will update the cursor once the waiter has entered the test flow.
         let cursor_clone = cursor.clone();
         let strategy_clone = strategy.clone();
-        let handle = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(50));
+        let updater = thread::spawn(move || {
+            release_rx.recv_timeout(Duration::from_secs(1)).unwrap();
             cursor_clone.set(5); // Make sequences 0-5 available
             strategy_clone.signal_all_when_blocking();
         });
 
+        let strategy_clone = strategy.clone();
+        let cursor_clone = cursor.clone();
+        let handle = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            strategy_clone.wait_for(3, &cursor_clone, &[])
+        });
+
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         let start = Instant::now();
-        let result = strategy.wait_for(3, &cursor, &[]);
+        drop(guard);
+        release_tx.send(()).unwrap();
+        let result = handle.join().unwrap();
         let elapsed = start.elapsed();
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 5);
-        assert!(elapsed >= Duration::from_millis(40)); // Should have waited
         assert!(elapsed < Duration::from_millis(200)); // But not too long
 
-        handle.join().unwrap();
+        updater.join().unwrap();
     }
 
     #[test]

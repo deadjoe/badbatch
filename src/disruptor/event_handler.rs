@@ -265,6 +265,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::disruptor::DisruptorError;
 
     #[derive(Debug, Default, Clone, PartialEq)]
     struct TestEvent {
@@ -286,6 +287,31 @@ mod tests {
 
         assert_eq!(event.value, 42);
         assert!(event.processed);
+    }
+
+    #[test]
+    fn test_closure_event_handler_default_hooks_and_callback() {
+        let mut handler =
+            ClosureEventHandler::new(|event: &mut TestEvent, sequence, end_of_batch| {
+                event.value = sequence;
+                event.processed = end_of_batch;
+                Ok(())
+            });
+
+        assert!(handler.on_start().is_ok());
+        assert!(handler.on_batch_start(2, 4).is_ok());
+        assert!(handler.on_timeout(9).is_ok());
+
+        let sequence = Arc::new(Sequence::new(5));
+        handler.set_sequence_callback(sequence.clone());
+
+        let stored_callback = handler
+            .sequence_callback
+            .as_ref()
+            .expect("sequence callback should be stored");
+        assert!(Arc::ptr_eq(stored_callback, &sequence));
+
+        assert!(handler.on_shutdown().is_ok());
     }
 
     #[test]
@@ -326,6 +352,26 @@ mod tests {
     }
 
     #[test]
+    fn test_clearing_event_handler_clears_event_after_inner_error() {
+        let inner_handler =
+            ClosureEventHandler::new(|event: &mut TestEvent, sequence, _end_of_batch| {
+                event.value = sequence;
+                event.processed = true;
+                Err(DisruptorError::Shutdown)
+            });
+
+        let mut handler = ClearingEventHandler::new(inner_handler);
+        let mut event = TestEvent {
+            value: 999,
+            processed: false,
+        };
+
+        let result = handler.on_event(&mut event, 42, false);
+        assert!(matches!(result, Err(DisruptorError::Shutdown)));
+        assert_eq!(event, TestEvent::default());
+    }
+
+    #[test]
     fn test_sequence_callback() {
         let mut handler =
             ClosureEventHandler::new(|_event: &mut TestEvent, _sequence, _end_of_batch| Ok(()));
@@ -335,5 +381,22 @@ mod tests {
 
         // Verify the callback was set (we can't directly test it without more complex setup)
         assert!(handler.sequence_callback.is_some());
+    }
+
+    #[test]
+    fn test_clearing_event_handler_forwards_sequence_callback() {
+        let inner_handler =
+            ClosureEventHandler::new(|_event: &mut TestEvent, _sequence, _end_of_batch| Ok(()));
+        let mut handler = ClearingEventHandler::new(inner_handler);
+
+        let sequence = Arc::new(Sequence::new(11));
+        handler.set_sequence_callback(sequence.clone());
+
+        let stored_callback = handler
+            .inner_handler
+            .sequence_callback
+            .as_ref()
+            .expect("inner handler should receive the forwarded callback");
+        assert!(Arc::ptr_eq(stored_callback, &sequence));
     }
 }

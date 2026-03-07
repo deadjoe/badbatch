@@ -232,6 +232,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Clone)]
     #[allow(dead_code)]
@@ -263,22 +264,76 @@ mod tests {
 
     #[test]
     fn test_closure_exception_handler() {
+        #[derive(Debug, Default)]
+        struct Recorded {
+            event: Mutex<Vec<(String, i64, i64)>>,
+            start: Mutex<Vec<String>>,
+            shutdown: Mutex<Vec<String>>,
+        }
+
+        let calls = Arc::new(Recorded::default());
+        let event_calls = calls.clone();
+        let start_calls = calls.clone();
+        let shutdown_calls = calls.clone();
         let handler = ClosureExceptionHandler::new(
-            |_error, _sequence, _event| {
-                // In a real test, we'd use a shared state mechanism
-                // For now, just verify the closure can be called
+            move |error, sequence, event: &TestEvent| {
+                event_calls
+                    .event
+                    .lock()
+                    .unwrap()
+                    .push((format!("{error:?}"), sequence, event.value));
             },
-            |_error| {
-                // Start handler
+            move |error| {
+                start_calls
+                    .start
+                    .lock()
+                    .unwrap()
+                    .push(format!("{error:?}"));
             },
-            |_error| {
-                // Shutdown handler
+            move |error| {
+                shutdown_calls
+                    .shutdown
+                    .lock()
+                    .unwrap()
+                    .push(format!("{error:?}"));
             },
         );
 
         let event = TestEvent { value: 42 };
         handler.handle_event_exception(DisruptorError::BufferFull, 1, &event);
         handler.handle_on_start_exception(DisruptorError::Shutdown);
+        handler.handle_on_shutdown_exception(DisruptorError::Timeout);
+
+        assert_eq!(
+            *calls.event.lock().unwrap(),
+            vec![("BufferFull".to_string(), 1, 42)]
+        );
+        assert_eq!(*calls.start.lock().unwrap(), vec!["Shutdown".to_string()]);
+        assert_eq!(
+            *calls.shutdown.lock().unwrap(),
+            vec!["Timeout".to_string()]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Exception processing event at sequence 7")]
+    fn test_panic_exception_handler_panics_on_event_exception() {
+        let handler = PanicExceptionHandler::<TestEvent>::new();
+        let event = TestEvent { value: 99 };
+        handler.handle_event_exception(DisruptorError::BufferFull, 7, &event);
+    }
+
+    #[test]
+    #[should_panic(expected = "Exception during event processor startup")]
+    fn test_panic_exception_handler_panics_on_start_exception() {
+        let handler = PanicExceptionHandler::<TestEvent>::new();
+        handler.handle_on_start_exception(DisruptorError::Shutdown);
+    }
+
+    #[test]
+    #[should_panic(expected = "Exception during event processor shutdown")]
+    fn test_panic_exception_handler_panics_on_shutdown_exception() {
+        let handler = PanicExceptionHandler::<TestEvent>::new();
         handler.handle_on_shutdown_exception(DisruptorError::Timeout);
     }
 }
