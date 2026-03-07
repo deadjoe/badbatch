@@ -137,6 +137,7 @@ perf.data*
 benchmark_results/
 bench_*.txt
 benchmark_logs/
+head_to_head_results/
 
 # Testing artifacts
 test_results/
@@ -156,6 +157,9 @@ coverage-report/
 
 # Documentation Internal
 docs
+!docs/
+docs/*
+!docs/BadBatch与LMAXDisruptor性能对比基准方案.md
 
 # ***REMOVED*** memory and debug files
 ***REMOVED***.md
