@@ -154,7 +154,10 @@ fn benchmark_disruptor_throughput(
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Relaxed);
+                // Capture completion state before publishing so this iteration waits
+                // for its own batch instead of racing with the previous one.
+                let start_count = counter.load(Ordering::Relaxed);
+                let target = start_count + THROUGHPUT_EVENTS as i64;
 
                 let mut published = 0usize;
                 while published < THROUGHPUT_EVENTS as usize {
@@ -171,7 +174,7 @@ fn benchmark_disruptor_throughput(
                 }
 
                 // Wait for all events to be processed
-                while counter.load(Ordering::Relaxed) < THROUGHPUT_EVENTS as i64 {
+                while counter.load(Ordering::Relaxed) < target {
                     std::hint::spin_loop();
                 }
             }
@@ -296,7 +299,8 @@ fn benchmark_try_publish_throughput(group: &mut BenchmarkGroup<WallTime>, buffer
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                counter.store(0, Ordering::Relaxed);
+                let start_count = counter.load(Ordering::Relaxed);
+                let target = start_count + THROUGHPUT_EVENTS as i64;
 
                 let mut published = 0;
                 while published < THROUGHPUT_EVENTS {
@@ -316,7 +320,7 @@ fn benchmark_try_publish_throughput(group: &mut BenchmarkGroup<WallTime>, buffer
                 }
 
                 // Wait for all events to be processed
-                while counter.load(Ordering::Relaxed) < THROUGHPUT_EVENTS as i64 {
+                while counter.load(Ordering::Relaxed) < target {
                     std::hint::spin_loop();
                 }
             }

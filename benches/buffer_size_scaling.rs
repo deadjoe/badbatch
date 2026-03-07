@@ -40,7 +40,6 @@ struct ScalingEvent {
 /// Event handler that processes different payload sizes
 struct ScalingHandler {
     counter: Arc<AtomicI64>,
-    last_id: Arc<AtomicI64>,
     processing_time_ns: u64, // Simulate different processing times
 }
 
@@ -48,17 +47,12 @@ impl ScalingHandler {
     fn new(processing_time_ns: u64) -> Self {
         Self {
             counter: Arc::new(AtomicI64::new(0)),
-            last_id: Arc::new(AtomicI64::new(0)),
             processing_time_ns,
         }
     }
 
     fn get_counter(&self) -> Arc<AtomicI64> {
         self.counter.clone()
-    }
-
-    fn get_last_id(&self) -> Arc<AtomicI64> {
-        self.last_id.clone()
     }
 }
 
@@ -81,22 +75,22 @@ impl EventHandler<ScalingEvent> for ScalingHandler {
         let sum: i64 = event.data.iter().sum();
         std::hint::black_box(sum);
 
-        self.last_id.store(event.id, Ordering::Relaxed);
         self.counter.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
 
 /// Safe wait with timeout to prevent hanging
-fn wait_for_completion(last_id: &Arc<AtomicI64>, expected: i64, timeout_ms: u64) -> bool {
+fn wait_for_completion(counter: &Arc<AtomicI64>, target: i64, timeout_ms: u64) -> bool {
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
 
-    while last_id.load(Ordering::Relaxed) < expected {
+    while counter.load(Ordering::Relaxed) < target {
         if start.elapsed() > timeout {
             eprintln!(
-                "WARNING: Benchmark timed out waiting for {expected} events, got {}",
-                last_id.load(Ordering::Relaxed)
+                "WARNING: Benchmark timed out waiting for {} events, got {}",
+                target,
+                counter.load(Ordering::Relaxed)
             );
             return false;
         }
@@ -106,15 +100,16 @@ fn wait_for_completion(last_id: &Arc<AtomicI64>, expected: i64, timeout_ms: u64)
 }
 
 /// Safe wait with timeout and yielding
-fn wait_for_completion_yielding(last_id: &Arc<AtomicI64>, expected: i64, timeout_ms: u64) -> bool {
+fn wait_for_completion_yielding(counter: &Arc<AtomicI64>, target: i64, timeout_ms: u64) -> bool {
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
 
-    while last_id.load(Ordering::Relaxed) < expected {
+    while counter.load(Ordering::Relaxed) < target {
         if start.elapsed() > timeout {
             eprintln!(
-                "WARNING: Benchmark timed out waiting for {expected} events, got {}",
-                last_id.load(Ordering::Relaxed)
+                "WARNING: Benchmark timed out waiting for {} events, got {}",
+                target,
+                counter.load(Ordering::Relaxed)
             );
             return false;
         }
@@ -123,20 +118,29 @@ fn wait_for_completion_yielding(last_id: &Arc<AtomicI64>, expected: i64, timeout
     true
 }
 
-/// Safe wait with timeout and sleeping
-fn wait_for_completion_sleeping(last_id: &Arc<AtomicI64>, expected: i64, timeout_ms: u64) -> bool {
+/// Safe wait with timeout using cooperative yielding to avoid millisecond polling artifacts.
+fn wait_for_completion_cooperative(counter: &Arc<AtomicI64>, target: i64, timeout_ms: u64) -> bool {
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
+    let mut spin_budget = 0_u32;
 
-    while last_id.load(Ordering::Relaxed) < expected {
+    while counter.load(Ordering::Relaxed) < target {
         if start.elapsed() > timeout {
             eprintln!(
-                "WARNING: Benchmark timed out waiting for {expected} events, got {}",
-                last_id.load(Ordering::Relaxed)
+                "WARNING: Benchmark timed out waiting for {} events, got {}",
+                target,
+                counter.load(Ordering::Relaxed)
             );
             return false;
         }
-        std::thread::sleep(Duration::from_millis(1));
+
+        if spin_budget < 1024 {
+            spin_budget += 1;
+            std::hint::spin_loop();
+        } else {
+            spin_budget = 0;
+            std::thread::yield_now();
+        }
     }
     true
 }
@@ -177,7 +181,7 @@ fn benchmark_fast_processing_scaling(
     group.bench_function(benchmark_id, |b| {
         let factory = DefaultEventFactory::<ScalingEvent>::new();
         let handler = ScalingHandler::new(0); // No artificial processing delay
-        let last_id = handler.get_last_id();
+        let counter = handler.get_counter();
 
         let mut disruptor = Disruptor::new(
             factory,
@@ -194,7 +198,8 @@ fn benchmark_fast_processing_scaling(
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                last_id.store(0, Ordering::Relaxed);
+                let start_count = counter.load(Ordering::Relaxed);
+                let target = start_count + workload_size as i64;
 
                 for i in 1..=workload_size {
                     disruptor
@@ -209,7 +214,7 @@ fn benchmark_fast_processing_scaling(
                 }
 
                 // Wait for all events to be processed with timeout
-                if !wait_for_completion(&last_id, workload_size as i64, TIMEOUT_MS) {
+                if !wait_for_completion(&counter, target, TIMEOUT_MS) {
                     panic!("Fast processing benchmark failed: events not processed within timeout");
                 }
             }
@@ -233,7 +238,7 @@ fn benchmark_medium_processing_scaling(
     group.bench_function(benchmark_id, |b| {
         let factory = DefaultEventFactory::<ScalingEvent>::new();
         let handler = ScalingHandler::new(1_000); // 1 microsecond processing delay
-        let last_id = handler.get_last_id();
+        let counter = handler.get_counter();
 
         let mut disruptor = Disruptor::new(
             factory,
@@ -250,7 +255,8 @@ fn benchmark_medium_processing_scaling(
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                last_id.store(0, Ordering::Relaxed);
+                let start_count = counter.load(Ordering::Relaxed);
+                let target = start_count + workload_size as i64;
 
                 for i in 1..=workload_size {
                     disruptor
@@ -265,7 +271,7 @@ fn benchmark_medium_processing_scaling(
                 }
 
                 // Wait for all events to be processed with timeout and yielding
-                if !wait_for_completion_yielding(&last_id, workload_size as i64, TIMEOUT_MS) {
+                if !wait_for_completion_yielding(&counter, target, TIMEOUT_MS) {
                     panic!(
                         "Medium processing benchmark failed: events not processed within timeout"
                     );
@@ -291,7 +297,7 @@ fn benchmark_slow_processing_scaling(
     group.bench_function(benchmark_id, |b| {
         let factory = DefaultEventFactory::<ScalingEvent>::new();
         let handler = ScalingHandler::new(10_000); // 10 microseconds processing delay
-        let last_id = handler.get_last_id();
+        let counter = handler.get_counter();
 
         let mut disruptor = Disruptor::new(
             factory,
@@ -308,7 +314,8 @@ fn benchmark_slow_processing_scaling(
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                last_id.store(0, Ordering::Relaxed);
+                let start_count = counter.load(Ordering::Relaxed);
+                let target = start_count + workload_size as i64;
 
                 for i in 1..=workload_size {
                     disruptor
@@ -322,8 +329,9 @@ fn benchmark_slow_processing_scaling(
                         .unwrap();
                 }
 
-                // Wait for all events to be processed with timeout and sleeping
-                if !wait_for_completion_sleeping(&last_id, workload_size as i64, TIMEOUT_MS) {
+                // Use a cooperative waiter so slow-processing scenarios are not distorted
+                // by 1ms polling granularity in the harness itself.
+                if !wait_for_completion_cooperative(&counter, target, TIMEOUT_MS) {
                     panic!("Slow processing benchmark failed: events not processed within timeout");
                 }
             }
@@ -399,7 +407,7 @@ fn benchmark_buffer_utilization(
     group.bench_function(benchmark_id, |b| {
         let factory = DefaultEventFactory::<ScalingEvent>::new();
         let handler = ScalingHandler::new(5_000); // 5 microseconds delay to create backpressure
-        let last_id = handler.get_last_id();
+        let counter = handler.get_counter();
 
         let mut disruptor = Disruptor::new(
             factory,
@@ -416,7 +424,8 @@ fn benchmark_buffer_utilization(
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                last_id.store(0, Ordering::Relaxed);
+                let start_count = counter.load(Ordering::Relaxed);
+                let target = start_count + burst_size as i64;
 
                 // Publish a burst of events
                 for i in 1..=burst_size {
@@ -434,7 +443,7 @@ fn benchmark_buffer_utilization(
                 }
 
                 // Wait for all events to be processed with timeout
-                if !wait_for_completion(&last_id, burst_size as i64, TIMEOUT_MS) {
+                if !wait_for_completion(&counter, target, TIMEOUT_MS) {
                     panic!(
                         "Buffer utilization benchmark failed: events not processed within timeout"
                     );

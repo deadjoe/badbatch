@@ -61,12 +61,12 @@ mod fixed_benchmarks {
         }
     }
 
-    /// Safe wait with timeout
-    fn safe_wait(counter: &Arc<AtomicI64>, expected: i64, timeout_ms: u64) -> bool {
+    /// Safe wait with timeout for a monotonic completion target.
+    fn safe_wait(counter: &Arc<AtomicI64>, target: i64, timeout_ms: u64) -> bool {
         let start = Instant::now();
         let timeout = Duration::from_millis(timeout_ms);
 
-        while counter.load(Ordering::Relaxed) < expected {
+        while counter.load(Ordering::Relaxed) < target {
             if start.elapsed() > timeout {
                 return false;
             }
@@ -111,25 +111,23 @@ mod fixed_benchmarks {
                 b.iter_custom(|iters| {
                     let start = Instant::now();
                     for _ in 0..iters {
-                        counter.store(0, Ordering::Relaxed);
+                        // Capture the starting count before publishing so each iteration waits
+                        // for its own completion target instead of racing with the previous one.
+                        let start_count = counter.load(Ordering::Relaxed);
+                        let target = start_count + *burst_size as i64;
 
                         for i in 0..*burst_size {
-                            if disruptor
+                            disruptor
                                 .publish_event(ClosureEventTranslator::new(
                                     move |event: &mut SafeEvent, _seq: i64| {
                                         event.value = std::hint::black_box(i as i64);
                                     },
                                 ))
-                                .is_err()
-                            {
-                                eprintln!("Failed to publish event {i}");
-                                break;
-                            }
+                                .unwrap_or_else(|e| panic!("Failed to publish event {i}: {e:?}"));
                         }
 
-                        if !safe_wait(&counter, *burst_size as i64, TIMEOUT_MS) {
-                            eprintln!("Timeout waiting for {burst_size} events");
-                            break;
+                        if !safe_wait(&counter, target, TIMEOUT_MS) {
+                            panic!("Timeout waiting for {burst_size} events");
                         }
                     }
                     start.elapsed()
@@ -175,23 +173,21 @@ mod fixed_benchmarks {
                     let start = Instant::now();
 
                     for _ in 0..iters {
-                        counter.store(0, Ordering::Relaxed);
+                        let start_count = counter.load(Ordering::Relaxed);
+                        let target = start_count + events_per_iter;
 
                         for i in 0..events_per_iter {
-                            if disruptor
+                            disruptor
                                 .publish_event(ClosureEventTranslator::new(
                                     move |event: &mut SafeEvent, _seq: i64| {
                                         event.value = std::hint::black_box(i);
                                     },
                                 ))
-                                .is_err()
-                            {
-                                break;
-                            }
+                                .unwrap_or_else(|e| panic!("Failed to publish event {i}: {e:?}"));
                         }
 
-                        if !safe_wait(&counter, events_per_iter, TIMEOUT_MS) {
-                            break;
+                        if !safe_wait(&counter, target, TIMEOUT_MS) {
+                            panic!("Timeout waiting for {events_per_iter} events");
                         }
                     }
                     start.elapsed()
@@ -231,21 +227,19 @@ mod fixed_benchmarks {
             b.iter_custom(|iters| {
                 let start = Instant::now();
                 for i in 0..iters {
-                    counter.store(0, Ordering::Relaxed);
+                    let start_count = counter.load(Ordering::Relaxed);
+                    let target = start_count + 1;
 
-                    if disruptor
+                    disruptor
                         .publish_event(ClosureEventTranslator::new(
                             move |event: &mut SafeEvent, _seq: i64| {
                                 event.value = std::hint::black_box(i as i64);
                             },
                         ))
-                        .is_err()
-                    {
-                        break;
-                    }
+                        .unwrap_or_else(|e| panic!("Failed to publish single event {i}: {e:?}"));
 
-                    if !safe_wait(&counter, 1, TIMEOUT_MS) {
-                        break;
+                    if !safe_wait(&counter, target, TIMEOUT_MS) {
+                        panic!("Timeout waiting for single event");
                     }
                 }
                 start.elapsed()
