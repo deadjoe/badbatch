@@ -195,35 +195,70 @@ pick_primary_latency_result() {
     '
 }
 
+latency_label_to_case() {
+    case "$1" in
+        "Disruptor") echo "Latency/Disruptor/BusySpin" ;;
+        "StdMpsc") echo "Latency/StdMpsc/sync_channel" ;;
+        "Crossbeam") echo "Latency/Crossbeam/bounded" ;;
+        *) echo "" ;;
+    esac
+}
+
+extract_iterations_from_collect_line() {
+    local collect_line="$1"
+    local iterations=""
+
+    if [ -n "$collect_line" ]; then
+        iterations=$(echo "$collect_line" | sed -nE 's/.*\(([0-9.]+[KMGTBkmgtb]*) iterations\).*/\1/p')
+
+        if [ -z "$iterations" ]; then
+            iterations=$(echo "$collect_line" | grep -oE '[0-9.]+[KMGTBkmgtb]*' | tail -1)
+        fi
+    fi
+
+    echo "${iterations:-N/A}"
+}
+
+normalize_throughput() {
+    local throughput="$1"
+    local throughput_unit="$2"
+
+    awk -v value="$throughput" -v unit="$throughput_unit" '
+        BEGIN {
+            scale = 0;
+            if (unit == "Gelem/s") scale = 1000000000;
+            else if (unit == "Melem/s") scale = 1000000;
+            else if (unit == "Kelem/s") scale = 1000;
+            else if (unit == "elem/s") scale = 1;
+
+            if (scale == 0 || value == "") {
+                print 0;
+            } else {
+                printf "%.0f\n", value * scale;
+            }
+        }
+    '
+}
+
 # Extract common benchmark metadata:
 #   samples|iterations|warning_count
 extract_benchmark_metadata() {
     local log_file="$1"
+    local benchmark_case="${2:-}"
+    local collect_line=""
+
+    if [ -n "$benchmark_case" ]; then
+        collect_line=$(grep -F "Benchmarking ${benchmark_case}: Collecting " "$log_file" | head -1)
+    fi
+
+    if [ -z "$collect_line" ]; then
+        collect_line=$(grep -E "Collecting [0-9]+ samples" "$log_file" | head -1)
+    fi
 
     local samples
-    samples=$(grep -E "Collecting [0-9]+ samples" "$log_file" | head -1 | sed -E 's/.*Collecting ([0-9]+) samples.*/\1/')
-
-    local iterations_line
-    iterations_line=$(grep -E "samples in estimated.*iterations" "$log_file" | head -1)
-    local iterations=""
-
-    if [ -n "$iterations_line" ]; then
-        iterations=$(echo "$iterations_line" | sed -E 's/.*\(([0-9.]+[KMGTB]?) iterations\).*/\1/' 2>/dev/null)
-
-        if [ "$iterations" = "$iterations_line" ] || [ -z "$iterations" ]; then
-            iterations=$(echo "$iterations_line" | sed -E 's/.*\(([0-9.]+[KMGTBkmgtb]*) iterations\).*/\1/' 2>/dev/null)
-        fi
-
-        if [ "$iterations" = "$iterations_line" ] || [ -z "$iterations" ]; then
-            iterations=$(echo "$iterations_line" | grep -oE '[0-9.]+[KMGTBkmgtb]*' | head -1)
-        fi
-
-        if [ -z "$iterations" ] || [ "$iterations" = "$iterations_line" ]; then
-            iterations="Unknown"
-        fi
-    else
-        iterations="N/A"
-    fi
+    samples=$(echo "$collect_line" | sed -nE 's/.*Collecting ([0-9]+) samples.*/\1/p')
+    local iterations
+    iterations=$(extract_iterations_from_collect_line "$collect_line")
 
     local warning_count
     warning_count=$(grep -c "^WARNING:" "$log_file" 2>/dev/null || true)
@@ -321,7 +356,7 @@ extract_performance_data() {
     fi
     
     local metadata
-    metadata="$(extract_benchmark_metadata "$log_file")"
+    metadata="$(extract_benchmark_metadata "$log_file" "$primary_case")"
     local samples
     samples="$(echo "$metadata" | cut -d'|' -f1)"
     local iterations
@@ -362,14 +397,6 @@ display_results_table() {
         if [ -f "$log_file" ]; then
             results_found=true
             if [ "$benchmark" = "latency_comparison" ]; then
-                local metadata
-                metadata="$(extract_benchmark_metadata "$log_file")"
-                local samples
-                samples="$(echo "$metadata" | cut -d'|' -f1)"
-                local iterations
-                iterations="$(echo "$metadata" | cut -d'|' -f2)"
-                local warning_count
-                warning_count="$(echo "$metadata" | cut -d'|' -f3)"
                 local primary_latency_row
                 primary_latency_row="$(pick_primary_latency_result "$log_file")"
                 local label mean median p95 p99 max
@@ -379,6 +406,16 @@ display_results_table() {
                 p95="$(echo "$primary_latency_row" | cut -f4)"
                 p99="$(echo "$primary_latency_row" | cut -f5)"
                 max="$(echo "$primary_latency_row" | cut -f6)"
+                local latency_case
+                latency_case="$(latency_label_to_case "$label")"
+                local metadata
+                metadata="$(extract_benchmark_metadata "$log_file" "$latency_case")"
+                local samples
+                samples="$(echo "$metadata" | cut -d'|' -f1)"
+                local iterations
+                iterations="$(echo "$metadata" | cut -d'|' -f2)"
+                local warning_count
+                warning_count="$(echo "$metadata" | cut -d'|' -f3)"
 
                 echo ""
                 echo "🎯 Latency"
@@ -495,9 +532,15 @@ display_single_benchmark_results() {
     
     echo ""
     echo "📊 Statistical Analysis:"
-    grep -E "Found.*outliers" "$log_file" | head -3 | while read -r line; do
-        echo "  📍 $line"
-    done
+    local outlier_lines
+    outlier_lines=$(grep -E "Found.*outliers" "$log_file" | head -3 || true)
+    if [ -n "$outlier_lines" ]; then
+        while read -r line; do
+            echo "  📍 $line"
+        done <<< "$outlier_lines"
+    else
+        echo "  📍 No outlier summary lines reported"
+    fi
     
     # Performance assessment
     echo ""
@@ -534,29 +577,14 @@ display_single_benchmark_results() {
         fi
 
         if [ -n "$throughput" ] && [ -n "$throughput_unit" ]; then
-            # Convert to elements per second for comparison
-            local elements_per_second=0
-            case "$throughput_unit" in
-                "Gelem/s")
-                    elements_per_second=$(echo "$throughput * 1000000000" | bc -l 2>/dev/null || echo "$((${throughput%.*} * 1000000000))")
-                    ;;
-                "Melem/s")
-                    elements_per_second=$(echo "$throughput * 1000000" | bc -l 2>/dev/null || echo "$((${throughput%.*} * 1000000))")
-                    ;;
-                "Kelem/s")
-                    elements_per_second=$(echo "$throughput * 1000" | bc -l 2>/dev/null || echo "$((${throughput%.*} * 1000))")
-                    ;;
-                "elem/s")
-                    elements_per_second=${throughput%.*}
-                    ;;
-            esac
+            local elements_per_second
+            elements_per_second=$(normalize_throughput "$throughput" "$throughput_unit")
 
-            local eps_int=${elements_per_second%.*}
-            if [ "$eps_int" -gt 1000000000 ]; then
+            if [ "$elements_per_second" -gt 1000000000 ]; then
                 echo "  🟢 Excellent throughput (${throughput} ${throughput_unit})"
-            elif [ "$eps_int" -gt 100000000 ]; then
+            elif [ "$elements_per_second" -gt 100000000 ]; then
                 echo "  🟡 Good throughput (${throughput} ${throughput_unit})"
-            elif [ "$eps_int" -gt 10000000 ]; then
+            elif [ "$elements_per_second" -gt 10000000 ]; then
                 echo "  🟠 Moderate throughput (${throughput} ${throughput_unit})"
             else
                 echo "  🔴 Low throughput (${throughput} ${throughput_unit})"
@@ -585,9 +613,15 @@ generate_summary_report() {
     # Performance highlights
     echo "🌟 Performance Highlights:"
     local best_throughput=0
-    local best_benchmark=""
+    local highest_throughput=""
     
     for benchmark in "${successful_benchmarks[@]}"; do
+        case "$benchmark" in
+            "comprehensive_benchmarks"|"latency_comparison")
+                continue
+                ;;
+        esac
+
         local log_file="$log_dir/${benchmark}.log"
         if [ -f "$log_file" ]; then
             local primary_row
@@ -601,27 +635,18 @@ generate_summary_report() {
                 continue
             fi
 
-            local throughput_int
-            throughput_int=$(echo "$throughput" | cut -d. -f1)
-
-            # Convert to common base unit for comparison
-            local normalized_throughput=0
-            case "$throughput_unit" in
-                "Gelem/s") normalized_throughput=$(echo "$throughput_int * 1000000000" | bc -l 2>/dev/null || echo "$((throughput_int * 1000000000))") ;;
-                "Melem/s") normalized_throughput=$((throughput_int * 1000000)) ;;
-                "Kelem/s") normalized_throughput=$((throughput_int * 1000)) ;;
-                "elem/s") normalized_throughput=$throughput_int ;;
-            esac
+            local normalized_throughput
+            normalized_throughput=$(normalize_throughput "$throughput" "$throughput_unit")
 
             if [ "$normalized_throughput" -gt "$best_throughput" ]; then
                 best_throughput=$normalized_throughput
-                best_benchmark="$benchmark:$primary_case (${throughput} ${throughput_unit})"
+                highest_throughput="$benchmark:$primary_case (${throughput} ${throughput_unit})"
             fi
         fi
     done
     
-    if [ -n "$best_benchmark" ]; then
-        echo "  🥇 Best Performance: $best_benchmark"
+    if [ -n "$highest_throughput" ]; then
+        echo "  🥇 Highest Reported Throughput: $highest_throughput"
     fi
     
     # System info

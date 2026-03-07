@@ -49,10 +49,6 @@ impl Stage1Handler {
             processed_count: Arc::new(AtomicI64::new(0)),
         }
     }
-
-    fn get_processed_count(&self) -> Arc<AtomicI64> {
-        self.processed_count.clone()
-    }
 }
 
 impl EventHandler<PipelineEvent> for Stage1Handler {
@@ -134,23 +130,17 @@ impl EventHandler<PipelineEvent> for Stage3Handler {
 /// Final stage: Output formatting and storage
 struct FinalHandler {
     processed_count: Arc<AtomicI64>,
-    last_id: Arc<AtomicI64>,
 }
 
 impl FinalHandler {
     fn new() -> Self {
         Self {
             processed_count: Arc::new(AtomicI64::new(0)),
-            last_id: Arc::new(AtomicI64::new(0)),
         }
     }
 
     fn get_processed_count(&self) -> Arc<AtomicI64> {
         self.processed_count.clone()
-    }
-
-    fn get_last_id(&self) -> Arc<AtomicI64> {
-        self.last_id.clone()
     }
 }
 
@@ -163,21 +153,21 @@ impl EventHandler<PipelineEvent> for FinalHandler {
     ) -> DisruptorResult<()> {
         // Simulate final processing and output
         event.final_result = std::hint::black_box(event.stage3_result + event.stage2_result);
-        self.last_id.store(event.id, Ordering::Relaxed);
         self.processed_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
 
 /// Safe wait with timeout to prevent hanging in pipeline stages
-fn wait_for_pipeline_completion(counter: &Arc<AtomicI64>, expected: i64, timeout_ms: u64) -> bool {
+fn wait_for_pipeline_completion(counter: &Arc<AtomicI64>, target: i64, timeout_ms: u64) -> bool {
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
 
-    while counter.load(Ordering::Relaxed) < expected {
+    while counter.load(Ordering::Relaxed) < target {
         if start.elapsed() > timeout {
             eprintln!(
-                "WARNING: Pipeline stage timed out waiting for {expected} events, got {}",
+                "WARNING: Pipeline stage timed out waiting for {} events, got {}",
+                target,
                 counter.load(Ordering::Relaxed)
             );
             return false;
@@ -197,7 +187,6 @@ fn benchmark_two_stage_pipeline(
     let stage1 = Stage1Handler::new();
     let stage2 = Stage2Handler::new();
 
-    let stage1_count = stage1.get_processed_count();
     let stage2_count = stage2.get_processed_count();
 
     let wait_strategy_impl: Box<dyn badbatch::disruptor::WaitStrategy> = match wait_strategy {
@@ -226,8 +215,8 @@ fn benchmark_two_stage_pipeline(
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                stage1_count.store(0, Ordering::Relaxed);
-                stage2_count.store(0, Ordering::Relaxed);
+                let start_count = stage2_count.load(Ordering::Relaxed);
+                let target = start_count + burst_size as i64;
 
                 for i in 1..=burst_size {
                     disruptor
@@ -244,11 +233,7 @@ fn benchmark_two_stage_pipeline(
                 }
 
                 // Wait for both stages to complete with timeout protection
-                if !wait_for_pipeline_completion(
-                    &stage2_count,
-                    burst_size as i64,
-                    PIPELINE_TIMEOUT_MS,
-                ) {
+                if !wait_for_pipeline_completion(&stage2_count, target, PIPELINE_TIMEOUT_MS) {
                     panic!("Pipeline benchmark failed: stage2 timeout");
                 }
             }
@@ -299,7 +284,8 @@ fn benchmark_three_stage_pipeline(
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                stage3_count.store(0, Ordering::Relaxed);
+                let start_count = stage3_count.load(Ordering::Relaxed);
+                let target = start_count + burst_size as i64;
 
                 for i in 1..=burst_size {
                     disruptor
@@ -316,11 +302,7 @@ fn benchmark_three_stage_pipeline(
                 }
 
                 // Wait for all three stages to complete with timeout protection
-                if !wait_for_pipeline_completion(
-                    &stage3_count,
-                    burst_size as i64,
-                    PIPELINE_TIMEOUT_MS,
-                ) {
+                if !wait_for_pipeline_completion(&stage3_count, target, PIPELINE_TIMEOUT_MS) {
                     panic!("Pipeline benchmark failed: stage3 timeout");
                 }
             }
@@ -344,7 +326,6 @@ fn benchmark_four_stage_pipeline(
     let final_stage = FinalHandler::new();
 
     let final_count = final_stage.get_processed_count();
-    let last_id = final_stage.get_last_id();
 
     let wait_strategy_impl: Box<dyn badbatch::disruptor::WaitStrategy> = match wait_strategy {
         "BusySpin" => Box::new(BusySpinWaitStrategy::new()),
@@ -374,8 +355,8 @@ fn benchmark_four_stage_pipeline(
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
-                final_count.store(0, Ordering::Relaxed);
-                last_id.store(0, Ordering::Relaxed);
+                let start_count = final_count.load(Ordering::Relaxed);
+                let target = start_count + burst_size as i64;
 
                 for i in 1..=burst_size {
                     disruptor
@@ -391,8 +372,7 @@ fn benchmark_four_stage_pipeline(
                         .unwrap();
                 }
 
-                // Wait for final stage to process the last event with timeout protection
-                if !wait_for_pipeline_completion(&last_id, burst_size as i64, PIPELINE_TIMEOUT_MS) {
+                if !wait_for_pipeline_completion(&final_count, target, PIPELINE_TIMEOUT_MS) {
                     panic!("Pipeline benchmark failed: final stage timeout");
                 }
             }
