@@ -163,7 +163,7 @@ where
 
     for consumer_info in consumers {
         let ConsumerInfo {
-            handler,
+            starter,
             thread_name,
             cpu_affinity,
             stage_index,
@@ -194,10 +194,9 @@ where
         ));
 
         // Start the consumer thread
-        let (consumer_sequence, consumer) = start_consumer_thread(
+        let (consumer_sequence, consumer) = starter(
             ring_buffer.clone(),
             sequence_barrier,
-            handler,
             ConsumerThreadConfig {
                 thread_name,
                 cpu_affinity,
@@ -443,14 +442,15 @@ struct ConsumerThreadConfig {
 /// This function creates and starts a consumer thread that processes events
 /// using the provided event handler. It's inspired by the start_processor
 /// function in disruptor-rs.
-fn start_consumer_thread<E>(
+fn start_consumer_thread<E, H>(
     ring_buffer: Arc<RingBuffer<E>>,
     sequence_barrier: Arc<dyn SequenceBarrier>,
-    mut event_handler: Box<dyn EventHandler<E> + Send + Sync>,
+    mut event_handler: H,
     config: ConsumerThreadConfig,
 ) -> (Arc<Sequence>, Consumer)
 where
     E: Send + Sync + 'static,
+    H: EventHandler<E> + Send + Sync + 'static,
 {
     // Create a sequence for this consumer
     let consumer_sequence = Arc::new(Sequence::new(-1));
@@ -547,12 +547,20 @@ where
                             }
                         }
 
-                        // Update sequence AFTER event processing is completely done.
-                        // Release ordering is sufficient here: downstream consumers and
-                        // producers observe progress via Acquire loads on `Sequence::get`.
-                        consumer_sequence_clone.set(next_sequence);
+                        if needs_slot_lock {
+                            // Parallel consumers must publish progress per event so downstream
+                            // gating observes the exact point reached by this worker.
+                            consumer_sequence_clone.set(next_sequence);
+                        }
 
                         next_sequence += 1;
+                    }
+
+                    if !needs_slot_lock {
+                        // Single-consumer stages can publish progress once per batch.
+                        // This matches the release point used by LMAX BatchEventProcessor
+                        // and removes one release-store per event from the hot path.
+                        consumer_sequence_clone.set(available_sequence);
                     }
                 } else {
                     // Barrier returned error (Alert on shutdown, or timeout).
@@ -575,6 +583,37 @@ where
 
     let consumer = Consumer::new(join_handle, thread_name_clone);
     (consumer_sequence, consumer)
+}
+
+type ConsumerStarter<E> = Box<
+    dyn FnOnce(
+            Arc<RingBuffer<E>>,
+            Arc<dyn SequenceBarrier>,
+            ConsumerThreadConfig,
+        ) -> (Arc<Sequence>, Consumer)
+        + Send,
+>;
+
+fn consumer_info_from_handler<E, H>(
+    handler: H,
+    thread_name: Option<String>,
+    cpu_affinity: Option<usize>,
+    stage_index: usize,
+) -> ConsumerInfo<E>
+where
+    E: Send + Sync + 'static,
+    H: EventHandler<E> + Send + Sync + 'static,
+{
+    let starter: ConsumerStarter<E> = Box::new(move |ring_buffer, sequence_barrier, config| {
+        start_consumer_thread(ring_buffer, sequence_barrier, handler, config)
+    });
+
+    ConsumerInfo {
+        starter,
+        thread_name,
+        cpu_affinity,
+        stage_index,
+    }
 }
 
 /// Handle for managing a Disruptor with running consumer threads
@@ -732,7 +771,7 @@ pub struct ConsumerInfo<E>
 where
     E: Send + Sync + 'static,
 {
-    handler: Box<dyn EventHandler<E> + Send + Sync>,
+    starter: ConsumerStarter<E>,
     thread_name: Option<String>,
     cpu_affinity: Option<usize>,
     /// Logical stage index within the processing graph.
@@ -805,14 +844,12 @@ where
     where
         H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
     {
-        let boxed_handler = Box::new(ClosureEventHandler::new(handler));
-
-        let consumer_info = ConsumerInfo {
-            handler: boxed_handler,
-            thread_name: self.builder.shared.current_thread_name.take(),
-            cpu_affinity: self.builder.shared.current_cpu_affinity.take(),
-            stage_index: self.builder.shared.current_stage_index,
-        };
+        let consumer_info = consumer_info_from_handler(
+            ClosureEventHandler::new(handler),
+            self.builder.shared.current_thread_name.take(),
+            self.builder.shared.current_cpu_affinity.take(),
+            self.builder.shared.current_stage_index,
+        );
         self.builder.shared.consumers.push(consumer_info);
         self.builder.shared.current_stage_width += 1;
         self.builder
@@ -827,14 +864,12 @@ where
     where
         H: EventHandler<E> + Send + Sync + 'static,
     {
-        let boxed_handler = Box::new(handler);
-
-        let consumer_info = ConsumerInfo {
-            handler: boxed_handler,
-            thread_name: self.builder.shared.current_thread_name.take(),
-            cpu_affinity: self.builder.shared.current_cpu_affinity.take(),
-            stage_index: self.builder.shared.current_stage_index,
-        };
+        let consumer_info = consumer_info_from_handler(
+            handler,
+            self.builder.shared.current_thread_name.take(),
+            self.builder.shared.current_cpu_affinity.take(),
+            self.builder.shared.current_stage_index,
+        );
         self.builder.shared.consumers.push(consumer_info);
         self.builder.shared.current_stage_width += 1;
         self.builder
@@ -911,14 +946,12 @@ where
     where
         H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
     {
-        // Wrap the closure in our EventHandler trait
-        let boxed_handler = Box::new(ClosureEventHandler::new(handler));
-        let consumer_info = ConsumerInfo {
-            handler: boxed_handler,
-            thread_name: self.shared.current_thread_name.take(),
-            cpu_affinity: self.shared.current_cpu_affinity.take(),
-            stage_index: self.shared.current_stage_index,
-        };
+        let consumer_info = consumer_info_from_handler(
+            ClosureEventHandler::new(handler),
+            self.shared.current_thread_name.take(),
+            self.shared.current_cpu_affinity.take(),
+            self.shared.current_stage_index,
+        );
         self.shared.consumers.push(consumer_info);
         self.shared.current_stage_width = 1;
 
@@ -970,13 +1003,12 @@ where
     where
         H: EventHandler<E> + Send + Sync + 'static,
     {
-        let boxed_handler = Box::new(handler);
-        let consumer_info = ConsumerInfo {
-            handler: boxed_handler,
-            thread_name: self.shared.current_thread_name.take(),
-            cpu_affinity: self.shared.current_cpu_affinity.take(),
-            stage_index: self.shared.current_stage_index,
-        };
+        let consumer_info = consumer_info_from_handler(
+            handler,
+            self.shared.current_thread_name.take(),
+            self.shared.current_cpu_affinity.take(),
+            self.shared.current_stage_index,
+        );
         self.shared.consumers.push(consumer_info);
         self.shared.current_stage_width = 1;
 
@@ -1014,13 +1046,12 @@ where
     where
         H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
     {
-        let boxed_handler = Box::new(ClosureEventHandler::new(handler));
-        let consumer_info = ConsumerInfo {
-            handler: boxed_handler,
-            thread_name: self.shared.current_thread_name.take(),
-            cpu_affinity: self.shared.current_cpu_affinity.take(),
-            stage_index: self.shared.current_stage_index,
-        };
+        let consumer_info = consumer_info_from_handler(
+            ClosureEventHandler::new(handler),
+            self.shared.current_thread_name.take(),
+            self.shared.current_cpu_affinity.take(),
+            self.shared.current_stage_index,
+        );
         self.shared.consumers.push(consumer_info);
         self.shared.current_stage_width += 1;
         self
@@ -1032,13 +1063,12 @@ where
     where
         H: EventHandler<E> + Send + Sync + 'static,
     {
-        let boxed_handler = Box::new(handler);
-        let consumer_info = ConsumerInfo {
-            handler: boxed_handler,
-            thread_name: self.shared.current_thread_name.take(),
-            cpu_affinity: self.shared.current_cpu_affinity.take(),
-            stage_index: self.shared.current_stage_index,
-        };
+        let consumer_info = consumer_info_from_handler(
+            handler,
+            self.shared.current_thread_name.take(),
+            self.shared.current_cpu_affinity.take(),
+            self.shared.current_stage_index,
+        );
         self.shared.consumers.push(consumer_info);
         self.shared.current_stage_width += 1;
         self
@@ -1151,13 +1181,37 @@ where
     where
         H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
     {
-        let boxed_handler = Box::new(ClosureEventHandler::new(handler));
-        let consumer_info = ConsumerInfo {
-            handler: boxed_handler,
-            thread_name: self.shared.current_thread_name.take(),
-            cpu_affinity: self.shared.current_cpu_affinity.take(),
-            stage_index: self.shared.current_stage_index,
-        };
+        let consumer_info = consumer_info_from_handler(
+            ClosureEventHandler::new(handler),
+            self.shared.current_thread_name.take(),
+            self.shared.current_cpu_affinity.take(),
+            self.shared.current_stage_index,
+        );
+        self.shared.consumers.push(consumer_info);
+        self.shared.current_stage_width = 1;
+
+        MultiProducerBuilder {
+            event_factory: self.event_factory,
+            shared: self.shared,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Add a stateful event handler to process events
+    #[must_use]
+    pub fn handle_events_with_handler<H>(
+        mut self,
+        handler: H,
+    ) -> MultiProducerBuilder<HasConsumers, E, F, W>
+    where
+        H: EventHandler<E> + Send + Sync + 'static,
+    {
+        let consumer_info = consumer_info_from_handler(
+            handler,
+            self.shared.current_thread_name.take(),
+            self.shared.current_cpu_affinity.take(),
+            self.shared.current_stage_index,
+        );
         self.shared.consumers.push(consumer_info);
         self.shared.current_stage_width = 1;
 
@@ -1195,13 +1249,29 @@ where
     where
         H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
     {
-        let boxed_handler = Box::new(ClosureEventHandler::new(handler));
-        let consumer_info = ConsumerInfo {
-            handler: boxed_handler,
-            thread_name: self.shared.current_thread_name.take(),
-            cpu_affinity: self.shared.current_cpu_affinity.take(),
-            stage_index: self.shared.current_stage_index,
-        };
+        let consumer_info = consumer_info_from_handler(
+            ClosureEventHandler::new(handler),
+            self.shared.current_thread_name.take(),
+            self.shared.current_cpu_affinity.take(),
+            self.shared.current_stage_index,
+        );
+        self.shared.consumers.push(consumer_info);
+        self.shared.current_stage_width += 1;
+        self
+    }
+
+    /// Add another stateful event handler to process events in parallel
+    #[must_use]
+    pub fn handle_events_with_handler<H>(mut self, handler: H) -> Self
+    where
+        H: EventHandler<E> + Send + Sync + 'static,
+    {
+        let consumer_info = consumer_info_from_handler(
+            handler,
+            self.shared.current_thread_name.take(),
+            self.shared.current_cpu_affinity.take(),
+            self.shared.current_stage_index,
+        );
         self.shared.consumers.push(consumer_info);
         self.shared.current_stage_width += 1;
         self
@@ -2156,6 +2226,62 @@ mod tests {
         );
 
         println!("Stateful event handler test completed successfully");
+    }
+
+    #[test]
+    fn test_multi_producer_stateful_event_handler() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        struct CountingEventHandler {
+            total_processed: Arc<AtomicUsize>,
+        }
+
+        impl EventHandler<TestEvent> for CountingEventHandler {
+            fn on_event(
+                &mut self,
+                event: &mut TestEvent,
+                _sequence: i64,
+                _end_of_batch: bool,
+            ) -> crate::disruptor::Result<()> {
+                self.total_processed.fetch_add(1, Ordering::SeqCst);
+                event.value += 1;
+                Ok(())
+            }
+        }
+
+        let total_processed = Arc::new(AtomicUsize::new(0));
+
+        let mut disruptor_handle =
+            build_multi_producer(8, test_event_factory, BusySpinWaitStrategy)
+                .thread_name("multi-stateful-consumer")
+                .handle_events_with_handler(CountingEventHandler {
+                    total_processed: Arc::clone(&total_processed),
+                })
+                .build();
+
+        let mut producer1 = disruptor_handle.create_producer();
+        let mut producer2 = disruptor_handle.create_producer();
+
+        for i in 0..5 {
+            producer1.publish(|event| {
+                event.value = i;
+            });
+            producer2.publish(|event| {
+                event.value = i + 10;
+            });
+        }
+
+        wait_until(
+            Duration::from_secs(1),
+            || total_processed.load(Ordering::SeqCst) == 10,
+            "multi producer stateful handler to process all events",
+        );
+
+        disruptor_handle.shutdown();
+
+        assert_eq!(total_processed.load(Ordering::SeqCst), 10);
     }
 
     #[test]
