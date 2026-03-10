@@ -138,7 +138,8 @@ warmup rounds 不进入最终统计。
 
 单轮测量的边界是：
 
-- **起点**：consumer 已启动，producer 已准备完成，准备开始发布事件
+- **起点（单生产者场景）**：consumer 已启动，producer 已准备完成，紧接着开始发布第一个事件
+- **起点（多生产者场景）**：consumer 已启动，所有 producer 已准备完成，以释放统一 start signal 的瞬间作为起点
 - **终点**：最后一个 consumer 已确认处理完本轮全部事件
 
 不包含：
@@ -178,8 +179,10 @@ warmup rounds 不进入最终统计。
 {
   "impl_name": "badbatch",
   "scenario": "unicast_batch",
+  "event_padding": "none",
   "measurement_kind": "throughput",
   "buffer_size": 65536,
+  "event_size_bytes": 32,
   "wait_strategy": "yielding",
   "producer_count": 1,
   "consumer_count": 1,
@@ -233,6 +236,8 @@ Rust harness 支持以下参数：
 
 - `--scenario <unicast|unicast_batch|mpsc_batch|pipeline>`
 - `--wait-strategy <yielding|busy-spin>`
+- `--event-padding <none|64>`
+- `--producer-path <builder|direct>`
 - `--buffer-size <N>`
 - `--events-total <N>`
 - `--batch-size <N>`
@@ -244,6 +249,16 @@ Rust harness 支持以下参数：
 ### 8.2 Java harness CLI
 
 Java harness 保持与 Rust 相同的参数集合与字段语义。
+
+说明：
+
+- `producer-path` 当前只在 Rust harness 中存在，用于拆分“API 路径成本”和“引擎本体成本”。
+- `event-padding` 当前只在 Rust harness 中存在，用于验证 `unicast` / `unicast_batch` 场景下 ring slot 布局对跨核 cache line 争用的影响。
+- `builder` 表示走当前 BadBatch 默认的 `build_single_producer(...).build()` 路径。
+- `direct` 表示在 Rust 侧绕开 `DisruptorHandle` / `SimpleProducer` / builder 组装路径，直接使用 `SingleProducerSequencer + RingBuffer + ProcessingSequenceBarrier`。
+- `direct` 当前仅支持 `unicast` 与 `unicast_batch`，不改变 Java 侧实现。
+- `direct` 模式的目的不是替换第一阶段默认口径，而是用于定位 Rust 单生产者热路径里 API 层的额外成本。
+- `event-padding=64` 当前仅支持 `unicast` 与 `unicast_batch`；其余场景固定为 `none`。
 
 ### 8.3 驱动脚本
 
@@ -260,6 +275,8 @@ Java harness 保持与 Rust 相同的参数集合与字段语义。
 - `--scenario <all|unicast|unicast_batch|mpsc_batch|pipeline>`
 - `--mode <full|quick>`
 - `--order <rust-first|java-first>`
+- `--rust-producer-path <builder|direct>`
+- `--rust-event-padding <none|64>`
 - `--results-dir <PATH>`
 
 说明：
@@ -267,6 +284,8 @@ Java harness 保持与 Rust 相同的参数集合与字段语义。
 - 第一阶段先实现 `rust-first` 与 `java-first` 两种顺序
 - 不实现更复杂的 `alternate` 自动调度
 - `quick` 仅用于链路验证，不用于正式结论
+- `--rust-producer-path direct` 当前仅允许搭配 `--scenario unicast` 或 `--scenario unicast_batch`
+- `--rust-event-padding 64` 只会传给 Rust 侧的 `unicast` / `unicast_batch`；`mpsc_batch` 与 `pipeline` 会自动回退为 `none`
 
 ## 9. 运行环境要求
 

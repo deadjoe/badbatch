@@ -458,10 +458,10 @@ public final class HeadToHead
 
     enum Scenario
     {
-        UNICAST("unicast", WaitStrategyKind.YIELDING, 65_536, 100_000_000L, 1, 1, 1),
-        UNICAST_BATCH("unicast_batch", WaitStrategyKind.YIELDING, 65_536, 100_000_000L, 10, 1, 1),
-        MPSC_BATCH("mpsc_batch", WaitStrategyKind.BUSY_SPIN, 65_536, 60_000_000L, 10, MPSC_PRODUCER_COUNT, 1),
-        PIPELINE("pipeline", WaitStrategyKind.YIELDING, 8_192, 100_000_000L, 1, 1, 3);
+        UNICAST("unicast", WaitStrategyKind.YIELDING, 65_536, 100_000_000L, 1, 1, 1, 1),
+        UNICAST_BATCH("unicast_batch", WaitStrategyKind.YIELDING, 65_536, 100_000_000L, 10, 1, 1, 1),
+        MPSC_BATCH("mpsc_batch", WaitStrategyKind.BUSY_SPIN, 65_536, 60_000_000L, 10, MPSC_PRODUCER_COUNT, 1, 1),
+        PIPELINE("pipeline", WaitStrategyKind.YIELDING, 8_192, 100_000_000L, 1, 1, 3, 3);
 
         final String id;
         final WaitStrategyKind defaultWaitStrategy;
@@ -470,6 +470,7 @@ public final class HeadToHead
         final int defaultBatchSize;
         final int producerCount;
         final int consumerCount;
+        final int pipelineStages;
 
         Scenario(
                 final String id,
@@ -478,7 +479,8 @@ public final class HeadToHead
                 final long defaultEventsTotal,
                 final int defaultBatchSize,
                 final int producerCount,
-                final int consumerCount)
+                final int consumerCount,
+                final int pipelineStages)
         {
             this.id = id;
             this.defaultWaitStrategy = defaultWaitStrategy;
@@ -487,6 +489,7 @@ public final class HeadToHead
             this.defaultBatchSize = defaultBatchSize;
             this.producerCount = producerCount;
             this.consumerCount = consumerCount;
+            this.pipelineStages = pipelineStages;
         }
 
         static Scenario parse(final String value)
@@ -1005,7 +1008,7 @@ public final class HeadToHead
                     config.waitStrategy,
                     config.scenario.producerCount,
                     config.scenario.consumerCount,
-                    config.scenario.consumerCount,
+                    config.scenario.pipelineStages,
                     config.batchSize,
                     config.eventsTotal,
                     config.warmupRounds,
