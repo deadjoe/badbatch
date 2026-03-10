@@ -47,6 +47,9 @@ struct ComparisonPadded64Event {
 trait UnicastEvent: Default + Send + Sync + 'static {
     fn populate(&mut self, value: i64);
     fn value(&self) -> i64;
+    fn apply_stage1(&mut self) -> i64;
+    fn apply_stage2(&mut self) -> i64;
+    fn apply_stage3(&mut self) -> i64;
 }
 
 impl UnicastEvent for ComparisonEvent {
@@ -60,6 +63,21 @@ impl UnicastEvent for ComparisonEvent {
     fn value(&self) -> i64 {
         self.value
     }
+
+    fn apply_stage1(&mut self) -> i64 {
+        self.stage1_value = self.value.wrapping_add(1);
+        self.stage1_value
+    }
+
+    fn apply_stage2(&mut self) -> i64 {
+        self.stage2_value = self.stage1_value.wrapping_add(3);
+        self.stage2_value
+    }
+
+    fn apply_stage3(&mut self) -> i64 {
+        self.stage3_value = self.stage2_value.wrapping_add(7);
+        self.stage3_value
+    }
 }
 
 impl UnicastEvent for ComparisonPadded64Event {
@@ -72,6 +90,21 @@ impl UnicastEvent for ComparisonPadded64Event {
 
     fn value(&self) -> i64 {
         self.value
+    }
+
+    fn apply_stage1(&mut self) -> i64 {
+        self.stage1_value = self.value.wrapping_add(1);
+        self.stage1_value
+    }
+
+    fn apply_stage2(&mut self) -> i64 {
+        self.stage2_value = self.stage1_value.wrapping_add(3);
+        self.stage2_value
+    }
+
+    fn apply_stage3(&mut self) -> i64 {
+        self.stage3_value = self.stage2_value.wrapping_add(7);
+        self.stage3_value
     }
 }
 
@@ -474,10 +507,13 @@ impl TryFrom<CliConfig> for ResolvedConfig {
             ));
         }
         if value.event_padding != EventPadding::None
-            && !matches!(scenario, Scenario::Unicast | Scenario::UnicastBatch)
+            && !matches!(
+                scenario,
+                Scenario::Unicast | Scenario::UnicastBatch | Scenario::Pipeline
+            )
         {
             return Err(format!(
-                "event-padding is only supported for unicast and unicast_batch, got {}",
+                "event-padding is only supported for unicast, unicast_batch, and pipeline, got {}",
                 scenario.as_str()
             ));
         }
@@ -617,18 +653,22 @@ where
     }
 }
 
-struct PipelineStage1Handler {
+struct PipelineStage1Handler<E> {
     ready_count: Arc<AtomicU64>,
+    marker: PhantomData<fn() -> E>,
 }
 
-impl EventHandler<ComparisonEvent> for PipelineStage1Handler {
+impl<E> EventHandler<E> for PipelineStage1Handler<E>
+where
+    E: UnicastEvent,
+{
     fn on_event(
         &mut self,
-        event: &mut ComparisonEvent,
+        event: &mut E,
         _sequence: i64,
         _end_of_batch: bool,
     ) -> DisruptorResult<()> {
-        event.stage1_value = event.value.wrapping_add(1);
+        let _ = event.apply_stage1();
         Ok(())
     }
 
@@ -638,18 +678,22 @@ impl EventHandler<ComparisonEvent> for PipelineStage1Handler {
     }
 }
 
-struct PipelineStage2Handler {
+struct PipelineStage2Handler<E> {
     ready_count: Arc<AtomicU64>,
+    marker: PhantomData<fn() -> E>,
 }
 
-impl EventHandler<ComparisonEvent> for PipelineStage2Handler {
+impl<E> EventHandler<E> for PipelineStage2Handler<E>
+where
+    E: UnicastEvent,
+{
     fn on_event(
         &mut self,
-        event: &mut ComparisonEvent,
+        event: &mut E,
         _sequence: i64,
         _end_of_batch: bool,
     ) -> DisruptorResult<()> {
-        event.stage2_value = event.stage1_value.wrapping_add(3);
+        let _ = event.apply_stage2();
         Ok(())
     }
 
@@ -659,21 +703,24 @@ impl EventHandler<ComparisonEvent> for PipelineStage2Handler {
     }
 }
 
-struct PipelineStage3Handler {
+struct PipelineStage3Handler<E> {
     processed: Arc<AtomicU64>,
     checksum: Arc<AtomicI64>,
     ready_count: Arc<AtomicU64>,
+    marker: PhantomData<fn() -> E>,
 }
 
-impl EventHandler<ComparisonEvent> for PipelineStage3Handler {
+impl<E> EventHandler<E> for PipelineStage3Handler<E>
+where
+    E: UnicastEvent,
+{
     fn on_event(
         &mut self,
-        event: &mut ComparisonEvent,
+        event: &mut E,
         _sequence: i64,
         _end_of_batch: bool,
     ) -> DisruptorResult<()> {
-        event.stage3_value = event.stage2_value.wrapping_add(7);
-        let value = event.stage3_value;
+        let value = event.apply_stage3();
         add_wrapping_i64(&self.checksum, value);
         self.processed.fetch_add(1, Ordering::Release);
         Ok(())
@@ -1221,6 +1268,12 @@ fn run_unicast_with<W>(
 where
     W: WaitStrategy + Send + Sync + Clone + 'static,
 {
+    if config.producer_path == ProducerPath::Builder
+        && config.consumer_mode == ConsumerMode::LibraryBuilder
+    {
+        return run_unicast_builder_with(config, wait_strategy, wait_strategy_kind);
+    }
+
     match config.event_padding {
         EventPadding::None => {
             run_unicast_with_typed::<W, ComparisonEvent>(config, wait_strategy, wait_strategy_kind)
@@ -1241,6 +1294,12 @@ fn run_unicast_batch_with<W>(
 where
     W: WaitStrategy + Send + Sync + Clone + 'static,
 {
+    if config.producer_path == ProducerPath::Builder
+        && config.consumer_mode == ConsumerMode::LibraryBuilder
+    {
+        return run_unicast_batch_builder_with(config, wait_strategy, wait_strategy_kind);
+    }
+
     match config.event_padding {
         EventPadding::None => run_unicast_batch_with_typed::<W, ComparisonEvent>(
             config,
@@ -1253,6 +1312,156 @@ where
             wait_strategy_kind,
         ),
     }
+}
+
+fn run_unicast_builder_with<W>(
+    config: &ResolvedConfig,
+    wait_strategy: W,
+    wait_strategy_kind: WaitStrategyKind,
+) -> Result<HarnessResult, String>
+where
+    W: WaitStrategy + Send + Sync + Clone + 'static,
+{
+    let expected_checksum = arithmetic_checksum(config.events_total);
+    let mut runs = Vec::with_capacity(config.warmup_rounds + config.measured_rounds);
+
+    for round in 0..(config.warmup_rounds + config.measured_rounds) {
+        let ready_count = Arc::new(AtomicU64::new(0));
+        let processed = Arc::new(AtomicU64::new(0));
+        let checksum = Arc::new(AtomicI64::new(0));
+        let handler = SummingHandler::<ComparisonEvent> {
+            processed: Arc::clone(&processed),
+            checksum: Arc::clone(&checksum),
+            ready_count: Arc::clone(&ready_count),
+            marker: PhantomData,
+        };
+
+        let mut builder = build_single_producer(
+            config.buffer_size,
+            ComparisonEvent::default,
+            wait_strategy.clone(),
+        );
+        if config.event_padding == EventPadding::Pad64 {
+            builder = builder.with_cache_line_padding(true);
+        }
+        let mut disruptor = builder.handle_events_with_handler(handler).build();
+
+        wait_for_ready(&ready_count, 1, "unicast consumer")?;
+
+        let start = Instant::now();
+        for value in 0..config.events_total {
+            let value = value as i64;
+            disruptor.publish(move |event| populate_event(event, value));
+        }
+        wait_for_processed(&processed, config.events_total, "unicast completion")?;
+        let elapsed = start.elapsed().as_nanos();
+
+        let round_record = RoundRecord {
+            round_index: round + 1,
+            phase: if round < config.warmup_rounds {
+                RoundPhase::Warmup
+            } else {
+                RoundPhase::Measured
+            },
+            elapsed_ns: elapsed,
+            ops_per_sec: ops_per_sec(config.events_total, elapsed),
+            events_expected: config.events_total,
+            events_processed: processed.load(Ordering::Acquire),
+            checksum_expected: expected_checksum,
+            checksum_observed: checksum.load(Ordering::Acquire),
+            checksum_valid: processed.load(Ordering::Acquire) == config.events_total
+                && checksum.load(Ordering::Acquire) == expected_checksum,
+        };
+
+        disruptor.shutdown();
+        runs.push(round_record);
+    }
+
+    Ok(build_result(
+        config,
+        wait_strategy_kind,
+        runs,
+        std::mem::size_of::<ComparisonEvent>(),
+    ))
+}
+
+fn run_unicast_batch_builder_with<W>(
+    config: &ResolvedConfig,
+    wait_strategy: W,
+    wait_strategy_kind: WaitStrategyKind,
+) -> Result<HarnessResult, String>
+where
+    W: WaitStrategy + Send + Sync + Clone + 'static,
+{
+    let expected_checksum = arithmetic_checksum(config.events_total);
+    let mut runs = Vec::with_capacity(config.warmup_rounds + config.measured_rounds);
+
+    for round in 0..(config.warmup_rounds + config.measured_rounds) {
+        let ready_count = Arc::new(AtomicU64::new(0));
+        let processed = Arc::new(AtomicU64::new(0));
+        let checksum = Arc::new(AtomicI64::new(0));
+        let handler = SummingHandler::<ComparisonEvent> {
+            processed: Arc::clone(&processed),
+            checksum: Arc::clone(&checksum),
+            ready_count: Arc::clone(&ready_count),
+            marker: PhantomData,
+        };
+
+        let mut builder = build_single_producer(
+            config.buffer_size,
+            ComparisonEvent::default,
+            wait_strategy.clone(),
+        );
+        if config.event_padding == EventPadding::Pad64 {
+            builder = builder.with_cache_line_padding(true);
+        }
+        let mut disruptor = builder.handle_events_with_handler(handler).build();
+
+        wait_for_ready(&ready_count, 1, "unicast batch consumer")?;
+
+        let start = Instant::now();
+        let mut published = 0_u64;
+        while published < config.events_total {
+            let chunk_len = ((config.events_total - published) as usize).min(config.batch_size);
+            let chunk_start = published;
+            disruptor.batch_publish(chunk_len, |iter| {
+                for (index, event) in iter.enumerate() {
+                    let value = (chunk_start + index as u64) as i64;
+                    populate_event(event, value);
+                }
+            });
+            published += chunk_len as u64;
+        }
+        wait_for_processed(&processed, config.events_total, "unicast batch completion")?;
+        let elapsed = start.elapsed().as_nanos();
+
+        let round_record = RoundRecord {
+            round_index: round + 1,
+            phase: if round < config.warmup_rounds {
+                RoundPhase::Warmup
+            } else {
+                RoundPhase::Measured
+            },
+            elapsed_ns: elapsed,
+            ops_per_sec: ops_per_sec(config.events_total, elapsed),
+            events_expected: config.events_total,
+            events_processed: processed.load(Ordering::Acquire),
+            checksum_expected: expected_checksum,
+            checksum_observed: checksum.load(Ordering::Acquire),
+            checksum_valid: processed.load(Ordering::Acquire) == config.events_total
+                && checksum.load(Ordering::Acquire) == expected_checksum,
+        };
+
+        disruptor.shutdown();
+        runs.push(round_record);
+    }
+
+    Ok(build_result(
+        config,
+        wait_strategy_kind,
+        runs,
+        std::mem::size_of::<ComparisonEvent>(),
+    ))
 }
 
 fn run_unicast_with_typed<W, E>(
@@ -1924,6 +2133,17 @@ fn run_pipeline_with<W>(
 where
     W: WaitStrategy + Send + Sync + Clone + 'static,
 {
+    run_pipeline_builder_with(config, wait_strategy, wait_strategy_kind)
+}
+
+fn run_pipeline_builder_with<W>(
+    config: &ResolvedConfig,
+    wait_strategy: W,
+    wait_strategy_kind: WaitStrategyKind,
+) -> Result<HarnessResult, String>
+where
+    W: WaitStrategy + Send + Sync + Clone + 'static,
+{
     let expected_checksum = pipeline_checksum(config.events_total);
     let mut runs = Vec::with_capacity(config.warmup_rounds + config.measured_rounds);
 
@@ -1932,41 +2152,43 @@ where
         let processed = Arc::new(AtomicU64::new(0));
         let checksum = Arc::new(AtomicI64::new(0));
 
-        let stage1 = PipelineStage1Handler {
+        let stage1 = PipelineStage1Handler::<ComparisonEvent> {
             ready_count: Arc::clone(&ready_count),
+            marker: PhantomData,
         };
-        let stage2 = PipelineStage2Handler {
+        let stage2 = PipelineStage2Handler::<ComparisonEvent> {
             ready_count: Arc::clone(&ready_count),
+            marker: PhantomData,
         };
-        let stage3 = PipelineStage3Handler {
+        let stage3 = PipelineStage3Handler::<ComparisonEvent> {
             processed: Arc::clone(&processed),
             checksum: Arc::clone(&checksum),
             ready_count: Arc::clone(&ready_count),
+            marker: PhantomData,
         };
 
-        let mut disruptor = build_single_producer(
+        let mut builder = build_single_producer(
             config.buffer_size,
             ComparisonEvent::default,
             wait_strategy.clone(),
-        )
-        .handle_events_with_handler(stage1)
-        .and_then()
-        .handle_events_with_handler(stage2)
-        .and_then()
-        .handle_events_with_handler(stage3)
-        .build();
+        );
+        if config.event_padding == EventPadding::Pad64 {
+            builder = builder.with_cache_line_padding(true);
+        }
+        let mut disruptor = builder
+            .handle_events_with_handler(stage1)
+            .and_then()
+            .handle_events_with_handler(stage2)
+            .and_then()
+            .handle_events_with_handler(stage3)
+            .build();
 
         wait_for_ready(&ready_count, 3, "pipeline stages")?;
 
         let start = Instant::now();
         for value in 0..config.events_total {
             let value = value as i64;
-            disruptor.publish(move |event| {
-                event.value = value;
-                event.stage1_value = 0;
-                event.stage2_value = 0;
-                event.stage3_value = 0;
-            });
+            disruptor.publish(move |event| populate_event(event, value));
         }
         wait_for_processed(&processed, config.events_total, "pipeline completion")?;
         let elapsed = start.elapsed().as_nanos();
