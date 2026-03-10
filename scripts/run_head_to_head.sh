@@ -4,6 +4,8 @@ set -euo pipefail
 SCENARIO="all"
 MODE="full"
 ORDER="rust-first"
+RUST_PRODUCER_PATH="builder"
+RUST_EVENT_PADDING="none"
 RESULTS_DIR=""
 
 usage() {
@@ -14,6 +16,8 @@ Options:
   --scenario <all|unicast|unicast_batch|mpsc_batch|pipeline>
   --mode <full|quick>
   --order <rust-first|java-first>
+  --rust-producer-path <builder|direct>
+  --rust-event-padding <none|64>
   --results-dir <PATH>
 EOF
 }
@@ -30,6 +34,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --order)
             ORDER="${2:?missing value for --order}"
+            shift 2
+            ;;
+        --rust-producer-path)
+            RUST_PRODUCER_PATH="${2:?missing value for --rust-producer-path}"
+            shift 2
+            ;;
+        --rust-event-padding)
+            RUST_EVENT_PADDING="${2:?missing value for --rust-event-padding}"
             shift 2
             ;;
         --results-dir)
@@ -63,8 +75,28 @@ if [[ "$ORDER" != "rust-first" && "$ORDER" != "java-first" ]]; then
     exit 1
 fi
 
+if [[ "$RUST_PRODUCER_PATH" != "builder" && "$RUST_PRODUCER_PATH" != "direct" ]]; then
+    echo "Unsupported rust producer path: $RUST_PRODUCER_PATH" >&2
+    exit 1
+fi
+
+if [[ "$RUST_EVENT_PADDING" != "none" && "$RUST_EVENT_PADDING" != "64" ]]; then
+    echo "Unsupported rust event padding: $RUST_EVENT_PADDING" >&2
+    exit 1
+fi
+
+if [[ "$RUST_PRODUCER_PATH" == "direct" && "$SCENARIO" != "unicast" && "$SCENARIO" != "unicast_batch" ]]; then
+    echo "rust producer path 'direct' is only supported for unicast and unicast_batch scenarios" >&2
+    exit 1
+fi
+
+if [[ "$RUST_EVENT_PADDING" != "none" && "$SCENARIO" != "all" && "$SCENARIO" != "unicast" && "$SCENARIO" != "unicast_batch" ]]; then
+    echo "rust event padding is only supported for unicast and unicast_batch scenarios" >&2
+    exit 1
+fi
+
 if [[ -z "$RESULTS_DIR" ]]; then
-    RESULTS_DIR="head_to_head_results/$(date +%Y%m%d_%H%M%S)"
+    RESULTS_DIR="head_to_head_results/$(date +%Y%m%d_%H%M%S)_$$"
 fi
 
 mkdir -p "$RESULTS_DIR"
@@ -144,10 +176,17 @@ run_rust() {
     local warmup_rounds="$6"
     local measured_rounds="$7"
     local output_path="$RESULTS_DIR/rust_${scenario}.json"
+    local scenario_padding="none"
+
+    if [[ "$scenario" == "unicast" || "$scenario" == "unicast_batch" ]]; then
+        scenario_padding="$RUST_EVENT_PADDING"
+    fi
 
     ./target/release/h2h_rust \
         --scenario "$scenario" \
         --wait-strategy "$wait_strategy" \
+        --event-padding "$scenario_padding" \
+        --producer-path "$RUST_PRODUCER_PATH" \
         --buffer-size "$buffer_size" \
         --events-total "$events_total" \
         --batch-size "$batch_size" \

@@ -8,15 +8,18 @@
 )]
 
 use badbatch::disruptor::{
-    build_multi_producer, build_single_producer, BusySpinWaitStrategy, EventHandler, Producer,
-    Result as DisruptorResult, WaitStrategy, YieldingWaitStrategy,
+    build_multi_producer, build_single_producer, BusySpinWaitStrategy, DefaultEventFactory,
+    DisruptorError, EventHandler, ProcessingSequenceBarrier, Producer, Result as DisruptorResult,
+    RingBuffer, Sequence, SequenceBarrier, Sequencer, SequencerEnum, SimpleProducer,
+    SingleProducerSequencer, WaitStrategy, YieldingWaitStrategy,
 };
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
+use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -30,6 +33,69 @@ struct ComparisonEvent {
     stage1_value: i64,
     stage2_value: i64,
     stage3_value: i64,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+#[repr(C, align(64))]
+struct ComparisonPadded64Event {
+    value: i64,
+    stage1_value: i64,
+    stage2_value: i64,
+    stage3_value: i64,
+}
+
+trait UnicastEvent: Default + Send + Sync + 'static {
+    fn populate(&mut self, value: i64);
+    fn value(&self) -> i64;
+}
+
+impl UnicastEvent for ComparisonEvent {
+    fn populate(&mut self, value: i64) {
+        self.value = value;
+        self.stage1_value = 0;
+        self.stage2_value = 0;
+        self.stage3_value = 0;
+    }
+
+    fn value(&self) -> i64 {
+        self.value
+    }
+}
+
+impl UnicastEvent for ComparisonPadded64Event {
+    fn populate(&mut self, value: i64) {
+        self.value = value;
+        self.stage1_value = 0;
+        self.stage2_value = 0;
+        self.stage3_value = 0;
+    }
+
+    fn value(&self) -> i64 {
+        self.value
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventPadding {
+    None,
+    Pad64,
+}
+
+impl EventPadding {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "none" => Ok(Self::None),
+            "64" => Ok(Self::Pad64),
+            _ => Err(format!("unsupported event padding: {value}")),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Pad64 => "64",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,10 +199,112 @@ impl WaitStrategyKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProducerPath {
+    Builder,
+    Direct,
+}
+
+impl ProducerPath {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "builder" => Ok(Self::Builder),
+            "direct" => Ok(Self::Direct),
+            _ => Err(format!("unsupported producer path: {value}")),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Builder => "builder",
+            Self::Direct => "direct",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsumerPath {
+    Builder,
+    Direct,
+}
+
+impl ConsumerPath {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "builder" => Ok(Self::Builder),
+            "direct" => Ok(Self::Direct),
+            _ => Err(format!("unsupported consumer path: {value}")),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Builder => "builder",
+            Self::Direct => "direct",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsumerMode {
+    LibraryBuilder,
+    BuilderDyn,
+    BuilderStatic,
+    BuilderStaticPerBatch,
+    DirectPerEvent,
+    DirectPerBatch,
+}
+
+impl ConsumerMode {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "library-builder" => Ok(Self::LibraryBuilder),
+            "builder-dyn" => Ok(Self::BuilderDyn),
+            "builder-static" => Ok(Self::BuilderStatic),
+            "builder-static-per-batch" => Ok(Self::BuilderStaticPerBatch),
+            "direct-per-event" => Ok(Self::DirectPerEvent),
+            "direct-per-batch" => Ok(Self::DirectPerBatch),
+            _ => Err(format!("unsupported consumer mode: {value}")),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LibraryBuilder => "library-builder",
+            Self::BuilderDyn => "builder-dyn",
+            Self::BuilderStatic => "builder-static",
+            Self::BuilderStaticPerBatch => "builder-static-per-batch",
+            Self::DirectPerEvent => "direct-per-event",
+            Self::DirectPerBatch => "direct-per-batch",
+        }
+    }
+
+    fn default_for(path: ConsumerPath) -> Self {
+        match path {
+            ConsumerPath::Builder => Self::LibraryBuilder,
+            ConsumerPath::Direct => Self::DirectPerBatch,
+        }
+    }
+
+    fn path(self) -> ConsumerPath {
+        match self {
+            Self::LibraryBuilder
+            | Self::BuilderDyn
+            | Self::BuilderStatic
+            | Self::BuilderStaticPerBatch => ConsumerPath::Builder,
+            Self::DirectPerEvent | Self::DirectPerBatch => ConsumerPath::Direct,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CliConfig {
     scenario: Scenario,
     wait_strategy: Option<WaitStrategyKind>,
+    event_padding: EventPadding,
+    producer_path: ProducerPath,
+    consumer_path: Option<ConsumerPath>,
+    consumer_mode: Option<ConsumerMode>,
     buffer_size: Option<usize>,
     events_total: Option<u64>,
     batch_size: Option<usize>,
@@ -150,6 +318,10 @@ struct CliConfig {
 struct ResolvedConfig {
     scenario: Scenario,
     wait_strategy: WaitStrategyKind,
+    event_padding: EventPadding,
+    producer_path: ProducerPath,
+    consumer_path: ConsumerPath,
+    consumer_mode: ConsumerMode,
     buffer_size: usize,
     events_total: u64,
     batch_size: usize,
@@ -165,6 +337,10 @@ impl CliConfig {
 
         let mut scenario = None;
         let mut wait_strategy = None;
+        let mut event_padding = EventPadding::None;
+        let mut producer_path = ProducerPath::Builder;
+        let mut consumer_path = None;
+        let mut consumer_mode = None;
         let mut buffer_size = None;
         let mut events_total = None;
         let mut batch_size = None;
@@ -182,6 +358,22 @@ impl CliConfig {
                 "--wait-strategy" => {
                     let value = args.next().ok_or("missing value for --wait-strategy")?;
                     wait_strategy = Some(WaitStrategyKind::parse(&value)?);
+                }
+                "--event-padding" => {
+                    let value = args.next().ok_or("missing value for --event-padding")?;
+                    event_padding = EventPadding::parse(&value)?;
+                }
+                "--producer-path" => {
+                    let value = args.next().ok_or("missing value for --producer-path")?;
+                    producer_path = ProducerPath::parse(&value)?;
+                }
+                "--consumer-path" => {
+                    let value = args.next().ok_or("missing value for --consumer-path")?;
+                    consumer_path = Some(ConsumerPath::parse(&value)?);
+                }
+                "--consumer-mode" => {
+                    let value = args.next().ok_or("missing value for --consumer-mode")?;
+                    consumer_mode = Some(ConsumerMode::parse(&value)?);
                 }
                 "--buffer-size" => {
                     let value = args.next().ok_or("missing value for --buffer-size")?;
@@ -221,6 +413,10 @@ impl CliConfig {
         Ok(Self {
             scenario: scenario.ok_or("missing required argument --scenario")?,
             wait_strategy,
+            event_padding,
+            producer_path,
+            consumer_path,
+            consumer_mode,
             buffer_size,
             events_total,
             batch_size,
@@ -240,6 +436,14 @@ impl TryFrom<CliConfig> for ResolvedConfig {
         let wait_strategy = value
             .wait_strategy
             .unwrap_or_else(|| scenario.default_wait_strategy());
+        let mut consumer_path = value.consumer_path.unwrap_or(match value.producer_path {
+            ProducerPath::Builder => ConsumerPath::Builder,
+            ProducerPath::Direct => ConsumerPath::Direct,
+        });
+        let consumer_mode = value
+            .consumer_mode
+            .unwrap_or_else(|| ConsumerMode::default_for(consumer_path));
+        consumer_path = consumer_mode.path();
         let buffer_size = value
             .buffer_size
             .unwrap_or_else(|| scenario.default_buffer_size());
@@ -269,10 +473,38 @@ impl TryFrom<CliConfig> for ResolvedConfig {
                 "mpsc_batch requires events_total divisible by {MPSC_PRODUCER_COUNT}, got {events_total}"
             ));
         }
+        if value.event_padding != EventPadding::None
+            && !matches!(scenario, Scenario::Unicast | Scenario::UnicastBatch)
+        {
+            return Err(format!(
+                "event-padding is only supported for unicast and unicast_batch, got {}",
+                scenario.as_str()
+            ));
+        }
+        if value.producer_path == ProducerPath::Direct
+            && !matches!(scenario, Scenario::Unicast | Scenario::UnicastBatch)
+        {
+            return Err(format!(
+                "producer_path=direct is only supported for unicast and unicast_batch, got {}",
+                scenario.as_str()
+            ));
+        }
+        if consumer_path == ConsumerPath::Direct
+            && !matches!(scenario, Scenario::Unicast | Scenario::UnicastBatch)
+        {
+            return Err(format!(
+                "consumer_path=direct is only supported for unicast and unicast_batch, got {}",
+                scenario.as_str()
+            ));
+        }
 
         Ok(Self {
             scenario,
             wait_strategy,
+            event_padding: value.event_padding,
+            producer_path: value.producer_path,
+            consumer_path,
+            consumer_mode,
             buffer_size,
             events_total,
             batch_size,
@@ -335,8 +567,13 @@ struct EnvInfo {
 struct HarnessResult {
     impl_name: String,
     scenario: Scenario,
+    event_padding: EventPadding,
+    producer_path: ProducerPath,
+    consumer_path: ConsumerPath,
+    consumer_mode: ConsumerMode,
     measurement_kind: String,
     buffer_size: usize,
+    event_size_bytes: usize,
     wait_strategy: WaitStrategyKind,
     producer_count: usize,
     consumer_count: usize,
@@ -351,20 +588,24 @@ struct HarnessResult {
     summary: SummaryStats,
 }
 
-struct SummingHandler {
+struct SummingHandler<E> {
     processed: Arc<AtomicU64>,
     checksum: Arc<AtomicI64>,
     ready_count: Arc<AtomicU64>,
+    marker: PhantomData<fn() -> E>,
 }
 
-impl EventHandler<ComparisonEvent> for SummingHandler {
+impl<E> EventHandler<E> for SummingHandler<E>
+where
+    E: UnicastEvent,
+{
     fn on_event(
         &mut self,
-        event: &mut ComparisonEvent,
+        event: &mut E,
         _sequence: i64,
         _end_of_batch: bool,
     ) -> DisruptorResult<()> {
-        let value = event.value;
+        let value = event.value();
         add_wrapping_i64(&self.checksum, value);
         self.processed.fetch_add(1, Ordering::Release);
         Ok(())
@@ -442,6 +683,452 @@ impl EventHandler<ComparisonEvent> for PipelineStage3Handler {
         self.ready_count.fetch_add(1, Ordering::Release);
         Ok(())
     }
+}
+
+struct LowLevelSingleProducerRuntime<E> {
+    ring_buffer: Arc<RingBuffer<E>>,
+    sequencer: Arc<SingleProducerSequencer>,
+    sequence_barrier: Arc<dyn SequenceBarrier>,
+    consumer_sequence: Arc<Sequence>,
+    shutdown_flag: Arc<AtomicBool>,
+    consumer_handle: thread::JoinHandle<Result<(), String>>,
+}
+
+impl<E> LowLevelSingleProducerRuntime<E>
+where
+    E: UnicastEvent,
+{
+    fn new<W>(
+        buffer_size: usize,
+        wait_strategy: W,
+        consumer_mode: ConsumerMode,
+        ready_count: Arc<AtomicU64>,
+        processed: Arc<AtomicU64>,
+        checksum: Arc<AtomicI64>,
+    ) -> Result<Self, String>
+    where
+        W: WaitStrategy + Send + Sync + Clone + 'static,
+    {
+        let ring_buffer = Arc::new(
+            RingBuffer::new(buffer_size, DefaultEventFactory::<E>::new())
+                .map_err(|error| format!("failed to create direct ring buffer: {error:?}"))?,
+        );
+        let wait_strategy_arc: Arc<dyn WaitStrategy> = Arc::new(wait_strategy);
+        let sequencer = Arc::new(SingleProducerSequencer::new(
+            buffer_size,
+            Arc::clone(&wait_strategy_arc),
+        ));
+        let consumer_sequence = Arc::new(Sequence::new_with_initial_value());
+        sequencer.add_gating_sequences(std::slice::from_ref(&consumer_sequence));
+
+        let sequence_barrier: Arc<dyn SequenceBarrier> = Arc::new(ProcessingSequenceBarrier::new(
+            sequencer.get_cursor(),
+            wait_strategy_arc,
+            Vec::new(),
+            SequencerEnum::Single(Arc::clone(&sequencer)),
+        ));
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let consumer_handle = match consumer_mode {
+            ConsumerMode::DirectPerBatch => spawn_direct_unicast_consumer(
+                Arc::clone(&ring_buffer),
+                Arc::clone(&sequence_barrier),
+                Arc::clone(&consumer_sequence),
+                Arc::clone(&shutdown_flag),
+                ready_count,
+                processed,
+                checksum,
+            ),
+            ConsumerMode::DirectPerEvent => spawn_direct_per_event_unicast_consumer(
+                Arc::clone(&ring_buffer),
+                Arc::clone(&sequence_barrier),
+                Arc::clone(&consumer_sequence),
+                Arc::clone(&shutdown_flag),
+                ready_count,
+                processed,
+                checksum,
+            ),
+            ConsumerMode::LibraryBuilder | ConsumerMode::BuilderDyn => {
+                let handler: Box<dyn EventHandler<E> + Send + Sync> = Box::new(SummingHandler {
+                    processed,
+                    checksum,
+                    ready_count,
+                    marker: PhantomData,
+                });
+                spawn_builder_style_unicast_consumer(
+                    Arc::clone(&ring_buffer),
+                    Arc::clone(&sequence_barrier),
+                    Arc::clone(&consumer_sequence),
+                    Arc::clone(&shutdown_flag),
+                    handler,
+                )
+            }
+            ConsumerMode::BuilderStatic => spawn_static_handler_unicast_consumer(
+                Arc::clone(&ring_buffer),
+                Arc::clone(&sequence_barrier),
+                Arc::clone(&consumer_sequence),
+                Arc::clone(&shutdown_flag),
+                SummingHandler {
+                    processed,
+                    checksum,
+                    ready_count,
+                    marker: PhantomData,
+                },
+            ),
+            ConsumerMode::BuilderStaticPerBatch => spawn_static_handler_unicast_consumer_per_batch(
+                Arc::clone(&ring_buffer),
+                Arc::clone(&sequence_barrier),
+                Arc::clone(&consumer_sequence),
+                Arc::clone(&shutdown_flag),
+                SummingHandler {
+                    processed,
+                    checksum,
+                    ready_count,
+                    marker: PhantomData,
+                },
+            ),
+        };
+
+        Ok(Self {
+            ring_buffer,
+            sequencer,
+            sequence_barrier,
+            consumer_sequence,
+            shutdown_flag,
+            consumer_handle,
+        })
+    }
+
+    fn shutdown(self) -> Result<(), String> {
+        self.shutdown_flag.store(true, Ordering::Release);
+        self.sequence_barrier.alert();
+        self.consumer_handle
+            .join()
+            .map_err(|_| String::from("direct unicast consumer thread panicked"))??;
+        self.sequencer
+            .remove_gating_sequence(Arc::clone(&self.consumer_sequence));
+        Ok(())
+    }
+}
+
+fn spawn_builder_style_unicast_consumer<E>(
+    ring_buffer: Arc<RingBuffer<E>>,
+    sequence_barrier: Arc<dyn SequenceBarrier>,
+    consumer_sequence: Arc<Sequence>,
+    shutdown_flag: Arc<AtomicBool>,
+    mut event_handler: Box<dyn EventHandler<E> + Send + Sync>,
+) -> thread::JoinHandle<Result<(), String>>
+where
+    E: UnicastEvent,
+{
+    thread::Builder::new()
+        .name(String::from("h2h-builder-consumer"))
+        .spawn(move || {
+            let mut next_sequence = 0_i64;
+
+            event_handler
+                .on_start()
+                .map_err(|error| format!("builder-style consumer on_start failed: {error:?}"))?;
+
+            loop {
+                if shutdown_flag.load(Ordering::Acquire) {
+                    break;
+                }
+
+                match sequence_barrier.wait_for_with_shutdown(next_sequence, &shutdown_flag) {
+                    Ok(available_sequence) => {
+                        let batch_size = available_sequence - next_sequence + 1;
+                        let queue_depth = available_sequence - consumer_sequence.get();
+                        let _ = event_handler.on_batch_start(batch_size, queue_depth);
+
+                        while next_sequence <= available_sequence {
+                            let end_of_batch = next_sequence == available_sequence;
+                            let event =
+                                unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
+                            event_handler.on_event(event, next_sequence, end_of_batch).map_err(
+                                |error| {
+                                    format!(
+                                        "builder-style consumer on_event failed at {next_sequence}: {error:?}"
+                                    )
+                                },
+                            )?;
+                            consumer_sequence.set(next_sequence);
+                            next_sequence += 1;
+                        }
+                    }
+                    Err(DisruptorError::Alert) => {
+                        if shutdown_flag.load(Ordering::Acquire) {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        if shutdown_flag.load(Ordering::Acquire) {
+                            break;
+                        }
+                        return Err(format!(
+                            "builder-style consumer failed at sequence {next_sequence}: {error:?}"
+                        ));
+                    }
+                }
+            }
+
+            event_handler.on_shutdown().map_err(|error| {
+                format!("builder-style consumer on_shutdown failed: {error:?}")
+            })?;
+
+            Ok(())
+        })
+        .map_err(|error| format!("failed to spawn builder-style consumer thread: {error}"))
+        .expect("builder-style consumer thread spawn must succeed")
+}
+
+fn spawn_static_handler_unicast_consumer<E, H>(
+    ring_buffer: Arc<RingBuffer<E>>,
+    sequence_barrier: Arc<dyn SequenceBarrier>,
+    consumer_sequence: Arc<Sequence>,
+    shutdown_flag: Arc<AtomicBool>,
+    mut event_handler: H,
+) -> thread::JoinHandle<Result<(), String>>
+where
+    E: UnicastEvent,
+    H: EventHandler<E> + Send + 'static,
+{
+    thread::Builder::new()
+        .name(String::from("h2h-static-consumer"))
+        .spawn(move || {
+            let mut next_sequence = 0_i64;
+
+            event_handler
+                .on_start()
+                .map_err(|error| format!("static consumer on_start failed: {error:?}"))?;
+
+            loop {
+                if shutdown_flag.load(Ordering::Acquire) {
+                    break;
+                }
+
+                match sequence_barrier.wait_for_with_shutdown(next_sequence, &shutdown_flag) {
+                    Ok(available_sequence) => {
+                        let batch_size = available_sequence - next_sequence + 1;
+                        let queue_depth = available_sequence - consumer_sequence.get();
+                        let _ = event_handler.on_batch_start(batch_size, queue_depth);
+
+                        while next_sequence <= available_sequence {
+                            let end_of_batch = next_sequence == available_sequence;
+                            let event =
+                                unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
+                            event_handler.on_event(event, next_sequence, end_of_batch).map_err(
+                                |error| {
+                                    format!(
+                                        "static consumer on_event failed at {next_sequence}: {error:?}"
+                                    )
+                                },
+                            )?;
+                            consumer_sequence.set(next_sequence);
+                            next_sequence += 1;
+                        }
+                    }
+                    Err(DisruptorError::Alert) => {
+                        if shutdown_flag.load(Ordering::Acquire) {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        if shutdown_flag.load(Ordering::Acquire) {
+                            break;
+                        }
+                        return Err(format!(
+                            "static consumer failed at sequence {next_sequence}: {error:?}"
+                        ));
+                    }
+                }
+            }
+
+            event_handler
+                .on_shutdown()
+                .map_err(|error| format!("static consumer on_shutdown failed: {error:?}"))?;
+
+            Ok(())
+        })
+        .map_err(|error| format!("failed to spawn static consumer thread: {error}"))
+        .expect("static consumer thread spawn must succeed")
+}
+
+fn spawn_static_handler_unicast_consumer_per_batch<E, H>(
+    ring_buffer: Arc<RingBuffer<E>>,
+    sequence_barrier: Arc<dyn SequenceBarrier>,
+    consumer_sequence: Arc<Sequence>,
+    shutdown_flag: Arc<AtomicBool>,
+    mut event_handler: H,
+) -> thread::JoinHandle<Result<(), String>>
+where
+    E: UnicastEvent,
+    H: EventHandler<E> + Send + 'static,
+{
+    thread::Builder::new()
+        .name(String::from("h2h-static-batch-consumer"))
+        .spawn(move || {
+            let mut next_sequence = 0_i64;
+
+            event_handler
+                .on_start()
+                .map_err(|error| format!("static batch consumer on_start failed: {error:?}"))?;
+
+            loop {
+                if shutdown_flag.load(Ordering::Acquire) {
+                    break;
+                }
+
+                match sequence_barrier.wait_for_with_shutdown(next_sequence, &shutdown_flag) {
+                    Ok(available_sequence) => {
+                        let batch_size = available_sequence - next_sequence + 1;
+                        let queue_depth = available_sequence - consumer_sequence.get();
+                        let _ = event_handler.on_batch_start(batch_size, queue_depth);
+
+                        while next_sequence <= available_sequence {
+                            let end_of_batch = next_sequence == available_sequence;
+                            let event =
+                                unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
+                            event_handler.on_event(event, next_sequence, end_of_batch).map_err(
+                                |error| {
+                                    format!(
+                                        "static batch consumer on_event failed at {next_sequence}: {error:?}"
+                                    )
+                                },
+                            )?;
+                            next_sequence += 1;
+                        }
+
+                        consumer_sequence.set(available_sequence);
+                    }
+                    Err(DisruptorError::Alert) => {
+                        if shutdown_flag.load(Ordering::Acquire) {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        if shutdown_flag.load(Ordering::Acquire) {
+                            break;
+                        }
+                        return Err(format!(
+                            "static batch consumer failed at sequence {next_sequence}: {error:?}"
+                        ));
+                    }
+                }
+            }
+
+            event_handler.on_shutdown().map_err(|error| {
+                format!("static batch consumer on_shutdown failed: {error:?}")
+            })?;
+
+            Ok(())
+        })
+        .map_err(|error| format!("failed to spawn static batch consumer thread: {error}"))
+        .expect("static batch consumer thread spawn must succeed")
+}
+
+fn spawn_direct_unicast_consumer<E>(
+    ring_buffer: Arc<RingBuffer<E>>,
+    sequence_barrier: Arc<dyn SequenceBarrier>,
+    consumer_sequence: Arc<Sequence>,
+    shutdown_flag: Arc<AtomicBool>,
+    ready_count: Arc<AtomicU64>,
+    processed: Arc<AtomicU64>,
+    checksum: Arc<AtomicI64>,
+) -> thread::JoinHandle<Result<(), String>>
+where
+    E: UnicastEvent,
+{
+    thread::spawn(move || {
+        ready_count.fetch_add(1, Ordering::Release);
+        let mut next_sequence = consumer_sequence.get() + 1;
+
+        loop {
+            match sequence_barrier.wait_for_with_shutdown(next_sequence, &shutdown_flag) {
+                Ok(available_sequence) => {
+                    if available_sequence < next_sequence {
+                        continue;
+                    }
+
+                    while next_sequence <= available_sequence {
+                        let event = unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
+                        add_wrapping_i64(&checksum, event.value());
+                        processed.fetch_add(1, Ordering::Release);
+                        next_sequence += 1;
+                    }
+
+                    consumer_sequence.set(available_sequence);
+                }
+                Err(DisruptorError::Alert) => {
+                    if shutdown_flag.load(Ordering::Acquire) {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "direct unicast consumer failed at sequence {next_sequence}: {error:?}"
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    })
+}
+
+fn spawn_direct_per_event_unicast_consumer<E>(
+    ring_buffer: Arc<RingBuffer<E>>,
+    sequence_barrier: Arc<dyn SequenceBarrier>,
+    consumer_sequence: Arc<Sequence>,
+    shutdown_flag: Arc<AtomicBool>,
+    ready_count: Arc<AtomicU64>,
+    processed: Arc<AtomicU64>,
+    checksum: Arc<AtomicI64>,
+) -> thread::JoinHandle<Result<(), String>>
+where
+    E: UnicastEvent,
+{
+    thread::spawn(move || {
+        ready_count.fetch_add(1, Ordering::Release);
+        let mut next_sequence = consumer_sequence.get() + 1;
+
+        loop {
+            match sequence_barrier.wait_for_with_shutdown(next_sequence, &shutdown_flag) {
+                Ok(available_sequence) => {
+                    if available_sequence < next_sequence {
+                        continue;
+                    }
+
+                    while next_sequence <= available_sequence {
+                        let event = unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
+                        add_wrapping_i64(&checksum, event.value());
+                        processed.fetch_add(1, Ordering::Release);
+                        consumer_sequence.set(next_sequence);
+                        next_sequence += 1;
+                    }
+                }
+                Err(DisruptorError::Alert) => {
+                    if shutdown_flag.load(Ordering::Acquire) {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "direct per-event consumer failed at sequence {next_sequence}: {error:?}"
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    })
+}
+
+#[inline]
+fn populate_event<E>(event: &mut E, value: i64)
+where
+    E: UnicastEvent,
+{
+    event.populate(value);
 }
 
 fn main() {
@@ -534,6 +1221,60 @@ fn run_unicast_with<W>(
 where
     W: WaitStrategy + Send + Sync + Clone + 'static,
 {
+    match config.event_padding {
+        EventPadding::None => {
+            run_unicast_with_typed::<W, ComparisonEvent>(config, wait_strategy, wait_strategy_kind)
+        }
+        EventPadding::Pad64 => run_unicast_with_typed::<W, ComparisonPadded64Event>(
+            config,
+            wait_strategy,
+            wait_strategy_kind,
+        ),
+    }
+}
+
+fn run_unicast_batch_with<W>(
+    config: &ResolvedConfig,
+    wait_strategy: W,
+    wait_strategy_kind: WaitStrategyKind,
+) -> Result<HarnessResult, String>
+where
+    W: WaitStrategy + Send + Sync + Clone + 'static,
+{
+    match config.event_padding {
+        EventPadding::None => run_unicast_batch_with_typed::<W, ComparisonEvent>(
+            config,
+            wait_strategy,
+            wait_strategy_kind,
+        ),
+        EventPadding::Pad64 => run_unicast_batch_with_typed::<W, ComparisonPadded64Event>(
+            config,
+            wait_strategy,
+            wait_strategy_kind,
+        ),
+    }
+}
+
+fn run_unicast_with_typed<W, E>(
+    config: &ResolvedConfig,
+    wait_strategy: W,
+    wait_strategy_kind: WaitStrategyKind,
+) -> Result<HarnessResult, String>
+where
+    W: WaitStrategy + Send + Sync + Clone + 'static,
+    E: UnicastEvent,
+{
+    if config.producer_path == ProducerPath::Direct
+        && config.consumer_mode == ConsumerMode::DirectPerBatch
+    {
+        return run_unicast_direct_with::<W, E>(config, wait_strategy, wait_strategy_kind);
+    }
+    if config.producer_path != ProducerPath::Builder
+        || config.consumer_mode != ConsumerMode::LibraryBuilder
+    {
+        return run_unicast_hybrid_with::<W, E>(config, wait_strategy, wait_strategy_kind);
+    }
+
     let expected_checksum = arithmetic_checksum(config.events_total);
     let mut runs = Vec::with_capacity(config.warmup_rounds + config.measured_rounds);
 
@@ -541,31 +1282,24 @@ where
         let ready_count = Arc::new(AtomicU64::new(0));
         let processed = Arc::new(AtomicU64::new(0));
         let checksum = Arc::new(AtomicI64::new(0));
-        let handler = SummingHandler {
+        let handler = SummingHandler::<E> {
             processed: Arc::clone(&processed),
             checksum: Arc::clone(&checksum),
             ready_count: Arc::clone(&ready_count),
+            marker: PhantomData,
         };
 
-        let mut disruptor = build_single_producer(
-            config.buffer_size,
-            ComparisonEvent::default,
-            wait_strategy.clone(),
-        )
-        .handle_events_with_handler(handler)
-        .build();
+        let mut disruptor =
+            build_single_producer(config.buffer_size, E::default, wait_strategy.clone())
+                .handle_events_with_handler(handler)
+                .build();
 
         wait_for_ready(&ready_count, 1, "unicast consumer")?;
 
         let start = Instant::now();
         for value in 0..config.events_total {
             let value = value as i64;
-            disruptor.publish(move |event| {
-                event.value = value;
-                event.stage1_value = 0;
-                event.stage2_value = 0;
-                event.stage3_value = 0;
-            });
+            disruptor.publish(move |event| populate_event(event, value));
         }
         wait_for_processed(&processed, config.events_total, "unicast completion")?;
         let elapsed = start.elapsed().as_nanos();
@@ -591,17 +1325,34 @@ where
         runs.push(round_record);
     }
 
-    Ok(build_result(config, wait_strategy_kind, runs))
+    Ok(build_result(
+        config,
+        wait_strategy_kind,
+        runs,
+        std::mem::size_of::<E>(),
+    ))
 }
 
-fn run_unicast_batch_with<W>(
+fn run_unicast_batch_with_typed<W, E>(
     config: &ResolvedConfig,
     wait_strategy: W,
     wait_strategy_kind: WaitStrategyKind,
 ) -> Result<HarnessResult, String>
 where
     W: WaitStrategy + Send + Sync + Clone + 'static,
+    E: UnicastEvent,
 {
+    if config.producer_path == ProducerPath::Direct
+        && config.consumer_mode == ConsumerMode::DirectPerBatch
+    {
+        return run_unicast_batch_direct_with::<W, E>(config, wait_strategy, wait_strategy_kind);
+    }
+    if config.producer_path != ProducerPath::Builder
+        || config.consumer_mode != ConsumerMode::LibraryBuilder
+    {
+        return run_unicast_batch_hybrid_with::<W, E>(config, wait_strategy, wait_strategy_kind);
+    }
+
     let expected_checksum = arithmetic_checksum(config.events_total);
     let mut runs = Vec::with_capacity(config.warmup_rounds + config.measured_rounds);
 
@@ -609,19 +1360,17 @@ where
         let ready_count = Arc::new(AtomicU64::new(0));
         let processed = Arc::new(AtomicU64::new(0));
         let checksum = Arc::new(AtomicI64::new(0));
-        let handler = SummingHandler {
+        let handler = SummingHandler::<E> {
             processed: Arc::clone(&processed),
             checksum: Arc::clone(&checksum),
             ready_count: Arc::clone(&ready_count),
+            marker: PhantomData,
         };
 
-        let mut disruptor = build_single_producer(
-            config.buffer_size,
-            ComparisonEvent::default,
-            wait_strategy.clone(),
-        )
-        .handle_events_with_handler(handler)
-        .build();
+        let mut disruptor =
+            build_single_producer(config.buffer_size, E::default, wait_strategy.clone())
+                .handle_events_with_handler(handler)
+                .build();
 
         wait_for_ready(&ready_count, 1, "unicast batch consumer")?;
 
@@ -633,10 +1382,7 @@ where
             disruptor.batch_publish(chunk_len, |iter| {
                 for (index, event) in iter.enumerate() {
                     let value = (chunk_start + index as u64) as i64;
-                    event.value = value;
-                    event.stage1_value = 0;
-                    event.stage2_value = 0;
-                    event.stage3_value = 0;
+                    populate_event(event, value);
                 }
             });
             published += chunk_len as u64;
@@ -665,7 +1411,387 @@ where
         runs.push(round_record);
     }
 
-    Ok(build_result(config, wait_strategy_kind, runs))
+    Ok(build_result(
+        config,
+        wait_strategy_kind,
+        runs,
+        std::mem::size_of::<E>(),
+    ))
+}
+
+fn run_unicast_direct_with<W, E>(
+    config: &ResolvedConfig,
+    wait_strategy: W,
+    wait_strategy_kind: WaitStrategyKind,
+) -> Result<HarnessResult, String>
+where
+    W: WaitStrategy + Send + Sync + Clone + 'static,
+    E: UnicastEvent,
+{
+    let expected_checksum = arithmetic_checksum(config.events_total);
+    let mut runs = Vec::with_capacity(config.warmup_rounds + config.measured_rounds);
+
+    for round in 0..(config.warmup_rounds + config.measured_rounds) {
+        let ready_count = Arc::new(AtomicU64::new(0));
+        let processed = Arc::new(AtomicU64::new(0));
+        let checksum = Arc::new(AtomicI64::new(0));
+
+        let runtime = LowLevelSingleProducerRuntime::<E>::new(
+            config.buffer_size,
+            wait_strategy.clone(),
+            ConsumerMode::DirectPerBatch,
+            Arc::clone(&ready_count),
+            Arc::clone(&processed),
+            Arc::clone(&checksum),
+        )?;
+
+        let run_result = (|| -> Result<RoundRecord, String> {
+            wait_for_ready(&ready_count, 1, "direct unicast consumer")?;
+
+            let start = Instant::now();
+            for value in 0..config.events_total {
+                let value = value as i64;
+                let sequence = runtime
+                    .sequencer
+                    .next()
+                    .map_err(|error| format!("failed to claim unicast sequence: {error:?}"))?;
+                let event = unsafe { &mut *runtime.ring_buffer.get_mut_unchecked(sequence) };
+                populate_event(event, value);
+                runtime.sequencer.publish(sequence);
+            }
+            wait_for_processed(&processed, config.events_total, "direct unicast completion")?;
+            let elapsed = start.elapsed().as_nanos();
+
+            Ok(RoundRecord {
+                round_index: round + 1,
+                phase: if round < config.warmup_rounds {
+                    RoundPhase::Warmup
+                } else {
+                    RoundPhase::Measured
+                },
+                elapsed_ns: elapsed,
+                ops_per_sec: ops_per_sec(config.events_total, elapsed),
+                events_expected: config.events_total,
+                events_processed: processed.load(Ordering::Acquire),
+                checksum_expected: expected_checksum,
+                checksum_observed: checksum.load(Ordering::Acquire),
+                checksum_valid: processed.load(Ordering::Acquire) == config.events_total
+                    && checksum.load(Ordering::Acquire) == expected_checksum,
+            })
+        })();
+
+        let shutdown_result = runtime.shutdown();
+        let round_record = run_result?;
+        shutdown_result?;
+        runs.push(round_record);
+    }
+
+    Ok(build_result(
+        config,
+        wait_strategy_kind,
+        runs,
+        std::mem::size_of::<E>(),
+    ))
+}
+
+fn run_unicast_batch_direct_with<W, E>(
+    config: &ResolvedConfig,
+    wait_strategy: W,
+    wait_strategy_kind: WaitStrategyKind,
+) -> Result<HarnessResult, String>
+where
+    W: WaitStrategy + Send + Sync + Clone + 'static,
+    E: UnicastEvent,
+{
+    let expected_checksum = arithmetic_checksum(config.events_total);
+    let mut runs = Vec::with_capacity(config.warmup_rounds + config.measured_rounds);
+
+    for round in 0..(config.warmup_rounds + config.measured_rounds) {
+        let ready_count = Arc::new(AtomicU64::new(0));
+        let processed = Arc::new(AtomicU64::new(0));
+        let checksum = Arc::new(AtomicI64::new(0));
+
+        let runtime = LowLevelSingleProducerRuntime::<E>::new(
+            config.buffer_size,
+            wait_strategy.clone(),
+            ConsumerMode::DirectPerBatch,
+            Arc::clone(&ready_count),
+            Arc::clone(&processed),
+            Arc::clone(&checksum),
+        )?;
+
+        let run_result = (|| -> Result<RoundRecord, String> {
+            wait_for_ready(&ready_count, 1, "direct unicast batch consumer")?;
+
+            let start = Instant::now();
+            let mut published = 0_u64;
+            while published < config.events_total {
+                let chunk_len = ((config.events_total - published) as usize).min(config.batch_size);
+                let chunk_len_i64 =
+                    i64::try_from(chunk_len).expect("batch size must fit in i64 for direct path");
+                let end_sequence = runtime.sequencer.next_n(chunk_len_i64).map_err(|error| {
+                    format!("failed to claim direct unicast batch sequences: {error:?}")
+                })?;
+                let start_sequence = end_sequence - (chunk_len_i64 - 1);
+                let chunk_start = published;
+                let iter = unsafe {
+                    runtime
+                        .ring_buffer
+                        .batch_iter_mut(start_sequence, end_sequence)
+                };
+                for (index, event) in iter.enumerate() {
+                    let value = (chunk_start + index as u64) as i64;
+                    populate_event(event, value);
+                }
+                runtime
+                    .sequencer
+                    .publish_range(start_sequence, end_sequence);
+                published += chunk_len as u64;
+            }
+            wait_for_processed(
+                &processed,
+                config.events_total,
+                "direct unicast batch completion",
+            )?;
+            let elapsed = start.elapsed().as_nanos();
+
+            Ok(RoundRecord {
+                round_index: round + 1,
+                phase: if round < config.warmup_rounds {
+                    RoundPhase::Warmup
+                } else {
+                    RoundPhase::Measured
+                },
+                elapsed_ns: elapsed,
+                ops_per_sec: ops_per_sec(config.events_total, elapsed),
+                events_expected: config.events_total,
+                events_processed: processed.load(Ordering::Acquire),
+                checksum_expected: expected_checksum,
+                checksum_observed: checksum.load(Ordering::Acquire),
+                checksum_valid: processed.load(Ordering::Acquire) == config.events_total
+                    && checksum.load(Ordering::Acquire) == expected_checksum,
+            })
+        })();
+
+        let shutdown_result = runtime.shutdown();
+        let round_record = run_result?;
+        shutdown_result?;
+        runs.push(round_record);
+    }
+
+    Ok(build_result(
+        config,
+        wait_strategy_kind,
+        runs,
+        std::mem::size_of::<E>(),
+    ))
+}
+
+fn run_unicast_hybrid_with<W, E>(
+    config: &ResolvedConfig,
+    wait_strategy: W,
+    wait_strategy_kind: WaitStrategyKind,
+) -> Result<HarnessResult, String>
+where
+    W: WaitStrategy + Send + Sync + Clone + 'static,
+    E: UnicastEvent,
+{
+    let expected_checksum = arithmetic_checksum(config.events_total);
+    let mut runs = Vec::with_capacity(config.warmup_rounds + config.measured_rounds);
+
+    for round in 0..(config.warmup_rounds + config.measured_rounds) {
+        let ready_count = Arc::new(AtomicU64::new(0));
+        let processed = Arc::new(AtomicU64::new(0));
+        let checksum = Arc::new(AtomicI64::new(0));
+
+        let runtime = LowLevelSingleProducerRuntime::<E>::new(
+            config.buffer_size,
+            wait_strategy.clone(),
+            config.consumer_mode,
+            Arc::clone(&ready_count),
+            Arc::clone(&processed),
+            Arc::clone(&checksum),
+        )?;
+
+        let run_result = (|| -> Result<RoundRecord, String> {
+            wait_for_ready(&ready_count, 1, "hybrid unicast consumer")?;
+
+            let start = Instant::now();
+            match config.producer_path {
+                ProducerPath::Builder => {
+                    let mut producer = SimpleProducer::new(
+                        Arc::clone(&runtime.ring_buffer),
+                        SequencerEnum::Single(Arc::clone(&runtime.sequencer)),
+                    );
+                    for value in 0..config.events_total {
+                        let value = value as i64;
+                        producer.publish(move |event| populate_event(event, value));
+                    }
+                }
+                ProducerPath::Direct => {
+                    for value in 0..config.events_total {
+                        let value = value as i64;
+                        let sequence = runtime.sequencer.next().map_err(|error| {
+                            format!("failed to claim unicast sequence: {error:?}")
+                        })?;
+                        let event =
+                            unsafe { &mut *runtime.ring_buffer.get_mut_unchecked(sequence) };
+                        populate_event(event, value);
+                        runtime.sequencer.publish(sequence);
+                    }
+                }
+            }
+            wait_for_processed(&processed, config.events_total, "hybrid unicast completion")?;
+            let elapsed = start.elapsed().as_nanos();
+
+            Ok(RoundRecord {
+                round_index: round + 1,
+                phase: if round < config.warmup_rounds {
+                    RoundPhase::Warmup
+                } else {
+                    RoundPhase::Measured
+                },
+                elapsed_ns: elapsed,
+                ops_per_sec: ops_per_sec(config.events_total, elapsed),
+                events_expected: config.events_total,
+                events_processed: processed.load(Ordering::Acquire),
+                checksum_expected: expected_checksum,
+                checksum_observed: checksum.load(Ordering::Acquire),
+                checksum_valid: processed.load(Ordering::Acquire) == config.events_total
+                    && checksum.load(Ordering::Acquire) == expected_checksum,
+            })
+        })();
+
+        let shutdown_result = runtime.shutdown();
+        let round_record = run_result?;
+        shutdown_result?;
+        runs.push(round_record);
+    }
+
+    Ok(build_result(
+        config,
+        wait_strategy_kind,
+        runs,
+        std::mem::size_of::<E>(),
+    ))
+}
+
+fn run_unicast_batch_hybrid_with<W, E>(
+    config: &ResolvedConfig,
+    wait_strategy: W,
+    wait_strategy_kind: WaitStrategyKind,
+) -> Result<HarnessResult, String>
+where
+    W: WaitStrategy + Send + Sync + Clone + 'static,
+    E: UnicastEvent,
+{
+    let expected_checksum = arithmetic_checksum(config.events_total);
+    let mut runs = Vec::with_capacity(config.warmup_rounds + config.measured_rounds);
+
+    for round in 0..(config.warmup_rounds + config.measured_rounds) {
+        let ready_count = Arc::new(AtomicU64::new(0));
+        let processed = Arc::new(AtomicU64::new(0));
+        let checksum = Arc::new(AtomicI64::new(0));
+
+        let runtime = LowLevelSingleProducerRuntime::<E>::new(
+            config.buffer_size,
+            wait_strategy.clone(),
+            config.consumer_mode,
+            Arc::clone(&ready_count),
+            Arc::clone(&processed),
+            Arc::clone(&checksum),
+        )?;
+
+        let run_result = (|| -> Result<RoundRecord, String> {
+            wait_for_ready(&ready_count, 1, "hybrid unicast batch consumer")?;
+
+            let start = Instant::now();
+            match config.producer_path {
+                ProducerPath::Builder => {
+                    let mut producer = SimpleProducer::new(
+                        Arc::clone(&runtime.ring_buffer),
+                        SequencerEnum::Single(Arc::clone(&runtime.sequencer)),
+                    );
+                    let mut published = 0_u64;
+                    while published < config.events_total {
+                        let chunk_len =
+                            ((config.events_total - published) as usize).min(config.batch_size);
+                        let chunk_start = published;
+                        producer.batch_publish(chunk_len, |iter| {
+                            for (index, event) in iter.enumerate() {
+                                let value = (chunk_start + index as u64) as i64;
+                                populate_event(event, value);
+                            }
+                        });
+                        published += chunk_len as u64;
+                    }
+                }
+                ProducerPath::Direct => {
+                    let mut published = 0_u64;
+                    while published < config.events_total {
+                        let chunk_len =
+                            ((config.events_total - published) as usize).min(config.batch_size);
+                        let chunk_len_i64 = i64::try_from(chunk_len)
+                            .expect("batch size must fit in i64 for hybrid direct producer");
+                        let end_sequence =
+                            runtime.sequencer.next_n(chunk_len_i64).map_err(|error| {
+                                format!("failed to claim hybrid unicast batch sequences: {error:?}")
+                            })?;
+                        let start_sequence = end_sequence - (chunk_len_i64 - 1);
+                        let chunk_start = published;
+                        let iter = unsafe {
+                            runtime
+                                .ring_buffer
+                                .batch_iter_mut(start_sequence, end_sequence)
+                        };
+                        for (index, event) in iter.enumerate() {
+                            let value = (chunk_start + index as u64) as i64;
+                            populate_event(event, value);
+                        }
+                        runtime
+                            .sequencer
+                            .publish_range(start_sequence, end_sequence);
+                        published += chunk_len as u64;
+                    }
+                }
+            }
+            wait_for_processed(
+                &processed,
+                config.events_total,
+                "hybrid unicast batch completion",
+            )?;
+            let elapsed = start.elapsed().as_nanos();
+
+            Ok(RoundRecord {
+                round_index: round + 1,
+                phase: if round < config.warmup_rounds {
+                    RoundPhase::Warmup
+                } else {
+                    RoundPhase::Measured
+                },
+                elapsed_ns: elapsed,
+                ops_per_sec: ops_per_sec(config.events_total, elapsed),
+                events_expected: config.events_total,
+                events_processed: processed.load(Ordering::Acquire),
+                checksum_expected: expected_checksum,
+                checksum_observed: checksum.load(Ordering::Acquire),
+                checksum_valid: processed.load(Ordering::Acquire) == config.events_total
+                    && checksum.load(Ordering::Acquire) == expected_checksum,
+            })
+        })();
+
+        let shutdown_result = runtime.shutdown();
+        let round_record = run_result?;
+        shutdown_result?;
+        runs.push(round_record);
+    }
+
+    Ok(build_result(
+        config,
+        wait_strategy_kind,
+        runs,
+        std::mem::size_of::<E>(),
+    ))
 }
 
 fn run_mpsc_batch_with<W>(
@@ -681,23 +1807,25 @@ where
     let mut runs = Vec::with_capacity(config.warmup_rounds + config.measured_rounds);
 
     for round in 0..(config.warmup_rounds + config.measured_rounds) {
+        let ready_count = Arc::new(AtomicU64::new(0));
         let processed = Arc::new(AtomicU64::new(0));
         let checksum = Arc::new(AtomicI64::new(0));
+        let handler = SummingHandler {
+            processed: Arc::clone(&processed),
+            checksum: Arc::clone(&checksum),
+            ready_count: Arc::clone(&ready_count),
+            marker: PhantomData,
+        };
 
         let mut disruptor = build_multi_producer(
             config.buffer_size,
             ComparisonEvent::default,
             wait_strategy.clone(),
         )
-        .handle_events_with({
-            let processed = Arc::clone(&processed);
-            let checksum = Arc::clone(&checksum);
-            move |event: &mut ComparisonEvent, _sequence, _end_of_batch| {
-                add_wrapping_i64(&checksum, event.value);
-                processed.fetch_add(1, Ordering::Release);
-            }
-        })
+        .handle_events_with_handler(handler)
         .build();
+
+        wait_for_ready(&ready_count, 1, "mpsc consumer")?;
 
         let start_flag = Arc::new(AtomicU64::new(0));
         let producers_ready = Arc::new(AtomicU64::new(0));
@@ -780,7 +1908,12 @@ where
         runs.push(round_record);
     }
 
-    Ok(build_result(config, wait_strategy_kind, runs))
+    Ok(build_result(
+        config,
+        wait_strategy_kind,
+        runs,
+        std::mem::size_of::<ComparisonEvent>(),
+    ))
 }
 
 fn run_pipeline_with<W>(
@@ -859,19 +1992,30 @@ where
         runs.push(round_record);
     }
 
-    Ok(build_result(config, wait_strategy_kind, runs))
+    Ok(build_result(
+        config,
+        wait_strategy_kind,
+        runs,
+        std::mem::size_of::<ComparisonEvent>(),
+    ))
 }
 
 fn build_result(
     config: &ResolvedConfig,
     wait_strategy: WaitStrategyKind,
     runs: Vec<RoundRecord>,
+    event_size_bytes: usize,
 ) -> HarnessResult {
     HarnessResult {
         impl_name: String::from("badbatch"),
         scenario: config.scenario,
+        event_padding: config.event_padding,
+        producer_path: config.producer_path,
+        consumer_path: config.consumer_path,
+        consumer_mode: config.consumer_mode,
         measurement_kind: String::from("throughput"),
         buffer_size: config.buffer_size,
+        event_size_bytes,
         wait_strategy,
         producer_count: config.scenario.producer_count(),
         consumer_count: config.scenario.consumer_count(),
@@ -989,14 +2133,7 @@ fn ops_per_sec(events_total: u64, elapsed_ns: u128) -> f64 {
 }
 
 fn add_wrapping_i64(target: &AtomicI64, value: i64) {
-    let mut current = target.load(Ordering::Relaxed);
-    loop {
-        let next = current.wrapping_add(value);
-        match target.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => return,
-            Err(observed) => current = observed,
-        }
-    }
+    target.fetch_add(value, Ordering::Relaxed);
 }
 
 fn rust_version_string() -> String {
@@ -1018,11 +2155,46 @@ fn render_json(result: &HarnessResult) -> String {
     write_json_field(
         &mut json,
         2,
+        "event_padding",
+        result.event_padding.as_str(),
+        true,
+    );
+    write_json_field(
+        &mut json,
+        2,
+        "producer_path",
+        result.producer_path.as_str(),
+        true,
+    );
+    write_json_field(
+        &mut json,
+        2,
+        "consumer_path",
+        result.consumer_path.as_str(),
+        true,
+    );
+    write_json_field(
+        &mut json,
+        2,
+        "consumer_mode",
+        result.consumer_mode.as_str(),
+        true,
+    );
+    write_json_field(
+        &mut json,
+        2,
         "measurement_kind",
         &result.measurement_kind,
         true,
     );
     write_json_number(&mut json, 2, "buffer_size", result.buffer_size as u64, true);
+    write_json_number(
+        &mut json,
+        2,
+        "event_size_bytes",
+        result.event_size_bytes as u64,
+        true,
+    );
     write_json_field(
         &mut json,
         2,
@@ -1243,6 +2415,10 @@ fn print_help() {
     println!("Options:");
     println!("  --scenario <unicast|unicast_batch|mpsc_batch|pipeline>");
     println!("  --wait-strategy <yielding|busy-spin>");
+    println!("  --event-padding <none|64>");
+    println!("  --producer-path <builder|direct>");
+    println!("  --consumer-path <builder|direct>");
+    println!("  --consumer-mode <library-builder|builder-dyn|builder-static|builder-static-per-batch|direct-per-event|direct-per-batch>");
     println!("  --buffer-size <N>");
     println!("  --events-total <N>");
     println!("  --batch-size <N>");
