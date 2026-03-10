@@ -83,6 +83,31 @@
 //! - Cache-friendly data structures with padding to avoid false sharing
 //! - Batch processing to amortize coordination costs
 //! - Mechanical sympathy with modern CPU architectures
+//!
+//! ## Event Sizing and Cache-Line Padding
+//!
+//! BadBatch stores events inline in a contiguous ring buffer (`Box<[UnsafeCell<T>]>`).
+//! When event structs are smaller than a CPU cache line (64 bytes on most platforms),
+//! multiple adjacent slots share the same cache line. In high-throughput unicast
+//! scenarios, this causes **false sharing**: the producer writing slot N and the
+//! consumer reading slot N-1 trigger cross-core cache invalidation traffic,
+//! severely degrading throughput (up to ~4x on Apple Silicon with 32-byte events).
+//!
+//! If your event struct is smaller than 64 bytes and you need maximum unicast
+//! throughput, add explicit cache-line alignment:
+//!
+//! ```rust
+//! #[repr(C, align(64))]
+//! #[derive(Debug, Default)]
+//! struct MyEvent {
+//!     value: i64,
+//!     payload: i64,
+//!     // Rust pads to 64 bytes automatically due to align(64)
+//! }
+//! ```
+//!
+//! This ensures each slot occupies its own cache line, eliminating false sharing.
+//! Events that are already >= 64 bytes do not need this annotation.
 
 #![allow(
     clippy::doc_markdown,
