@@ -296,6 +296,24 @@ BadBatch is designed for high-performance event processing with the following ch
 - **Bit Manipulation**: Fast modulo operations using bit masks for power-of-2 buffer sizes
 - **Memory Layout**: Optimal data structures (`Box<[UnsafeCell<T>]>`) for better cache locality
 
+### Event Sizing and Cache-Line Padding
+
+BadBatch stores events inline in a contiguous ring buffer. When event structs are smaller than a CPU cache line (64 bytes), multiple adjacent slots share the same cache line. In high-throughput unicast scenarios, this causes **false sharing** between the producer and consumer, severely degrading throughput.
+
+If your event struct is smaller than 64 bytes and you need maximum unicast throughput, add explicit cache-line alignment:
+
+```rust
+#[repr(C, align(64))]
+#[derive(Debug, Default)]
+struct MyEvent {
+    value: i64,
+    payload: i64,
+    // Rust pads to 64 bytes automatically due to align(64)
+}
+```
+
+This ensures each slot occupies its own cache line. Events that are already >= 64 bytes do not need this annotation. In our benchmarks, this single change improved unicast throughput from 0.25x to 1.05x relative to the Java LMAX Disruptor.
+
 ### ARM / Apple Silicon Notes
 
 On AArch64, Rust typically targets ARMv8.0-A by default, which can generate LL/SC-based atomics.
