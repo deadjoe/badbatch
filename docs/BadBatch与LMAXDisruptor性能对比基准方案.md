@@ -253,12 +253,12 @@ Java harness 保持与 Rust 相同的参数集合与字段语义。
 说明：
 
 - `producer-path` 当前只在 Rust harness 中存在，用于拆分“API 路径成本”和“引擎本体成本”。
-- `event-padding` 当前只在 Rust harness 中存在，用于验证 `unicast` / `unicast_batch` 场景下 ring slot 布局对跨核 cache line 争用的影响。
+- `event-padding` 当前只在 Rust harness 中存在，用于验证 `unicast` / `unicast_batch` / `pipeline` 场景下 ring slot 布局对跨核 cache line 争用的影响。
 - `builder` 表示走当前 BadBatch 默认的 `build_single_producer(...).build()` 路径。
 - `direct` 表示在 Rust 侧绕开 `DisruptorHandle` / `SimpleProducer` / builder 组装路径，直接使用 `SingleProducerSequencer + RingBuffer + ProcessingSequenceBarrier`。
 - `direct` 当前仅支持 `unicast` 与 `unicast_batch`，不改变 Java 侧实现。
 - `direct` 模式的目的不是替换第一阶段默认口径，而是用于定位 Rust 单生产者热路径里 API 层的额外成本。
-- `event-padding=64` 当前仅支持 `unicast` 与 `unicast_batch`；其余场景固定为 `none`。
+- `event-padding=64` 当前支持 `unicast`、`unicast_batch` 与 `pipeline`；`mpsc_batch` 固定为 `none`。
 
 ### 8.3 驱动脚本
 
@@ -285,7 +285,7 @@ Java harness 保持与 Rust 相同的参数集合与字段语义。
 - 不实现更复杂的 `alternate` 自动调度
 - `quick` 仅用于链路验证，不用于正式结论
 - `--rust-producer-path direct` 当前仅允许搭配 `--scenario unicast` 或 `--scenario unicast_batch`
-- `--rust-event-padding 64` 只会传给 Rust 侧的 `unicast` / `unicast_batch`；`mpsc_batch` 与 `pipeline` 会自动回退为 `none`
+- `--rust-event-padding 64` 只会传给 Rust 侧的 `unicast` / `unicast_batch` / `pipeline`；`mpsc_batch` 会自动回退为 `none`
 
 ## 9. 运行环境要求
 

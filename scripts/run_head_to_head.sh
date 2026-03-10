@@ -90,8 +90,8 @@ if [[ "$RUST_PRODUCER_PATH" == "direct" && "$SCENARIO" != "unicast" && "$SCENARI
     exit 1
 fi
 
-if [[ "$RUST_EVENT_PADDING" != "none" && "$SCENARIO" != "all" && "$SCENARIO" != "unicast" && "$SCENARIO" != "unicast_batch" ]]; then
-    echo "rust event padding is only supported for unicast and unicast_batch scenarios" >&2
+if [[ "$RUST_EVENT_PADDING" != "none" && "$SCENARIO" != "all" && "$SCENARIO" != "unicast" && "$SCENARIO" != "unicast_batch" && "$SCENARIO" != "pipeline" ]]; then
+    echo "rust event padding is only supported for unicast, unicast_batch, and pipeline scenarios" >&2
     exit 1
 fi
 
@@ -178,7 +178,7 @@ run_rust() {
     local output_path="$RESULTS_DIR/rust_${scenario}.json"
     local scenario_padding="none"
 
-    if [[ "$scenario" == "unicast" || "$scenario" == "unicast_batch" ]]; then
+    if [[ "$scenario" == "unicast" || "$scenario" == "unicast_batch" || "$scenario" == "pipeline" ]]; then
         scenario_padding="$RUST_EVENT_PADDING"
     fi
 
@@ -246,10 +246,19 @@ import pathlib
 import sys
 
 results_dir = pathlib.Path(sys.argv[1])
-scenarios = ["unicast", "unicast_batch", "mpsc_batch", "pipeline"]
 rows = []
+scenario_names = sorted(
+    {
+        path.stem[len("rust_"):]
+        for path in results_dir.glob("rust_*.json")
+    }
+    | {
+        path.stem[len("java_"):]
+        for path in results_dir.glob("java_*.json")
+    }
+)
 
-for scenario in scenarios:
+for scenario in scenario_names:
     rust_path = results_dir / f"rust_{scenario}.json"
     java_path = results_dir / f"java_{scenario}.json"
     if not rust_path.exists() or not java_path.exists():
@@ -260,11 +269,16 @@ for scenario in scenarios:
     with java_path.open() as fh:
         java = json.load(fh)
 
+    rust_padding = rust.get("event_padding", "none")
+    scenario_label = rust["scenario"]
+    if rust_padding != "none":
+        scenario_label = f"{scenario_label}[pad={rust_padding}]"
+
     rust_median = rust["summary"]["median_ops_per_sec"]
     java_median = java["summary"]["median_ops_per_sec"]
     ratio = (rust_median / java_median) if java_median else 0.0
     valid = rust["summary"]["checksum_valid_all"] and java["summary"]["checksum_valid_all"]
-    rows.append((scenario, rust_median, java_median, ratio, valid))
+    rows.append((scenario_label, rust_median, java_median, ratio, valid))
 
 if not rows:
     print("[WARN] No comparable JSON results were found.")
