@@ -156,10 +156,7 @@ coverage-report/
 *.profdata
 
 # Documentation Internal
-docs
-!docs/
-docs/*
-!docs/BadBatch与LMAXDisruptor性能对比基准方案.md
+docs/
 
 # ***REMOVED*** memory and debug files
 ***REMOVED***.md
