@@ -93,8 +93,26 @@
 //! consumer reading slot N-1 trigger cross-core cache invalidation traffic,
 //! severely degrading throughput (up to ~4x on Apple Silicon with 32-byte events).
 //!
+//! For Builder API users, the easiest opt-in mitigation is:
+//!
+//! ```rust
+//! use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
+//!
+//! #[derive(Debug, Default)]
+//! struct MyEvent {
+//!     value: i64,
+//!     payload: i64,
+//! }
+//!
+//! let mut disruptor = build_single_producer(1024, MyEvent::default, BusySpinWaitStrategy)
+//!     .with_cache_line_padding(true)
+//!     .handle_events_with(|_event, _sequence, _end_of_batch| {})
+//!     .build();
+//! # disruptor.shutdown();
+//! ```
+//!
 //! If your event struct is smaller than 64 bytes and you need maximum unicast
-//! throughput, add explicit cache-line alignment:
+//! throughput outside the Builder API, add explicit cache-line alignment:
 //!
 //! ```rust
 //! #[repr(C, align(64))]
@@ -160,6 +178,7 @@ pub use disruptor::{
     SingleProducerSequencer,
     SleepingWaitStrategy,
 
+    SlotPadding,
     // Wait strategies
     WaitStrategy,
     YieldingWaitStrategy,

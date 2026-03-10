@@ -90,7 +90,7 @@ pub use event_translator::{
 };
 pub use exception_handler::{DefaultExceptionHandler, ExceptionHandler};
 pub use producer_type::ProducerType;
-pub use ring_buffer::RingBuffer;
+pub use ring_buffer::{RingBuffer, SlotPadding};
 pub use sequence_barrier::{ProcessingSequenceBarrier, SequenceBarrier};
 pub use sequencer::{MultiProducerSequencer, Sequencer, SequencerEnum, SingleProducerSequencer};
 pub use wait_strategy::{
