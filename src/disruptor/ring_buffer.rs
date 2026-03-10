@@ -8,6 +8,8 @@ use crate::disruptor::core_interfaces::DataProvider;
 use crate::disruptor::{is_power_of_two, DisruptorError, EventFactory, Result};
 use std::cell::UnsafeCell;
 use std::convert::TryFrom;
+use std::mem;
+use std::ptr;
 
 #[cfg(feature = "shared-ring-buffer")]
 use std::sync::Arc;
@@ -21,11 +23,95 @@ use std::sync::Arc;
 ///
 /// # Type Parameters
 /// * `T` - The event type stored in the buffer
+///
+/// Optional slot padding strategy for ring buffer storage.
+///
+/// This affects the physical memory layout of ring slots but does not change
+/// the logical Disruptor protocol or event semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SlotPadding {
+    /// Store events inline with no extra slot padding.
+    #[default]
+    None,
+    /// Force each slot to start on its own 64-byte cache line.
+    CacheLine64,
+}
+
+#[derive(Debug)]
+#[repr(C, align(64))]
+struct CacheLinePaddedSlot<T> {
+    value: T,
+}
+
+impl<T> CacheLinePaddedSlot<T> {
+    fn new(value: T) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Debug)]
+enum SlotStorage<T> {
+    Inline(Box<[UnsafeCell<T>]>),
+    CacheLine64(Box<[UnsafeCell<CacheLinePaddedSlot<T>>]>),
+}
+
+impl<T> SlotStorage<T> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Inline(slots) => slots.len(),
+            Self::CacheLine64(slots) => slots.len(),
+        }
+    }
+
+    fn padding(&self) -> SlotPadding {
+        match self {
+            Self::Inline(_) => SlotPadding::None,
+            Self::CacheLine64(_) => SlotPadding::CacheLine64,
+        }
+    }
+
+    fn slot_stride_bytes(&self) -> usize {
+        match self {
+            Self::Inline(_) => mem::size_of::<T>(),
+            Self::CacheLine64(_) => mem::size_of::<CacheLinePaddedSlot<T>>(),
+        }
+    }
+
+    unsafe fn get_ref_unchecked(&self, index: usize) -> &T {
+        match self {
+            Self::Inline(slots) => {
+                let slot = slots.get_unchecked(index);
+                &*slot.get()
+            }
+            Self::CacheLine64(slots) => {
+                let slot = slots.get_unchecked(index);
+                &(*slot.get()).value
+            }
+        }
+    }
+
+    unsafe fn get_mut_ptr_unchecked(&self, index: usize) -> *mut T {
+        match self {
+            Self::Inline(slots) => slots.get_unchecked(index).get(),
+            Self::CacheLine64(slots) => {
+                let slot = slots.get_unchecked(index);
+                ptr::addr_of_mut!((*slot.get()).value)
+            }
+        }
+    }
+}
+
+/// The core ring buffer for storing events.
+///
+/// Events remain logically inline and are addressed by sequence number, but the
+/// internal slot layout can optionally add cache-line padding to reduce false
+/// sharing in producer/consumer handoff-heavy workloads.
 #[derive(Debug)]
 pub struct RingBuffer<T> {
     /// The buffer storing all events using `UnsafeCell` for interior mutability
-    /// Using `Box<[UnsafeCell<T>]>` for better memory layout than `Vec<T>`
-    slots: Box<[UnsafeCell<T>]>,
+    /// Using `Box<[UnsafeCell<T>]>` for better memory layout than `Vec<T>`.
+    /// The physical slot layout can optionally include cache-line padding.
+    storage: SlotStorage<T>,
     /// Mask for fast modulo operations (`buffer_size` - 1)
     /// Using i64 to match sequence type and avoid casting
     index_mask: i64,
@@ -57,6 +143,22 @@ where
     where
         F: EventFactory<T>,
     {
+        Self::new_with_padding(buffer_size, event_factory, SlotPadding::None)
+    }
+
+    /// Create a new ring buffer with an explicit slot padding strategy.
+    ///
+    /// Slot padding only changes the physical storage layout of ring entries.
+    /// It does not affect logical sequence semantics.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn new_with_padding<F>(
+        buffer_size: usize,
+        event_factory: F,
+        slot_padding: SlotPadding,
+    ) -> Result<Self>
+    where
+        F: EventFactory<T>,
+    {
         if !is_power_of_two(buffer_size) {
             return Err(DisruptorError::InvalidBufferSize(buffer_size));
         }
@@ -66,14 +168,22 @@ where
 
         let factory_ref = &event_factory;
 
-        // Pre-allocate all events using UnsafeCell for interior mutability
-        // Using Box<[UnsafeCell<T>]> for better memory layout than Vec<T>
-        let slots: Box<[UnsafeCell<T>]> = (0..buffer_size)
-            .map(|_| UnsafeCell::new(factory_ref.new_instance()))
-            .collect();
+        // Pre-allocate all events using UnsafeCell for interior mutability.
+        let storage = match slot_padding {
+            SlotPadding::None => SlotStorage::Inline(
+                (0..buffer_size)
+                    .map(|_| UnsafeCell::new(factory_ref.new_instance()))
+                    .collect(),
+            ),
+            SlotPadding::CacheLine64 => SlotStorage::CacheLine64(
+                (0..buffer_size)
+                    .map(|_| UnsafeCell::new(CacheLinePaddedSlot::new(factory_ref.new_instance())))
+                    .collect(),
+            ),
+        };
 
         Ok(Self {
-            slots,
+            storage,
             index_mask: buffer_size_i64 - 1,
         })
     }
@@ -92,9 +202,7 @@ where
     #[must_use]
     pub fn get(&self, sequence: i64) -> &T {
         let index = self.slot_index(sequence);
-        // SAFETY: Index is within bounds - guaranteed by invariant and index mask.
-        let slot = unsafe { self.slots.get_unchecked(index) };
-        unsafe { &*slot.get() }
+        unsafe { self.storage.get_ref_unchecked(index) }
     }
 
     /// Get a mutable reference to the event at the specified sequence
@@ -111,9 +219,7 @@ where
     #[must_use]
     pub fn get_mut(&mut self, sequence: i64) -> &mut T {
         let index = self.slot_index(sequence);
-        // SAFETY: We have exclusive access to self, so this is safe
-        let slot = unsafe { self.slots.get_unchecked(index) };
-        unsafe { &mut *slot.get() }
+        unsafe { &mut *self.storage.get_mut_ptr_unchecked(index) }
     }
 
     /// Get a mutable reference to the event at the specified sequence (unsafe version)
@@ -139,9 +245,7 @@ where
     #[must_use]
     pub unsafe fn get_mut_unchecked(&self, sequence: i64) -> *mut T {
         let index = self.slot_index(sequence);
-        // SAFETY: Index is within bounds - guaranteed by invariant and index mask.
-        let slot = self.slots.get_unchecked(index);
-        slot.get()
+        self.storage.get_mut_ptr_unchecked(index)
     }
 
     /// Get the size of the buffer
@@ -150,7 +254,7 @@ where
     /// The size of the ring buffer
     #[must_use]
     pub fn buffer_size(&self) -> usize {
-        self.slots.len()
+        self.storage.len()
     }
 
     /// Get the size of the buffer as i64
@@ -162,7 +266,19 @@ where
     /// Panics if the buffer length exceeds `i64::MAX`.
     #[must_use]
     pub fn size(&self) -> i64 {
-        i64::try_from(self.slots.len()).expect("ring buffer length must fit into i64")
+        i64::try_from(self.storage.len()).expect("ring buffer length must fit into i64")
+    }
+
+    /// Return the slot padding strategy used by this ring buffer.
+    #[must_use]
+    pub fn slot_padding(&self) -> SlotPadding {
+        self.storage.padding()
+    }
+
+    /// Return the physical byte stride between adjacent ring slots.
+    #[must_use]
+    pub fn slot_stride_bytes(&self) -> usize {
+        self.storage.slot_stride_bytes()
     }
 
     /// Get the ring slot index for a given sequence.
@@ -378,6 +494,21 @@ where
         })
     }
 
+    /// Create a new shared ring buffer with an explicit slot padding strategy.
+    pub fn new_with_padding<F>(
+        buffer_size: usize,
+        event_factory: F,
+        slot_padding: SlotPadding,
+    ) -> Result<Self>
+    where
+        F: EventFactory<T>,
+    {
+        let ring_buffer = RingBuffer::new_with_padding(buffer_size, event_factory, slot_padding)?;
+        Ok(Self {
+            inner: Arc::new(parking_lot::RwLock::new(ring_buffer)),
+        })
+    }
+
     /// Get a read-only reference to the event at the specified sequence
     ///
     /// # Arguments
@@ -456,10 +587,20 @@ where
 mod tests {
     use super::*;
     use crate::disruptor::DefaultEventFactory;
+    use std::mem;
 
     #[derive(Debug, Default, Clone)]
     struct TestEvent {
         value: i64,
+    }
+
+    #[derive(Debug, Default, Clone)]
+    #[allow(dead_code)]
+    struct SmallEvent {
+        value: i64,
+        stage1_value: i64,
+        stage2_value: i64,
+        stage3_value: i64,
     }
 
     #[test]
@@ -467,6 +608,26 @@ mod tests {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let buffer = RingBuffer::new(8, factory).unwrap();
         assert_eq!(buffer.buffer_size(), 8);
+        assert_eq!(buffer.slot_padding(), SlotPadding::None);
+        assert_eq!(buffer.slot_stride_bytes(), mem::size_of::<TestEvent>());
+    }
+
+    #[test]
+    fn test_ring_buffer_creation_with_cache_line_padding() {
+        let factory = DefaultEventFactory::<SmallEvent>::new();
+        let buffer = RingBuffer::new_with_padding(8, factory, SlotPadding::CacheLine64).unwrap();
+
+        assert_eq!(buffer.buffer_size(), 8);
+        assert_eq!(buffer.slot_padding(), SlotPadding::CacheLine64);
+        assert_eq!(buffer.slot_stride_bytes(), 64);
+
+        unsafe {
+            let ptr0 = buffer.get_mut_unchecked(0) as usize;
+            let ptr1 = buffer.get_mut_unchecked(1) as usize;
+            assert_eq!(ptr0 % 64, 0);
+            assert_eq!(ptr1 % 64, 0);
+            assert_eq!(ptr1 - ptr0, 64);
+        }
     }
 
     #[test]

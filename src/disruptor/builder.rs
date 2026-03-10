@@ -6,6 +6,7 @@
 use crate::disruptor::{
     event_factory::ClosureEventFactory,
     producer::{Producer, SimpleProducer},
+    ring_buffer::SlotPadding,
     sequence_barrier::ProcessingSequenceBarrier,
     sequencer::{MultiProducerSequencer, SequencerEnum, SingleProducerSequencer},
     EventHandler, RingBuffer, Sequence, SequenceBarrier, Sequencer, WaitStrategy,
@@ -108,6 +109,7 @@ pub fn create_disruptor_core<E, F, W>(
     wait_strategy: W,
     consumers: Vec<ConsumerInfo<E>>,
     is_multi_producer: bool,
+    slot_padding: SlotPadding,
 ) -> DisruptorCore<E>
 where
     E: Send + Sync + 'static,
@@ -116,8 +118,10 @@ where
 {
     // Create the ring buffer
     let closure_factory = ClosureEventFactory::new(event_factory);
-    let ring_buffer =
-        Arc::new(RingBuffer::new(size, closure_factory).expect("Failed to create ring buffer"));
+    let ring_buffer = Arc::new(
+        RingBuffer::new_with_padding(size, closure_factory, slot_padding)
+            .expect("Failed to create ring buffer"),
+    );
 
     let wait_strategy_arc: Arc<dyn WaitStrategy> = Arc::new(wait_strategy);
 
@@ -785,6 +789,7 @@ where
     W: WaitStrategy + Send + Sync + 'static,
 {
     size: usize,
+    slot_padding: SlotPadding,
     wait_strategy: W,
     consumers: Vec<ConsumerInfo<E>>,
     current_thread_name: Option<String>,
@@ -815,6 +820,61 @@ where
     builder: SingleProducerBuilder<HasConsumers, E, F, W>,
 }
 
+impl<State, E, F, W> SingleProducerBuilder<State, E, F, W>
+where
+    E: Send + Sync + 'static,
+    F: Fn() -> E + Send + Sync + 'static,
+    W: WaitStrategy + Send + Sync + 'static,
+{
+    /// Configure the physical ring slot padding strategy.
+    ///
+    /// This changes memory layout only; it does not affect Disruptor semantics.
+    #[must_use]
+    pub fn with_slot_padding(mut self, slot_padding: SlotPadding) -> Self {
+        self.shared.slot_padding = slot_padding;
+        self
+    }
+
+    /// Enable or disable 64-byte cache-line padding for ring slots.
+    ///
+    /// This is useful for small events in high-throughput unicast or pipeline
+    /// topologies where adjacent inline slots would otherwise share cache lines.
+    #[must_use]
+    pub fn with_cache_line_padding(self, enabled: bool) -> Self {
+        self.with_slot_padding(if enabled {
+            SlotPadding::CacheLine64
+        } else {
+            SlotPadding::None
+        })
+    }
+}
+
+impl<State, E, F, W> MultiProducerBuilder<State, E, F, W>
+where
+    E: Send + Sync + 'static,
+    F: Fn() -> E + Send + Sync + 'static,
+    W: WaitStrategy + Send + Sync + Clone + 'static,
+{
+    /// Configure the physical ring slot padding strategy.
+    ///
+    /// This changes memory layout only; it does not affect Disruptor semantics.
+    #[must_use]
+    pub fn with_slot_padding(mut self, slot_padding: SlotPadding) -> Self {
+        self.shared.slot_padding = slot_padding;
+        self
+    }
+
+    /// Enable or disable 64-byte cache-line padding for ring slots.
+    #[must_use]
+    pub fn with_cache_line_padding(self, enabled: bool) -> Self {
+        self.with_slot_padding(if enabled {
+            SlotPadding::CacheLine64
+        } else {
+            SlotPadding::None
+        })
+    }
+}
+
 impl<E, F, W> DependentConsumerBuilder<E, F, W>
 where
     E: Send + Sync + 'static,
@@ -833,6 +893,23 @@ where
     pub fn thread_name<S: Into<String>>(mut self, name: S) -> Self {
         self.builder.shared.current_thread_name = Some(name.into());
         self
+    }
+
+    /// Configure the physical ring slot padding strategy.
+    #[must_use]
+    pub fn with_slot_padding(mut self, slot_padding: SlotPadding) -> Self {
+        self.builder.shared.slot_padding = slot_padding;
+        self
+    }
+
+    /// Enable or disable 64-byte cache-line padding for ring slots.
+    #[must_use]
+    pub fn with_cache_line_padding(self, enabled: bool) -> Self {
+        self.with_slot_padding(if enabled {
+            SlotPadding::CacheLine64
+        } else {
+            SlotPadding::None
+        })
     }
 
     /// Add a dependent event handler that waits for previous consumers (closure-based)
@@ -892,6 +969,7 @@ where
             event_factory,
             shared: SharedBuilderState {
                 size,
+                slot_padding: SlotPadding::None,
                 wait_strategy,
                 consumers: Vec::new(),
                 current_thread_name: None,
@@ -1118,6 +1196,7 @@ where
             self.shared.wait_strategy,
             self.shared.consumers,
             false, // Single producer
+            self.shared.slot_padding,
         );
 
         DisruptorHandle::new(core)
@@ -1147,6 +1226,7 @@ where
             event_factory,
             shared: SharedBuilderState {
                 size,
+                slot_padding: SlotPadding::None,
                 wait_strategy,
                 consumers: Vec::new(),
                 current_thread_name: None,
@@ -1288,6 +1368,7 @@ where
             self.shared.wait_strategy,
             self.shared.consumers,
             true, // Multi producer
+            self.shared.slot_padding,
         );
 
         DisruptorHandle::new(core)
@@ -1443,8 +1524,14 @@ mod tests {
     #![allow(clippy::items_after_statements)]
     #![allow(clippy::too_many_lines)]
     use super::*;
-    use crate::disruptor::wait_strategy::{BusySpinWaitStrategy, YieldingWaitStrategy};
-    use std::sync::{mpsc, Arc, Mutex};
+    use crate::disruptor::{
+        ring_buffer::SlotPadding,
+        wait_strategy::{BusySpinWaitStrategy, YieldingWaitStrategy},
+    };
+    use std::sync::{
+        atomic::{AtomicI64, Ordering},
+        mpsc, Arc, Mutex,
+    };
     use std::time::Duration;
 
     macro_rules! println {
@@ -1502,6 +1589,56 @@ mod tests {
         // Should be able to create builder without consumers
         assert_eq!(builder.shared.size, 16);
         assert_eq!(builder.shared.consumers.len(), 0);
+    }
+
+    #[test]
+    fn test_single_producer_builder_cache_line_padding_configuration() {
+        let builder = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+            .with_cache_line_padding(true);
+
+        assert_eq!(builder.shared.slot_padding, SlotPadding::CacheLine64);
+    }
+
+    #[test]
+    fn test_single_producer_builder_slot_padding_propagates_to_ring_buffer() {
+        let disruptor = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+            .with_slot_padding(SlotPadding::CacheLine64)
+            .handle_events_with(|_event: &mut TestEvent, _sequence, _end_of_batch| {})
+            .build();
+
+        assert_eq!(
+            disruptor.core.ring_buffer.slot_padding(),
+            SlotPadding::CacheLine64
+        );
+        assert_eq!(disruptor.core.ring_buffer.slot_stride_bytes(), 64);
+    }
+
+    #[test]
+    fn test_single_producer_builder_cache_line_padding_processes_events() {
+        let processed = Arc::new(AtomicI64::new(0));
+        let processed_clone = Arc::clone(&processed);
+
+        let mut disruptor = build_single_producer(16, test_event_factory, BusySpinWaitStrategy)
+            .with_cache_line_padding(true)
+            .handle_events_with(move |event: &mut TestEvent, _sequence, _end_of_batch| {
+                processed_clone.fetch_add(event.value, Ordering::Release);
+            })
+            .build();
+
+        assert_eq!(
+            disruptor.core.ring_buffer.slot_padding(),
+            SlotPadding::CacheLine64
+        );
+
+        disruptor.publish(|event| {
+            event.value = 7;
+        });
+
+        wait_until(
+            Duration::from_secs(1),
+            || processed.load(Ordering::Acquire) == 7,
+            "cache-line padded event processing",
+        );
     }
 
     #[test]
