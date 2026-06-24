@@ -4,8 +4,8 @@ This note maps the Rust implementation to the TLA+ models and highlights checks 
 
 ## Scope
 
-- Models: `BadBatchSPMC.tla`, `BadBatchMPMC.tla`, `BadBatchRingBuffer.tla`
-- Rust: core under `src/disruptor/*` — `ring_buffer.rs`, `sequencer.rs`, `sequence_barrier.rs`, `sequence.rs`, wait strategies.
+- Models: `BadBatchSPMC.tla`, `BadBatchMPMC.tla`, `BadBatchPipeline.tla`, `SimpleSPMC.tla`, `BadBatchRingBuffer.tla` (module instantiated by the others)
+- Rust: core under `src/disruptor/*` — `ring_buffer.rs`, `sequencer.rs`, `sequence_barrier.rs`, `sequence.rs`, `event_processor.rs`, `builder.rs`, wait strategies.
 
 ## Key Semantics Alignment
 
@@ -21,6 +21,7 @@ This note maps the Rust implementation to the TLA+ models and highlights checks 
 
 - No data races: TLA `BadBatchRingBuffer.NoDataRaces` prohibits overlapping reader/writer on the same slot and multiple concurrent writers to a slot. This is enforced in Rust by sequencers/gating and exclusive claims prior to writes.
 - Ordering: TLA readers always consume `read[r]+1` and require `IsPublished(next)` (MPMC) or `published >= next` (SPMC). This matches Rust barriers returning highest contiguous published sequence; consumers cannot observe gaps.
+- Pipeline dependency: TLA `BadBatchPipeline.DependencyOrder` asserts `read2[s2] <= read1[s1]` — Stage2 never overtakes Stage1. Rust enforces this via `ProcessingSequenceBarrier` tracking the previous stage's sequences with `MinStage1 >= next` gating.
 - Progress: TLA `Liveness` asserts eventual consumption of all published events under fairness — aligned with wait strategies signaling and sequencer progress in Rust.
 
 ## Tooling
@@ -35,6 +36,21 @@ This note maps the Rust implementation to the TLA+ models and highlights checks 
 - If altering backpressure logic, keep the `wrap_point <= min(gating)` invariant equivalent to the TLA `MinReadSequence` guard.
 - If adding batch publish/consume, confirm it decomposes to per-sequence publish steps consistent with parity toggling; otherwise extend the model.
 - If introducing new wait strategies or memory ordering changes, the TLA specs remain valid (they abstract from timing), but re-run TLC to catch unintended behaviors.
+- If altering the barrier contiguity path (e.g. the `needs_contiguity_check` flag in `ProcessingSequenceBarrier`), ensure single-producer still publishes in order so the available sequence from the wait strategy is already contiguous — matching the TLA SPMC model which uses a scalar cursor (`published >= next`) rather than per-slot `IsPublished`.
+
+## Round-2 Optimization Consistency (2026-06-25)
+
+The following optimizations were verified against the TLA+ models:
+
+1. **Barrier SP contiguity skip** (`ProcessingSequenceBarrier.needs_contiguity_check`):
+   - Single-producer sequencers publish in order, so the wait strategy's available sequence is already the contiguous prefix.
+   - The TLA SPMC model already uses a scalar cursor guard (`published >= next`) rather than per-slot `IsPublished`, so skipping `get_highest_published_sequence` for single-producer is consistent with the model.
+   - Multi-producer still calls `get_highest_published_sequence` — matches TLA MPMC `IsPublished(next)` contiguity enforcement.
+
+2. **BatchEventProcessor DataProvider de-virtualization** (concrete `Arc<RingBuffer<T>>` instead of `Arc<dyn DataProvider<T>>`):
+   - Pure implementation change; the access pattern and safety contract are identical. No TLA impact.
+
+All 5 TLA+ models re-verified successfully after these changes.
 
 ## Suggested Model Enhancements (Optional)
 
@@ -43,7 +59,8 @@ This note maps the Rust implementation to the TLA+ models and highlights checks 
 
 ## Current Assessment
 
-- The TLA+ models match the current Rust implementation’s core invariants and concurrency semantics for SPMC and MPMC.
+- The TLA+ models match the current Rust implementation's core invariants and concurrency semantics for SPMC, MPMC, and Pipeline scenarios.
 - The availability/parity mechanism in the models is consistent with both the legacy per-index flag and the bitmap path in Rust.
 - The models remain reliable to guard core correctness as the code evolves, provided the checks above are revisited with behavioral changes.
+- Last full re-verification: 2026-06-25 (Java 26, all 5 models pass).
 
