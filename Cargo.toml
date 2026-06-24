@@ -2,7 +2,7 @@
 name = "badbatch"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.84"
 authors = ["BadBatch Team"]
 description = "High-Performance Disruptor Engine - A complete Rust implementation of the LMAX Disruptor pattern"
 license = "AGPL-3.0"
@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Error handling
-thiserror = "1.0"
+thiserror = "2.0"
 
 # Synchronization primitives
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
@@ -28,7 +28,7 @@ core_affinity = "0.8"
 # Testing and benchmarking
 criterion = { version = "0.7", features = ["html_reports"] }
 crossbeam = "0.8"  # For performance comparison benchmarks
-proptest = "1.7"  # Property-based testing
+proptest = "1.10"  # Property-based testing
 
 [features]
 default = []
