@@ -1,5 +1,0 @@
-[build]
-rustflags = ["-D", "warnings"]
-
-[doc]
-rustdocflags = ["-D", "warnings"]
