@@ -4,7 +4,6 @@
 //! for configuring and using the Disruptor pattern. It provides a DSL-style
 //! interface for setting up the ring buffer, sequencers, and event processors.
 
-use crate::disruptor::event_processor::DataProvider;
 use crate::disruptor::{
     is_power_of_two, sequencer::SequencerEnum, BatchEventProcessor, BlockingWaitStrategy,
     DisruptorError, EventFactory, EventHandler, EventProcessor, MultiProducerSequencer,
@@ -192,7 +191,7 @@ where
 
         // Create the event processor
         let processor = BatchEventProcessor::new(
-            self.ring_buffer.clone() as Arc<dyn DataProvider<T>>,
+            self.ring_buffer.clone(),
             barrier,
             Box::new(event_handler),
             Box::new(crate::disruptor::DefaultExceptionHandler::new()),
@@ -409,7 +408,7 @@ where
 
         // Create the event processor
         let processor = BatchEventProcessor::new(
-            self.disruptor.ring_buffer.clone() as Arc<dyn DataProvider<T>>,
+            self.disruptor.ring_buffer.clone(),
             barrier,
             Box::new(event_handler),
             Box::new(crate::disruptor::DefaultExceptionHandler::new()),
@@ -742,9 +741,9 @@ mod tests {
         let event = ring_buffer.get(0);
         assert_eq!(event.value, 0); // Default value
 
-        // Test get_mut method (unsafe)
+        // Test unchecked mutable access (the path used by producers/processors)
         unsafe {
-            let event_mut = ring_buffer.get_mut(0);
+            let event_mut = &mut *ring_buffer.get_mut_unchecked(0);
             event_mut.value = 999;
         }
 
