@@ -123,6 +123,14 @@ pub struct ProcessingSequenceBarrier {
     /// Reference to the sequencer for getting highest published sequence.
     /// Uses enum dispatch instead of vtable indirection for performance.
     sequencer: SequencerEnum,
+    /// Whether consumers must converge on a contiguous published range.
+    ///
+    /// Only multi-producer sequencers publish out of order, so only they
+    /// require the `get_highest_published_sequence` contiguity scan after
+    /// each wait. Single-producer sequencers publish in order, making the
+    /// scan a trivial pass-through that we can skip entirely on the hot
+    /// path.
+    needs_contiguity_check: bool,
 }
 
 impl ProcessingSequenceBarrier {
@@ -142,12 +150,30 @@ impl ProcessingSequenceBarrier {
         dependent_sequences: Vec<Arc<Sequence>>,
         sequencer: SequencerEnum,
     ) -> Self {
+        let needs_contiguity_check = matches!(sequencer, SequencerEnum::Multi(_));
         Self {
             cursor,
             wait_strategy,
             dependent_sequences,
             alerted: AtomicBool::new(false),
             sequencer,
+            needs_contiguity_check,
+        }
+    }
+
+    /// Resolve the highest contiguous published sequence after a wait.
+    ///
+    /// Single-producer sequencers publish in order, so the available sequence
+    /// returned by the wait strategy is already contiguous and this is a
+    /// no-op. Multi-producer sequencers may publish out of order, so we scan
+    /// the availability tracking to converge on the true contiguous prefix.
+    #[inline]
+    fn resolve_highest_published(&self, sequence: i64, available_sequence: i64) -> i64 {
+        if !self.needs_contiguity_check || available_sequence < sequence {
+            available_sequence
+        } else {
+            self.sequencer
+                .get_highest_published_sequence(sequence, available_sequence)
         }
     }
 }
@@ -168,20 +194,7 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
         // Check again after waiting in case we were alerted while waiting
         self.check_alert()?;
 
-        // Note: Acquire semantics are already provided by the wait strategy's
-        // atomic loads and the sequencer's is_available checks below.
-
-        // CRITICAL FIX: Call sequencer.getHighestPublishedSequence like LMAX Disruptor
-        // This is essential for MultiProducer scenarios to ensure we only process
-        // contiguous published sequences
-        if available_sequence < sequence {
-            return Ok(available_sequence);
-        }
-
-        let highest_published = self
-            .sequencer
-            .get_highest_published_sequence(sequence, available_sequence);
-        Ok(highest_published)
+        Ok(self.resolve_highest_published(sequence, available_sequence))
     }
 
     fn wait_for_with_timeout(&self, sequence: i64, timeout: std::time::Duration) -> Result<i64> {
@@ -207,17 +220,7 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
         // Check again after waiting in case we were alerted while waiting
         self.check_alert()?;
 
-        // Note: Acquire semantics are already provided by the wait strategy's atomic loads.
-
-        // CRITICAL FIX: Call sequencer.getHighestPublishedSequence like LMAX Disruptor
-        if available_sequence < sequence {
-            return Ok(available_sequence);
-        }
-
-        let highest_published = self
-            .sequencer
-            .get_highest_published_sequence(sequence, available_sequence);
-        Ok(highest_published)
+        Ok(self.resolve_highest_published(sequence, available_sequence))
     }
 
     fn get_cursor(&self) -> Arc<Sequence> {
@@ -266,19 +269,7 @@ impl SequenceBarrier for ProcessingSequenceBarrier {
         // Check again after waiting in case we were alerted while waiting
         self.check_alert()?;
 
-        // Note: Acquire semantics are already provided by the wait strategy's
-        // atomic loads and the sequencer's is_available checks below.
-
-        // Align with other wait paths: ensure we return the highest
-        // contiguous published sequence for multi-producer scenarios.
-        if available_sequence < sequence {
-            return Ok(available_sequence);
-        }
-
-        let highest_published = self
-            .sequencer
-            .get_highest_published_sequence(sequence, available_sequence);
-        Ok(highest_published)
+        Ok(self.resolve_highest_published(sequence, available_sequence))
     }
 }
 
