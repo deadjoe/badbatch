@@ -13,14 +13,14 @@
 use badbatch::disruptor::{
     BlockingWaitStrategy,
     DefaultEventFactory,
-    // Traditional LMAX API imports from README lines 104-107
+    // Traditional LMAX API imports from README "Traditional LMAX Disruptor API" section
     Disruptor,
     EventHandler,
     EventTranslator,
     ProducerType,
 };
 
-// Test 1: Traditional LMAX Disruptor API (README lines 96-161)
+// Test 1: Traditional LMAX Disruptor API (README "Traditional LMAX Disruptor API" section)
 #[cfg(test)]
 mod traditional_lmax_api_tests {
     use super::*;
@@ -93,11 +93,11 @@ mod traditional_lmax_api_tests {
     }
 }
 
-// Test 2: Modern disruptor-rs Inspired API (README lines 165-212)
+// Test 2: Modern disruptor-rs Inspired API (README "Modern disruptor-rs Inspired API" and "ElegantConsumer API" sections)
 #[cfg(test)]
 mod modern_disruptor_rs_api_tests {
     use badbatch::disruptor::{
-        // Imports from README lines 166-169
+        // Imports from README "Modern disruptor-rs Inspired API" and "ElegantConsumer API" sections
         build_single_producer,
         event_factory::ClosureEventFactory,
         simple_wait_strategy::BusySpin,
@@ -114,7 +114,7 @@ mod modern_disruptor_rs_api_tests {
 
     #[test]
     fn test_modern_api_build_single_producer() {
-        // Test build_single_producer function from README line 178
+        // Test build_single_producer function from README "Modern disruptor-rs Inspired API" section
         // The wait strategy needs to implement WaitStrategy, so we use BusySpinWaitStrategy
         let mut producer = build_single_producer(1024, MyEvent::default, BusySpinWaitStrategy)
             .handle_events_with(|event, _sequence, _end_of_batch| {
@@ -122,12 +122,12 @@ mod modern_disruptor_rs_api_tests {
             })
             .build();
 
-        // Test closure-based publishing (README line 186-188)
+        // Test closure-based publishing (README "Modern disruptor-rs Inspired API" section)
         producer.publish(|event| {
             event.value = 42;
         });
 
-        // Test batch publishing (README lines 191-195)
+        // Test batch publishing (README "Modern disruptor-rs Inspired API" section)
         producer.batch_publish(5, |batch| {
             for (i, event) in batch.enumerate() {
                 event.value = i as i64;
@@ -137,7 +137,7 @@ mod modern_disruptor_rs_api_tests {
 
     #[test]
     fn test_elegant_consumer_api() {
-        // Test ElegantConsumer from README lines 197-211
+        // Test ElegantConsumer from README "ElegantConsumer API" section
         let factory = ClosureEventFactory::new(MyEvent::default);
         let ring_buffer = Arc::new(RingBuffer::new(1024, factory).unwrap());
 
