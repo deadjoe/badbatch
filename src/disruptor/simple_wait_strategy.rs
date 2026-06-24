@@ -149,7 +149,7 @@ where
         alerted: &std::sync::atomic::AtomicBool,
     ) -> crate::disruptor::Result<i64> {
         // Conservatively wait until the producer cursor reaches the requested sequence
-        // and all dependent sequences也达到要求，避免虚假的可用位置。
+        // and all dependent sequences reach it too, avoiding spurious availability.
         let mut available = cursor.get();
         while available < sequence {
             if alerted.load(std::sync::atomic::Ordering::Acquire) {
@@ -172,7 +172,7 @@ where
             }
         }
 
-        // 返回当前可见的可用上界（与 Blocking/Yielding 等策略行为保持一致）
+        // Return the visible availability upper bound (consistent with Blocking/Yielding).
         let dep_min = if dependent_sequences.is_empty() {
             available
         } else {
