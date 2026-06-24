@@ -133,7 +133,7 @@ quick_verification() {
     fi
 }
 
-# Function to run extended verification
+# Function to run extended verification suite
 extended_verification() {
     print_status "Running extended verification suite..."
 
@@ -160,16 +160,51 @@ extended_verification() {
     fi
 }
 
+# Function to run all available models
+all_verification() {
+    print_status "Running full verification suite..."
+
+    local failed=0
+
+    if ! verify_model "BadBatchSPMC" "spmc_config"; then
+        failed=$((failed + 1))
+    fi
+    if ! verify_model "BadBatchMPMC" "mpmc_config"; then
+        failed=$((failed + 1))
+    fi
+    if ! verify_model "BadBatchPipeline" "pipeline_config"; then
+        failed=$((failed + 1))
+    fi
+    if ! verify_model "SimpleSPMC" "simple_spmc_config"; then
+        failed=$((failed + 1))
+    fi
+    if ! verify_model "BadBatchMPMC" "mpsc_config"; then
+        failed=$((failed + 1))
+    fi
+
+    if [ $failed -eq 0 ]; then
+        print_success "All verifications passed!"
+        return 0
+    else
+        print_error "$failed verification(s) failed"
+        return 1
+    fi
+}
+
 # Function to display usage
 usage() {
     echo "Usage: $0 [OPTIONS] [COMMAND]"
     echo ""
     echo "Commands:"
-    echo "  quick      Run quick verification suite (default)"
-    echo "  extended   Run extended verification suite"
-    echo "  spmc       Verify SPMC model only"
-    echo "  mpmc       Verify MPMC model only"
-    echo "  help       Show this help message"
+    echo "  quick       Run quick verification suite (SPMC + MPMC, default)"
+    echo "  extended    Run extended verification suite (quick + extended MPMC)"
+    echo "  all         Run all available models (SPMC, MPMC, Pipeline, SimpleSPMC, MPSC)"
+    echo "  spmc        Verify SPMC model only"
+    echo "  mpmc        Verify MPMC model only"
+    echo "  pipeline    Verify Pipeline model only"
+    echo "  mpsc        Verify MPSC configuration only (MPMC model, 4 writers, 1 reader)"
+    echo "  simplespmc  Verify SimpleSPMC model only"
+    echo "  help        Show this help message"
     echo ""
     echo "Options:"
     echo "  --tlc-jar PATH    Path to tla2tools.jar"
@@ -182,7 +217,8 @@ usage() {
     echo "Examples:"
     echo "  $0                    # Run quick verification"
     echo "  $0 extended           # Run extended verification"
-    echo "  $0 spmc               # Verify SPMC model only"
+    echo "  $0 all                # Run all models"
+    echo "  $0 pipeline           # Verify Pipeline model only"
     echo "  $0 --tlc-jar /path/to/tla2tools.jar quick"
 }
 
@@ -197,7 +233,7 @@ while [[ $# -gt 0 ]]; do
             JAVA_OPTS="$2"
             shift 2
             ;;
-        quick|extended|spmc|mpmc|help)
+        quick|extended|all|spmc|mpmc|pipeline|mpsc|simplespmc|help)
             COMMAND="$1"
             shift
             ;;
@@ -238,11 +274,23 @@ main() {
         extended)
             extended_verification
             ;;
+        all)
+            all_verification
+            ;;
         spmc)
             verify_model "BadBatchSPMC" "spmc_config"
             ;;
         mpmc)
             verify_model "BadBatchMPMC" "mpmc_config"
+            ;;
+        pipeline)
+            verify_model "BadBatchPipeline" "pipeline_config"
+            ;;
+        mpsc)
+            verify_model "BadBatchMPMC" "mpsc_config"
+            ;;
+        simplespmc)
+            verify_model "SimpleSPMC" "simple_spmc_config"
             ;;
         help)
             usage

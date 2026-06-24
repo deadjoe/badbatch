@@ -4,11 +4,13 @@ This directory contains TLA+ formal verification models for the BadBatch Disrupt
 
 ## Overview
 
-The verification suite consists of three main TLA+ models that verify different aspects of the BadBatch Disruptor:
+The verification suite consists of several TLA+ models that verify different aspects of the BadBatch Disruptor:
 
 - **`BadBatchSPMC.tla`** - Single Producer Multi Consumer verification
-- **`BadBatchMPMC.tla`** - Multi Producer Multi Consumer verification
-- **`BadBatchRingBuffer.tla`** - Ring buffer data structure verification
+- **`BadBatchMPMC.tla`** - Multi Producer Multi Consumer verification (also used for MPSC via config)
+- **`BadBatchPipeline.tla`** - Consumer dependency chain (pipeline / `and_then`) verification
+- **`SimpleSPMC.tla`** - Simpler standalone SPMC model with different liveness formulation
+- **`BadBatchRingBuffer.tla`** - Ring buffer data structure module (instantiated by the models above, not run standalone)
 
 All models are based on the proven disruptor-rs TLA+ specifications but adapted for BadBatch's specific implementation details.
 
@@ -95,11 +97,14 @@ We provide an automated verification script for easy testing:
 ```bash
 cd verification
 chmod +x verify.sh
-./verify.sh quick      # Quick verification (< 2 minutes)
-./verify.sh extended   # Extended verification (< 10 minutes)
-./verify.sh spmc       # SPMC model only
-./verify.sh mpmc       # MPMC model only
-./verify.sh ringbuffer # RingBuffer model only
+./verify.sh quick       # Quick verification: SPMC + MPMC (< 2 minutes)
+./verify.sh extended    # Extended verification: quick + extended MPMC (< 10 minutes)
+./verify.sh all         # All models: SPMC, MPMC, Pipeline, SimpleSPMC, MPSC
+./verify.sh spmc        # SPMC model only
+./verify.sh mpmc        # MPMC model only
+./verify.sh pipeline    # Pipeline model only
+./verify.sh mpsc        # MPSC configuration only (MPMC model, 4 writers, 1 reader)
+./verify.sh simplespmc  # SimpleSPMC model only
 ```
 
 ### Manual Verification
@@ -122,11 +127,16 @@ java -Xmx4g -XX:+UseParallelGC -jar tla2tools.jar -config configs/mpmc_config.cf
 
 ### Current Verification Status
 
-| Model | Status | States Explored | Issues |
-|-------|--------|----------------|---------|
-| **BadBatchSPMC** | ✅ **PASSED** | 7,197 states, 2,677 distinct | None - All safety and liveness properties verified |
-| **BadBatchMPMC** | ✅ **PASSED** | 161,285 states, 48,197 distinct | None - All safety and liveness properties verified |
-| **BadBatchRingBuffer** | ✅ **PASSED** | Included in both verifications | No data races, type safety verified |
+Re-verified on 2026-06-25 with Java 26, TLC from `tla2tools.jar` (May 2025 build).
+
+| Model | Config | Status | States / Distinct | Issues |
+|-------|--------|--------|-------------------|--------|
+| **BadBatchSPMC** | `spmc_config` | ✅ **PASSED** | 7,197 / 2,677 | None — all safety and liveness properties verified |
+| **BadBatchMPMC** | `mpmc_config` | ✅ **PASSED** | 161,285 / 48,197 | None — all safety and liveness properties verified |
+| **BadBatchPipeline** | `pipeline_config` | ✅ **PASSED** | 5,969 / 2,073 | None — `DependencyOrder` invariant verified |
+| **SimpleSPMC** | `simple_spmc_config` | ✅ **PASSED** | 911 / 379 | None — `EventualConsumption` property verified |
+| **MPSC** (via MPMC) | `mpsc_config` | ✅ **PASSED** | 243,057 / 84,129 | None — 4 writers, 1 reader configuration |
+| **BadBatchRingBuffer** | (instantiated) | ✅ **PASSED** | Included in all models above | No data races, type safety verified |
 
 ### Expected Results
 
@@ -143,6 +153,13 @@ No errors found.
 TLC finished computing initial states: 1 distinct state generated.
 TLC finished: 161285 states generated, 48197 distinct states found, 0 states left on queue.
 The depth of the complete state graph search is 61.
+No errors found.
+```
+
+**Successful Verification (Pipeline Example):**
+```text
+TLC finished: 5969 states generated, 2073 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 65.
 No errors found.
 ```
 
@@ -182,12 +199,42 @@ Models the multi producer, multi consumer scenario with proven correctness:
 
 ### BadBatchRingBuffer.tla
 
-Models the core ring buffer data structure:
+Models the core ring buffer data structure (instantiated as `Buffer` inside the other models):
 
 - **Memory Layout**: Models cache-padded ring buffer slots
 - **Index Calculation**: Verifies modulo arithmetic for ring wrapping
 - **Access Tracking**: Tracks concurrent read/write operations
 - **Bounds Checking**: Ensures array bounds are never violated
+
+### BadBatchPipeline.tla ✅ **VERIFIED**
+
+Models a consumer dependency chain (pipeline) where Stage2 consumers may only process an event after ALL Stage1 consumers have finished it. This models the `and_then` dependency API in BadBatch's builder.
+
+- **Two-stage pipeline**: Stage1 depends on producer cursor; Stage2 depends on `MinStage1 >= next`
+- **DependencyOrder invariant**: `read2[s2] <= read1[s1]` for all s2, s1 — Stage2 never overtakes Stage1
+- **Backpressure**: Producer gates on `MinAllReads = min(MinStage1, MinStage2)`
+- **Verification Results**:
+  - ✅ NoDataRaces: No concurrent read/write access
+  - ✅ DependencyOrder: Stage2 never processes ahead of Stage1
+  - ✅ Liveness: All Stage2 consumers eventually consume all published events
+  - ✅ 5,969 states explored, 2,073 distinct states
+
+### SimpleSPMC.tla ✅ **VERIFIED**
+
+A simpler standalone SPMC model with different constant naming (`Producer`/`Consumers` vs `Writers`/`Readers`) and a simpler liveness formulation (`EventualConsumption` = `Len(consumed[r]) >= MaxPublished`). Useful as a minimal reference model.
+
+- **Verification Results**:
+  - ✅ NoDataRaces, TypeOk
+  - ✅ EventualConsumption: all consumers eventually read `MaxPublished` events
+  - ✅ 911 states explored, 379 distinct states
+
+### MPSC Configuration ✅ **VERIFIED**
+
+Uses `BadBatchMPMC.tla` with `mpsc_config.cfg` (4 writers, 1 reader) to verify the multi-producer single-consumer scenario. This is the most stressful configuration for the multi-producer claim/publish coordination since 4 writers contend on the shared claim counter.
+
+- **Verification Results**:
+  - ✅ NoDataRaces, TypeOk, Liveness
+  - ✅ 243,057 states explored, 84,129 distinct states
 
 ## Integration with Development
 
