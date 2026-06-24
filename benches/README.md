@@ -251,6 +251,8 @@ Criterion 配置：
   - `Sleeping`
   - `BatchBusySpin`
   - `BatchYielding`
+  - `BusySpinPadded`
+  - `YieldingPadded`
   - `baseline`
 
 Criterion 配置：
@@ -267,12 +269,17 @@ Criterion 配置：
 - `BatchBusySpin` / `BatchYielding`
   - 用 `batch_publish`
   - 更接近 LMAX throughput tests 和 `disruptor-rs` 的高吞吐 publication 模型
+- `BusySpinPadded` / `YieldingPadded`
+  - 用 builder `publish`（单事件）+ `with_cache_line_padding(true)`
+  - 隔离 cache-line padding 对小事件 unicast handoff 的影响
+  - 在 Apple Silicon 上 padding 通常更慢（工作集变大），在 x86 上可能相反
 
 解读方式：
 
 - 看 SPSC 主路径极限，优先关注 `BatchBusySpin` / `BatchYielding`
 - 看更接近业务常见单事件发布路径，优先关注非 batch case
 - `Blocking` / `Sleeping` 现在不再被 benchmark harness 的 1ms 轮询污染，但仍然会体现它们本身的策略代价
+- `*Padded` case 用来衡量 cache-line padding 在目标硬件上的收益方向，不代表主路径
 
 ### 7.3 `multi_producer_single_consumer.rs`
 
