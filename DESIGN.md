@@ -48,8 +48,14 @@ The heart of the Disruptor pattern - a pre-allocated circular buffer.
 **Implementation Details:**
 ```rust
 pub struct RingBuffer<T> {
-    slots: Box<[UnsafeCell<T>]>,     // Pre-allocated event storage
+    // Inline or 64-byte cache-line-padded slot storage (opt-in via SlotPadding)
+    storage: SlotStorage<T>,
     index_mask: i64,                 // Fast modulo: (size - 1)
+}
+
+enum SlotStorage<T> {
+    Inline(Box<[UnsafeCell<T>]>),
+    CacheLine64(Box<[UnsafeCell<CacheLinePaddedSlot<T>>]>),
 }
 ```
 
@@ -241,9 +247,9 @@ let consumer = ElegantConsumer::with_affinity(ring_buffer,
 - **ABA Prevention**: Careful handling of sequence wraparound
 
 ### Testing Strategy
-- **Unit Tests**: 191 tests covering all core disruptor components
-- **Integration Tests**: 5 end-to-end scenarios with multiple producers/consumers  
-- **Documentation Tests**: All API examples validated through rustdoc tests
+- **Unit Tests**: 280 tests covering all core disruptor components across 27 test modules
+- **Integration Tests**: 38 end-to-end scenarios with multiple producers/consumers
+- **Documentation Tests**: 23 API examples validated through rustdoc
 - **Property Tests**: Invariant checking with proptest for sequence ordering and ring buffer behavior
 - **Benchmark Suite**: 7 specialized benchmark files covering SPSC, MPSC, latency, throughput, and scaling
 - **Formal Verification**: TLA+ mathematical proofs for SPMC (7,197 states) and MPMC (161,285 states)
@@ -259,7 +265,8 @@ let consumer = ElegantConsumer::with_affinity(ring_buffer,
 
 ### Development Dependencies
 - **criterion**: Performance benchmarking
-- **tokio-test**: Async testing utilities
+- **proptest**: Property-based testing
+- **crossbeam**: Channel comparison benchmarks
 
 ## Compatibility and Standards
 
@@ -488,9 +495,9 @@ let mut producer = build_single_producer(1024, factory, BusySpinWaitStrategy)
 ## Testing and Validation
 
 ### Test Coverage
-- **Unit Tests**: 191 tests covering all core disruptor components across 27 test modules
-- **Integration Tests**: 5 end-to-end scenarios with multiple producers/consumers
-- **Documentation Tests**: All API examples validated through rustdoc tests  
+- **Unit Tests**: 280 tests covering all core disruptor components across 27 test modules
+- **Integration Tests**: 38 end-to-end scenarios with multiple producers/consumers
+- **Documentation Tests**: 23 API examples validated through rustdoc  
 - **Property Tests**: Invariant checking with proptest for sequence ordering and ring buffer behavior
 - **Benchmark Tests**: 7 comprehensive benchmark suites with criterion.rs statistical analysis
 - **Formal Verification**: TLA+ models proving correctness of concurrent algorithms

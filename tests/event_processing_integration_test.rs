@@ -296,7 +296,6 @@ fn test_exception_handling_continues_processing() {
 
 #[test]
 fn test_try_run_once_functionality() {
-    use badbatch::disruptor::event_processor::DataProvider;
     use badbatch::disruptor::{
         BatchEventProcessor, DefaultExceptionHandler, ProcessingSequenceBarrier,
         SingleProducerSequencer,
@@ -320,7 +319,7 @@ fn test_try_run_once_functionality() {
     let processed_sequences = handler.processed_sequences.clone();
 
     let processor = BatchEventProcessor::new(
-        ring_buffer.clone() as Arc<dyn DataProvider<TestEvent>>,
+        ring_buffer.clone(),
         barrier,
         Box::new(handler),
         Box::new(DefaultExceptionHandler::new()),
@@ -330,10 +329,9 @@ fn test_try_run_once_functionality() {
 
     // Publish an event first
     let seq = sequencer.next().unwrap();
-    unsafe {
-        let event = ring_buffer.get_mut(seq);
-        event.value = 42;
-    }
+    // SAFETY: the sequencer granted exclusive access to this sequence.
+    let event = unsafe { &mut *ring_buffer.get_mut_unchecked(seq) };
+    event.value = 42;
     sequencer.publish(seq);
 
     assert_eq!(

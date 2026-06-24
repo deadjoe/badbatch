@@ -5,7 +5,7 @@
 //! sequence barriers to ensure proper ordering and dependencies.
 
 use crate::disruptor::{
-    DisruptorError, EventHandler, ExceptionHandler, Result, Sequence, SequenceBarrier,
+    DisruptorError, EventHandler, ExceptionHandler, Result, RingBuffer, Sequence, SequenceBarrier,
 };
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,6 +100,10 @@ pub trait DataProvider<T>: Send + Sync {
 /// for optimal performance. It follows the exact design from the original LMAX
 /// Disruptor BatchEventProcessor.
 ///
+/// The processor stores a concrete `Arc<RingBuffer<T>>` rather than a trait object
+/// so that per-event slot access stays monomorphized and vtable-free on the hot
+/// path.
+///
 /// # Type Parameters
 /// * `T` - The event type being processed
 #[repr(align(64))] // Cache line alignment for performance
@@ -107,8 +111,8 @@ pub struct BatchEventProcessor<T>
 where
     T: Send + Sync,
 {
-    /// The data provider for accessing events
-    data_provider: Arc<dyn DataProvider<T>>,
+    /// The ring buffer that stores and serves events
+    data_provider: Arc<RingBuffer<T>>,
     /// The sequence barrier for coordination
     sequence_barrier: Arc<dyn SequenceBarrier>,
     /// The event handler for processing events (Mutex ensures sound interior mutability)
@@ -132,7 +136,7 @@ where
     /// Create a new batch event processor
     ///
     /// # Arguments
-    /// * `data_provider` - The data provider for accessing events
+    /// * `data_provider` - The ring buffer serving events to this processor
     /// * `sequence_barrier` - The sequence barrier for coordination
     /// * `event_handler` - The event handler for processing events
     /// * `exception_handler` - The exception handler for error handling
@@ -140,7 +144,7 @@ where
     /// # Returns
     /// A new BatchEventProcessor instance
     pub fn new(
-        data_provider: Arc<dyn DataProvider<T>>,
+        data_provider: Arc<RingBuffer<T>>,
         sequence_barrier: Arc<dyn SequenceBarrier>,
         event_handler: Box<dyn EventHandler<T>>,
         exception_handler: Box<dyn ExceptionHandler<T>>,
@@ -187,7 +191,8 @@ where
                         // SAFETY: This processor owns the mutable access contract for the
                         // requested sequence and only advances its cursor after the handler
                         // has completed.
-                        let event = unsafe { self.data_provider.get_mut(next_sequence) };
+                        let event =
+                            unsafe { &mut *self.data_provider.get_mut_unchecked(next_sequence) };
 
                         if let Err(e) = handler.on_event(event, next_sequence, end_of_batch) {
                             let exception_handler = &*self.exception_handler;
@@ -307,7 +312,7 @@ where
 
             // SAFETY: We have exclusive access to this sequence position as guaranteed by
             // the barrier wait — no other processor can access this sequence until we're done.
-            let event = unsafe { self.data_provider.get_mut(current_sequence) };
+            let event = unsafe { &mut *self.data_provider.get_mut_unchecked(current_sequence) };
 
             if let Err(e) = handler.on_event(event, current_sequence, end_of_batch) {
                 let exception_handler = &*self.exception_handler;
@@ -414,6 +419,16 @@ mod tests {
         ))
     }
 
+    // Helper: create a small RingBuffer backed by the default event factory.
+    // BatchEventProcessor now stores a concrete Arc<RingBuffer<T>>, so tests
+    // that only need a data source use this instead of the trait-based mock.
+    fn create_test_ring_buffer(size: usize) -> Arc<RingBuffer<TestEvent>> {
+        Arc::new(
+            RingBuffer::new(size, DefaultEventFactory::<TestEvent>::new())
+                .expect("test ring buffer creation must succeed"),
+        )
+    }
+
     #[derive(Debug, Default)]
     #[allow(dead_code)]
     struct TestEvent {
@@ -473,7 +488,7 @@ mod tests {
     fn test_batch_event_processor_creation() {
         use crate::disruptor::SingleProducerSequencer;
 
-        let data_provider = Arc::new(TestDataProvider::new(8));
+        let data_provider = create_test_ring_buffer(8);
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequencer = crate::disruptor::sequencer::SequencerEnum::Single(Arc::new(
@@ -501,7 +516,7 @@ mod tests {
 
     #[test]
     fn test_event_processor_halt() {
-        let data_provider = Arc::new(TestDataProvider::new(8));
+        let data_provider = create_test_ring_buffer(8);
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
@@ -522,7 +537,7 @@ mod tests {
 
     #[test]
     fn test_try_run_once_not_running() {
-        let data_provider = Arc::new(TestDataProvider::new(8));
+        let data_provider = create_test_ring_buffer(8);
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
@@ -546,7 +561,7 @@ mod tests {
     fn test_try_run_once_is_non_blocking_without_events() {
         use std::time::{Duration, Instant};
 
-        let data_provider = Arc::new(TestDataProvider::new(8));
+        let data_provider = create_test_ring_buffer(8);
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
@@ -575,7 +590,7 @@ mod tests {
 
     #[test]
     fn test_processor_sequence_management() {
-        let data_provider = Arc::new(TestDataProvider::new(8));
+        let data_provider = create_test_ring_buffer(8);
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
@@ -625,7 +640,7 @@ mod tests {
 
     #[test]
     fn test_processor_debug_format() {
-        let data_provider = Arc::new(TestDataProvider::new(8));
+        let data_provider = create_test_ring_buffer(8);
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
@@ -807,7 +822,7 @@ mod tests {
         let handler_state = Arc::new(HandlerState::default());
         let exception_state = Arc::new(ExceptionState::default());
         let processor = BatchEventProcessor::new(
-            ring_buffer.clone() as Arc<dyn DataProvider<TestEvent>>,
+            ring_buffer.clone(),
             barrier,
             Box::new(TrackingEventHandler::new(handler_state.clone())),
             Box::new(RecordingExceptionHandler::new(exception_state.clone())),
@@ -860,7 +875,7 @@ mod tests {
         let handler_state = Arc::new(HandlerState::default());
         let exception_state = Arc::new(ExceptionState::default());
         let processor = BatchEventProcessor::new(
-            ring_buffer.clone() as Arc<dyn DataProvider<TestEvent>>,
+            ring_buffer.clone(),
             barrier,
             Box::new(TrackingEventHandler::failing_on_sequence(
                 handler_state.clone(),
@@ -909,7 +924,7 @@ mod tests {
 
         let handler_state = Arc::new(HandlerState::default());
         let processor = Arc::new(BatchEventProcessor::new(
-            ring_buffer.clone() as Arc<dyn DataProvider<TestEvent>>,
+            ring_buffer.clone(),
             barrier,
             Box::new(TrackingEventHandler::new(handler_state.clone())),
             Box::new(DefaultExceptionHandler::<TestEvent>::new()),
@@ -956,7 +971,7 @@ mod tests {
 
     #[test]
     fn test_run_returns_already_running_when_invoked_twice() {
-        let data_provider = Arc::new(TestDataProvider::new(8));
+        let data_provider = create_test_ring_buffer(8);
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
@@ -979,7 +994,7 @@ mod tests {
 
     #[test]
     fn test_notify_timeout_invokes_handler() {
-        let data_provider = Arc::new(TestDataProvider::new(8));
+        let data_provider = create_test_ring_buffer(8);
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
@@ -1000,7 +1015,7 @@ mod tests {
 
     #[test]
     fn test_lifecycle_errors_are_forwarded_to_exception_handler() {
-        let data_provider = Arc::new(TestDataProvider::new(8));
+        let data_provider = create_test_ring_buffer(8);
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);

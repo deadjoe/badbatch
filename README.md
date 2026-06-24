@@ -312,7 +312,9 @@ struct MyEvent {
 }
 ```
 
-This ensures each slot occupies its own cache line. Events that are already >= 64 bytes do not need this annotation. In our benchmarks, this single change improved unicast throughput from 0.25x to 1.05x relative to the Java LMAX Disruptor.
+This ensures each slot occupies its own cache line. Events that are already >= 64 bytes do not need this annotation.
+
+> **Architecture note**: Cache-line padding eliminates false sharing but increases the ring buffer footprint by `64 / sizeof(E)`. On x86 with strict false-sharing penalties this typically helps unicast throughput for small events; on Apple Silicon (large 128 KB L1, efficient coherency fabric) the larger working set can dominate and padding may *hurt* for 16-byte events. The `BusySpinPadded` / `YieldingPadded` SPSC benchmark variants let you measure the tradeoff on your target hardware. Keep `SlotPadding::None` (the default) unless your measurements show padding helps.
 
 ### ARM / Apple Silicon Notes
 
