@@ -331,9 +331,10 @@ where
     {
         let sequence = self.sequencer.next()?;
 
-        // Get the event from the ring buffer at the claimed sequence
-        // This is safe because we have exclusive access to this sequence until we publish
-        let event = unsafe { self.ring_buffer.get_mut(sequence) };
+        // SAFETY: The sequencer granted exclusive access to this sequence until
+        // we publish it. Use the unchecked access path to avoid the `&mut self`
+        // borrow requirement on the ring buffer (we only hold `&self`).
+        let event = unsafe { &mut *self.ring_buffer.get_mut_unchecked(sequence) };
 
         // Use the translator to populate the event with data
         translator.translate_to(event, sequence);
@@ -356,9 +357,8 @@ where
         Tr: crate::disruptor::EventTranslator<T>,
     {
         if let Some(sequence) = self.sequencer.try_next() {
-            // Get the event from the ring buffer at the claimed sequence
-            // This is safe because we have exclusive access to this sequence until we publish
-            let event = unsafe { self.ring_buffer.get_mut(sequence) };
+            // SAFETY: The sequencer granted exclusive access to this sequence.
+            let event = unsafe { &mut *self.ring_buffer.get_mut_unchecked(sequence) };
 
             // Use the translator to populate the event with data
             translator.translate_to(event, sequence);
