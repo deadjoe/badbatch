@@ -248,7 +248,7 @@ let consumer = ElegantConsumer::with_affinity(ring_buffer,
 
 ### Testing Strategy
 - **Unit Tests**: 280 tests covering all core disruptor components across 27 test modules
-- **Integration Tests**: 38 end-to-end scenarios with multiple producers/consumers
+- **Integration Tests**: 48 end-to-end scenarios with multiple producers/consumers
 - **Documentation Tests**: 23 API examples validated through rustdoc
 - **Property Tests**: Invariant checking with proptest for sequence ordering and ring buffer behavior
 - **Benchmark Suite**: 7 specialized benchmark files covering SPSC, MPSC, latency, throughput, and scaling
@@ -496,7 +496,7 @@ let mut producer = build_single_producer(1024, factory, BusySpinWaitStrategy)
 
 ### Test Coverage
 - **Unit Tests**: 280 tests covering all core disruptor components across 27 test modules
-- **Integration Tests**: 38 end-to-end scenarios with multiple producers/consumers
+- **Integration Tests**: 48 end-to-end scenarios with multiple producers/consumers
 - **Documentation Tests**: 23 API examples validated through rustdoc  
 - **Property Tests**: Invariant checking with proptest for sequence ordering and ring buffer behavior
 - **Benchmark Tests**: 7 comprehensive benchmark suites with criterion.rs statistical analysis
