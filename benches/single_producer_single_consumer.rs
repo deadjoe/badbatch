@@ -395,28 +395,34 @@ fn benchmark_sleeping(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
     }
 }
 
-/// Reference-aligned benchmark that claims and publishes the whole burst in one batch.
+/// Shared batch-publish benchmark core.
 ///
-/// This is closer to the LMAX raw throughput tests and the disruptor-rs benches, which
-/// primarily exercise range-claim publication rather than per-event translator calls.
-fn benchmark_batch_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pause_ms: u64) {
+/// `label` selects the reported benchmark id, `padded` toggles 64-byte
+/// cache-line slot padding, and `cooperative_wait` switches the completion
+/// waiter between spin and yield so it matches the wait strategy under test.
+fn benchmark_batch(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+    burst_size: u64,
+    pause_ms: u64,
+    wait_strategy: impl badbatch::disruptor::WaitStrategy + Send + Sync + Clone + 'static,
+    padded: bool,
+    cooperative_wait: bool,
+) {
     let param = format!("batch_burst:{burst_size}_pause:{pause_ms}ms");
-    let benchmark_id = BenchmarkId::new("BatchBusySpin", param);
+    let benchmark_id = BenchmarkId::new(label, param);
 
     let counter = Arc::new(AtomicI64::new(0));
-    let mut disruptor = build_single_producer(
-        BUFFER_SIZE,
-        BenchmarkEvent::default,
-        BusySpinWaitStrategy::new(),
-    )
-    .handle_events_with({
-        let counter = Arc::clone(&counter);
-        move |event: &mut BenchmarkEvent, _sequence, _end_of_batch| {
-            std::hint::black_box(event.value);
-            counter.fetch_add(1, Ordering::Relaxed);
-        }
-    })
-    .build();
+    let mut disruptor = build_single_producer(BUFFER_SIZE, BenchmarkEvent::default, wait_strategy)
+        .with_cache_line_padding(padded)
+        .handle_events_with({
+            let counter = Arc::clone(&counter);
+            move |event: &mut BenchmarkEvent, _sequence, _end_of_batch| {
+                std::hint::black_box(event.value);
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+        .build();
 
     group.throughput(Throughput::Elements(burst_size));
     group.bench_function(benchmark_id, |b| {
@@ -437,8 +443,13 @@ fn benchmark_batch_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u
                     }
                 });
 
-                if !wait_for_completion(&counter, target, TIMEOUT_MS) {
-                    panic!("BatchBusySpin benchmark failed: events not processed within timeout");
+                let ok = if cooperative_wait {
+                    wait_for_completion_yielding(&counter, target, TIMEOUT_MS)
+                } else {
+                    wait_for_completion(&counter, target, TIMEOUT_MS)
+                };
+                if !ok {
+                    panic!("{label} benchmark failed: events not processed within timeout");
                 }
             }
             start.elapsed()
@@ -448,24 +459,64 @@ fn benchmark_batch_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u
     disruptor.shutdown();
 }
 
+/// Reference-aligned benchmark that claims and publishes the whole burst in one batch.
+///
+/// This is closer to the LMAX raw throughput tests and the disruptor-rs benches, which
+/// primarily exercise range-claim publication rather than per-event translator calls.
+fn benchmark_batch_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pause_ms: u64) {
+    benchmark_batch(
+        group,
+        "BatchBusySpin",
+        burst_size,
+        pause_ms,
+        BusySpinWaitStrategy::new(),
+        false,
+        false,
+    );
+}
+
 fn benchmark_batch_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pause_ms: u64) {
-    let param = format!("batch_burst:{burst_size}_pause:{pause_ms}ms");
-    let benchmark_id = BenchmarkId::new("BatchYielding", param);
+    benchmark_batch(
+        group,
+        "BatchYielding",
+        burst_size,
+        pause_ms,
+        YieldingWaitStrategy::new(),
+        false,
+        true,
+    );
+}
+
+/// Single-event benchmark on the builder `publish` path with optional cache-line
+/// padding. This complements the DSL `publish_event` benchmarks and lets us
+/// isolate the effect of slot padding on the per-event unicast handoff without
+/// changing the API path.
+fn benchmark_single_event_builder(
+    group: &mut BenchmarkGroup<WallTime>,
+    label: &str,
+    burst_size: u64,
+    pause_ms: u64,
+    wait_strategy: impl badbatch::disruptor::WaitStrategy + Send + Sync + Clone + 'static,
+    padded: bool,
+    cooperative_wait: bool,
+) {
+    let param = format!(
+        "{}_burst:{burst_size}_pause:{pause_ms}ms",
+        if padded { "padded" } else { "inline" }
+    );
+    let benchmark_id = BenchmarkId::new(label, param);
 
     let counter = Arc::new(AtomicI64::new(0));
-    let mut disruptor = build_single_producer(
-        BUFFER_SIZE,
-        BenchmarkEvent::default,
-        YieldingWaitStrategy::new(),
-    )
-    .handle_events_with({
-        let counter = Arc::clone(&counter);
-        move |event: &mut BenchmarkEvent, _sequence, _end_of_batch| {
-            std::hint::black_box(event.value);
-            counter.fetch_add(1, Ordering::Relaxed);
-        }
-    })
-    .build();
+    let mut disruptor = build_single_producer(BUFFER_SIZE, BenchmarkEvent::default, wait_strategy)
+        .with_cache_line_padding(padded)
+        .handle_events_with({
+            let counter = Arc::clone(&counter);
+            move |event: &mut BenchmarkEvent, _sequence, _end_of_batch| {
+                std::hint::black_box(event.value);
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+        .build();
 
     group.throughput(Throughput::Elements(burst_size));
     group.bench_function(benchmark_id, |b| {
@@ -479,15 +530,19 @@ fn benchmark_batch_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u6
                 let start_count = counter.load(Ordering::Relaxed);
                 let target = start_count + burst_size as i64;
 
-                disruptor.batch_publish(burst_size as usize, |iter| {
-                    for (index, event) in iter.enumerate() {
-                        let value = (index + 1) as i64;
-                        event.value = std::hint::black_box(value);
-                    }
-                });
+                for i in 1..=burst_size {
+                    disruptor.publish(|event: &mut BenchmarkEvent| {
+                        event.value = std::hint::black_box(i as i64);
+                    });
+                }
 
-                if !wait_for_completion_yielding(&counter, target, TIMEOUT_MS) {
-                    panic!("BatchYielding benchmark failed: events not processed within timeout");
+                let ok = if cooperative_wait {
+                    wait_for_completion_yielding(&counter, target, TIMEOUT_MS)
+                } else {
+                    wait_for_completion(&counter, target, TIMEOUT_MS)
+                };
+                if !ok {
+                    panic!("{label} benchmark failed: events not processed within timeout");
                 }
             }
             start.elapsed()
@@ -495,6 +550,34 @@ fn benchmark_batch_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u6
     });
 
     disruptor.shutdown();
+}
+
+fn benchmark_busy_spin_padded(
+    group: &mut BenchmarkGroup<WallTime>,
+    burst_size: u64,
+    pause_ms: u64,
+) {
+    benchmark_single_event_builder(
+        group,
+        "BusySpinPadded",
+        burst_size,
+        pause_ms,
+        BusySpinWaitStrategy::new(),
+        true,
+        false,
+    );
+}
+
+fn benchmark_yielding_padded(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pause_ms: u64) {
+    benchmark_single_event_builder(
+        group,
+        "YieldingPadded",
+        burst_size,
+        pause_ms,
+        YieldingWaitStrategy::new(),
+        true,
+        true,
+    );
 }
 
 /// Main SPSC benchmark function
@@ -521,6 +604,8 @@ pub fn fixed_spsc_benchmark(c: &mut Criterion) {
             benchmark_sleeping(&mut group, burst_size, pause_ms);
             benchmark_batch_busy_spin(&mut group, burst_size, pause_ms);
             benchmark_batch_yielding(&mut group, burst_size, pause_ms);
+            benchmark_busy_spin_padded(&mut group, burst_size, pause_ms);
+            benchmark_yielding_padded(&mut group, burst_size, pause_ms);
         }
     }
 
