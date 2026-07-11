@@ -171,10 +171,8 @@ fn main() {
 
 ```rust
 use badbatch::disruptor::{
-    build_single_producer, event_factory::ClosureEventFactory, simple_wait_strategy::BusySpin,
-    BusySpinWaitStrategy, ElegantConsumer, RingBuffer,
+    build_single_producer, BusySpinWaitStrategy,
 };
-use std::sync::Arc;
 
 #[derive(Debug, Default)]
 struct MyEvent {
@@ -200,19 +198,42 @@ fn main() {
         }
     });
 
-    // ElegantConsumer uses simplified `SimpleWaitStrategy` types (e.g. BusySpin).
+    disruptor.shutdown();
+}
+```
+
+### ElegantConsumer API
+
+For a lightweight consumer that manages its own thread and can be pinned to a
+specific CPU core, use `ElegantConsumer` with a shared `RingBuffer`:
+
+```rust
+use badbatch::disruptor::{
+    event_factory::ClosureEventFactory, simple_wait_strategy::BusySpin, ElegantConsumer,
+    RingBuffer,
+};
+use std::sync::Arc;
+
+#[derive(Debug, Default)]
+struct MyEvent {
+    value: i64,
+}
+
+fn main() {
     let factory = ClosureEventFactory::new(MyEvent::default);
     let ring_buffer = Arc::new(RingBuffer::new(1024, factory).unwrap());
+
     let consumer = ElegantConsumer::with_affinity(
-        ring_buffer,
+        Arc::clone(&ring_buffer),
         |event, sequence, _end_of_batch| println!("Processing: {} at {}", event.value, sequence),
         BusySpin,
         1, // Pin to CPU core 1
     )
     .unwrap();
 
+    // Publish events through the same RingBuffer the consumer is reading...
+
     consumer.shutdown().unwrap();
-    disruptor.shutdown();
 }
 ```
 
@@ -221,7 +242,7 @@ Tip: `build_single_producer` / `build_multi_producer` take a full LMAX `WaitStra
 ## 🔧 Development
 
 ### Prerequisites
-- Rust 1.75 or later (see `Cargo.toml` `rust-version`)
+- Rust 1.84 or later (see `Cargo.toml` `rust-version`)
 - Git
 
 ### Building
@@ -374,13 +395,15 @@ BadBatch includes comprehensive TLA+ formal verification models that mathematica
 
 ### Verification Models
 - **BadBatchSPMC.tla**: Single Producer Multi Consumer verification (✅ 7,197 states verified)
-- **BadBatchMPMC.tla**: Multi Producer Multi Consumer verification (✅ 161,285 states verified) 
+- **BadBatchMPMC.tla**: Multi Producer Multi Consumer verification (✅ 161,285 states verified)
 - **BadBatchPipeline.tla**: Consumer dependency chain (pipeline) verification
 - **BadBatchRingBuffer.tla**: Shared ring buffer model/invariants used by the specs above
+- **SimpleSPMC.tla**: Minimal standalone SPMC reference model
+- **MPSC configuration**: MPMC model run with single writer and multiple readers (`mpsc_config.cfg`)
 
 ### Verified Properties
-- **Safety**: No data races, type safety, memory safety
-- **Liveness**: All events eventually consumed, no deadlocks, progress guarantees
+- **Safety**: `TypeOk` (well-typed state), `NoDataRaces` (no concurrent read/write access to slots)
+- **Liveness**: `Liveness` / `EventualConsumption` (all published events are eventually consumed)
 
 Run formal verification:
 ```bash
