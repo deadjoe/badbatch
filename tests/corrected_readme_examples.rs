@@ -13,7 +13,7 @@
 
 // Core imports needed for the corrected examples
 
-// Corrected Traditional LMAX Disruptor API Example (from README lines 96-161)
+// Corrected Traditional LMAX Disruptor API Example (from README "Traditional LMAX Disruptor API" section)
 #[test]
 fn corrected_traditional_lmax_example() {
     use badbatch::disruptor::{
@@ -85,7 +85,7 @@ fn corrected_traditional_lmax_example() {
     disruptor.shutdown().unwrap();
 }
 
-// Corrected Modern disruptor-rs Inspired API Example (from README lines 165-212)
+// Corrected Modern disruptor-rs Inspired API Example (from README "Modern disruptor-rs Inspired API" section)
 #[test]
 fn corrected_modern_disruptor_rs_example() {
     use badbatch::disruptor::{
