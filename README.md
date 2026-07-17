@@ -206,6 +206,10 @@ bash scripts/run_benchmarks.sh all     # full suite (long)
 # Checked-in median baseline (Apple Silicon, specific commits — not a portable guarantee):
 # benches/results/BASELINE.md
 RUSTFLAGS="-C target-cpu=native" ./scripts/run_baseline.sh --full
+
+# Same-machine BadBatch (Builder) vs LMAX Disruptor (Java BEP):
+bash scripts/run_head_to_head.sh --mode quick
+# Methodology: tools/head_to_head/README.md
 ```
 
 On AArch64 with LSE (e.g. Apple Silicon), building with `target-cpu=native` or `+lse` can reduce cost of contended atomics on multi-producer paths.

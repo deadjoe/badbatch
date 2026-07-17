@@ -264,9 +264,16 @@ Review checklist: all suites OK → logs free of `WARNING:` → correct KPI per 
 
 ## Comparison with native LMAX Disruptor
 
-Different language, runtime, and harness. Align topology, producer/consumer counts, publication model, and metric definition before comparing.
+For **same-machine, matched-scenario** medians (recommended), use the head-to-head harness:
 
-Prefer `examples/disruptor` **perftest** jars over ad-hoc JMH cross-plots:
+```bash
+bash scripts/run_head_to_head.sh --mode quick
+# see tools/head_to_head/README.md
+```
+
+That tool compares BadBatch Builder vs LMAX `RingBuffer`+`BatchEventProcessor` with shared event counts, checksums, and JSON summaries. Official LMAX **perftest** / JMH remain useful but are harder to map 1:1 onto BadBatch’s API.
+
+Prefer `examples/disruptor` **perftest** jars over ad-hoc JMH cross-plots when using Java-only microbenches:
 
 | BadBatch suite / case | Closest LMAX perftest (when available) |
 |-----------------------|----------------------------------------|
