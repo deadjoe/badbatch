@@ -4,7 +4,6 @@
 
 use super::consumer::{Consumer, ConsumerInfo, ConsumerThreadConfig};
 use crate::disruptor::{
-    consumer_engine::RunMode,
     event_factory::ClosureEventFactory,
     producer::SimpleProducer,
     ring_buffer::SlotPadding,
@@ -18,7 +17,10 @@ use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
 ///
 /// Holds the ring buffer, sequencer, consumer handles, and gating sequences so
 /// both the classic DSL and the type-state Builder share one assembly path.
-#[derive(Debug, Clone)]
+///
+/// Not [`Clone`]: consumer join handles are unique ownership. Cloning would
+/// produce a hollow consumer list without threads.
+#[derive(Debug)]
 pub struct DisruptorCore<E, W>
 where
     W: WaitStrategy + 'static,
@@ -138,13 +140,12 @@ where
         .max()
         .map_or(0, |m| m + 1);
 
-    let stage_modes = super::consumer::stage_run_modes(&consumers, stage_count.max(1));
+    let stage_modes = super::consumer::stage_run_modes(&consumers, stage_count);
 
-    let mut consumer_threads: Vec<Consumer> = Vec::new();
-    let mut consumer_sequences: Vec<Arc<Sequence>> = Vec::new();
-    let mut stage_sequences = (0..stage_count.max(1))
-        .map(|_| Vec::<Arc<Sequence>>::new())
-        .collect::<Vec<_>>();
+    let mut consumer_threads: Vec<Consumer> = Vec::with_capacity(consumers.len());
+    let mut consumer_sequences: Vec<Arc<Sequence>> = Vec::with_capacity(consumers.len());
+    let mut stage_sequences: Vec<Vec<Arc<Sequence>>> =
+        (0..stage_count).map(|_| Vec::new()).collect();
 
     for consumer_info in consumers {
         let ConsumerInfo {
@@ -175,10 +176,12 @@ where
             sequencer.clone(),
         ));
 
-        let run_mode = stage_modes
-            .get(stage_index)
-            .cloned()
-            .unwrap_or(RunMode::Sequential);
+        assert!(
+            stage_index < stage_modes.len(),
+            "missing RunMode for stage {stage_index} (stage_count={})",
+            stage_modes.len()
+        );
+        let run_mode = stage_modes[stage_index].clone();
 
         let (consumer_sequence, consumer) = starter(
             Arc::clone(&ring_buffer),

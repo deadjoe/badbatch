@@ -43,20 +43,6 @@ impl StopFlag<'_> {
             Self::Running(flag) => flag.load(Ordering::Acquire),
         }
     }
-}
-
-/// Control block for a consumer loop iteration.
-#[derive(Clone, Copy)]
-pub struct LoopControl<'a> {
-    /// Cooperative stop source for this loop.
-    pub stop: StopFlag<'a>,
-}
-
-impl LoopControl<'_> {
-    #[inline]
-    fn should_continue(self) -> bool {
-        self.stop.should_continue()
-    }
 
     /// Wait until `sequence` is available or stop/alert interrupts.
     fn wait_for<W: WaitStrategy + 'static>(
@@ -64,9 +50,9 @@ impl LoopControl<'_> {
         barrier: &ProcessingSequenceBarrier<W>,
         sequence: i64,
     ) -> Result<i64> {
-        match self.stop {
-            StopFlag::External(shutdown) => barrier.wait_for_with_shutdown(sequence, shutdown),
-            StopFlag::Running(running) => {
+        match self {
+            Self::External(shutdown) => barrier.wait_for_with_shutdown(sequence, shutdown),
+            Self::Running(running) => {
                 if !running.load(Ordering::Acquire) {
                     return Err(DisruptorError::Alert);
                 }
@@ -86,7 +72,7 @@ pub fn run_sequential_batch_loop<E, H, W>(
     sequence_barrier: &ProcessingSequenceBarrier<W>,
     event_handler: &mut H,
     consumer_sequence: &Sequence,
-    control: LoopControl<'_>,
+    stop: StopFlag<'_>,
     thread_name: &str,
 ) where
     E: Send + Sync,
@@ -98,7 +84,7 @@ pub fn run_sequential_batch_loop<E, H, W>(
         sequence_barrier,
         event_handler,
         consumer_sequence,
-        control,
+        stop,
         thread_name,
         None,
     );
@@ -112,7 +98,7 @@ pub fn run_sequential_batch_loop_with_exceptions<E, H, W>(
     sequence_barrier: &ProcessingSequenceBarrier<W>,
     event_handler: &mut H,
     consumer_sequence: &Sequence,
-    control: LoopControl<'_>,
+    stop: StopFlag<'_>,
     thread_name: &str,
     exception_handler: Option<&dyn ExceptionHandler<E>>,
 ) where
@@ -122,8 +108,8 @@ pub fn run_sequential_batch_loop_with_exceptions<E, H, W>(
 {
     let mut next_sequence = consumer_sequence.get() + 1;
 
-    while control.should_continue() {
-        match control.wait_for(sequence_barrier, next_sequence) {
+    while stop.should_continue() {
+        match stop.wait_for(sequence_barrier, next_sequence) {
             Ok(available_sequence) => {
                 if available_sequence < next_sequence {
                     continue;
@@ -161,7 +147,7 @@ pub fn run_sequential_batch_loop_with_exceptions<E, H, W>(
 
                 consumer_sequence.set(available_sequence);
             }
-            Err(_) if !control.should_continue() => break,
+            Err(_) if !stop.should_continue() => break,
             Err(_) => {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
@@ -179,7 +165,7 @@ pub fn run_work_processor_loop<E, H, W>(
     event_handler: &mut H,
     consumer_sequence: &Sequence,
     work_sequence: &CachePadded<AtomicI64>,
-    control: LoopControl<'_>,
+    stop: StopFlag<'_>,
     thread_name: &str,
 ) where
     E: Send + Sync,
@@ -188,9 +174,9 @@ pub fn run_work_processor_loop<E, H, W>(
 {
     let mut cached_available = INITIAL_CURSOR_VALUE;
 
-    'work: while control.should_continue() {
+    'work: while stop.should_continue() {
         let claimed = loop {
-            if !control.should_continue() {
+            if !stop.should_continue() {
                 break 'work;
             }
             let current = work_sequence.load(Ordering::Acquire);
@@ -204,12 +190,12 @@ pub fn run_work_processor_loop<E, H, W>(
         };
 
         while claimed > cached_available {
-            if !control.should_continue() {
+            if !stop.should_continue() {
                 break 'work;
             }
-            match control.wait_for(sequence_barrier, claimed) {
+            match stop.wait_for(sequence_barrier, claimed) {
                 Ok(available) => cached_available = available,
-                Err(_) if !control.should_continue() => break 'work,
+                Err(_) if !stop.should_continue() => break 'work,
                 Err(_) => std::hint::spin_loop(),
             }
         }
@@ -250,7 +236,7 @@ pub fn run_sequential_readonly_loop<E, F, W>(
     sequence_barrier: &ProcessingSequenceBarrier<W>,
     on_event: &mut F,
     consumer_sequence: &Sequence,
-    control: LoopControl<'_>,
+    stop: StopFlag<'_>,
     thread_name: &str,
 ) where
     E: Send + Sync,
@@ -259,8 +245,8 @@ pub fn run_sequential_readonly_loop<E, F, W>(
 {
     let mut next_sequence = consumer_sequence.get() + 1;
 
-    while control.should_continue() {
-        match control.wait_for(sequence_barrier, next_sequence) {
+    while stop.should_continue() {
+        match stop.wait_for(sequence_barrier, next_sequence) {
             Ok(available_sequence) => {
                 if available_sequence < next_sequence {
                     continue;
@@ -287,7 +273,7 @@ pub fn run_sequential_readonly_loop<E, F, W>(
 
                 consumer_sequence.set(available_sequence);
             }
-            Err(_) if !control.should_continue() => break,
+            Err(_) if !stop.should_continue() => break,
             Err(_) => {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
@@ -376,9 +362,7 @@ mod tests {
             &barrier,
             &mut handler,
             &consumer_seq,
-            LoopControl {
-                stop: StopFlag::Running(&running),
-            },
+            StopFlag::Running(&running),
             "engine-test",
         );
         let _ = shutdown;

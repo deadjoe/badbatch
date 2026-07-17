@@ -5,7 +5,7 @@
 //! sequence barriers to ensure proper ordering and dependencies.
 
 use crate::disruptor::{
-    consumer_engine::{self, LoopControl, StopFlag},
+    consumer_engine::{self, StopFlag},
     DisruptorError, EventHandler, ExceptionHandler, ProcessingSequenceBarrier, Result, RingBuffer,
     Sequence, SequenceBarrier, WaitStrategy,
 };
@@ -193,9 +193,7 @@ where
             &self.sequence_barrier,
             handler,
             &self.sequence,
-            LoopControl {
-                stop: StopFlag::Running(&self.running),
-            },
+            StopFlag::Running(&self.running),
             "batch-event-processor",
             Some(self.exception_handler.as_ref()),
         );
