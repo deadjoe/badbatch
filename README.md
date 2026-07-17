@@ -1,11 +1,15 @@
-# BadBatch
+<div align="center">
+  <img src="badbatch.png" alt="BadBatch logo" width="200"/>
+
+  # BadBatch
+
+  [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+  [![Tests](https://github.com/deadjoe/badbatch/workflows/Tests/badge.svg)](https://github.com/deadjoe/badbatch/actions)
+</div>
 
 A Rust implementation of the [LMAX Disruptor](https://github.com/LMAX-Exchange/disruptor) pattern: a pre-allocated ring buffer with sequence-based coordination for high-throughput, low-latency event processing between threads.
 
 **Preferred API:** monomorphized Builder (`build_single_producer` / `build_multi_producer`), `Producer`, and `EventPoller`. An LMAX-style DSL (`Disruptor`) and `ElegantConsumer` are available behind optional features (enabled by default).
-
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Tests](https://github.com/deadjoe/badbatch/workflows/Tests/badge.svg)](https://github.com/deadjoe/badbatch/actions)
 
 ---
 
