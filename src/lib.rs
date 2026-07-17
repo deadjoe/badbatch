@@ -135,46 +135,45 @@ pub mod disruptor;
 
 // Re-export the main types for convenience
 pub use disruptor::{
+    build_multi_producer,
+    build_single_producer,
     // Utility functions
     is_power_of_two,
+    open_single_producer_poller,
     BatchEventProcessor,
     BlockingWaitStrategy,
     BusySpinWaitStrategy,
     // Convenience types
     DefaultEventFactory,
-
-    // Core types
-    Disruptor,
     // Error types
     DisruptorError,
+    // Preferred API surface
+    EventBatch,
     EventFactory,
     // Event handling
     EventHandler,
+    EventPoller,
     // Event processing
     EventProcessor,
     EventTranslator,
     EventTranslatorOneArg,
     EventTranslatorThreeArg,
-
     EventTranslatorTwoArg,
     // Exception handling
     ExceptionHandler,
-
     MultiProducerSequencer,
+    Polling,
+    Producer,
     ProducerType,
-
     Result,
-
     RingBuffer,
     Sequence,
-
     SequenceBarrier,
-
     // Sequencing
     Sequencer,
+    SimpleProducer,
     SingleProducerSequencer,
     SleepingWaitStrategy,
-
     SlotPadding,
     // Wait strategies
     WaitStrategy,
@@ -182,6 +181,12 @@ pub use disruptor::{
     // Constants
     INITIAL_CURSOR_VALUE,
 };
+
+#[cfg(feature = "lmax-dsl")]
+pub use disruptor::Disruptor;
+
+#[cfg(feature = "extras")]
+pub use disruptor::ElegantConsumer;
 
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

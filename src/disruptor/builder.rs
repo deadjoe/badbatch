@@ -4,13 +4,13 @@
 //! It allows for easy configuration of producers, consumers, and their dependencies.
 
 use crate::disruptor::{
+    consumer_engine::{self, LoopControl},
     event_factory::ClosureEventFactory,
     producer::{Producer, SimpleProducer},
     ring_buffer::SlotPadding,
     sequence_barrier::ProcessingSequenceBarrier,
     sequencer::{MultiProducerSequencer, SequencerEnum, SingleProducerSequencer},
-    EventHandler, RingBuffer, Sequence, SequenceBarrier, Sequencer, WaitStrategy,
-    INITIAL_CURSOR_VALUE,
+    EventHandler, RingBuffer, Sequence, Sequencer, WaitStrategy, INITIAL_CURSOR_VALUE,
 };
 use crossbeam_utils::CachePadded;
 use std::marker::PhantomData;
@@ -159,14 +159,11 @@ where
     });
 
     // LMAX WorkerPool scheme A: one shared work-sequence cursor per parallel stage.
-    // Workers CAS-claim sequences for exclusive ownership — no per-slot Mutex.
     let stage_work_sequences: Vec<Option<Arc<CachePadded<AtomicI64>>>> = stage_widths
         .iter()
         .map(|width| {
             if *width > 1 {
-                Some(Arc::new(CachePadded::new(AtomicI64::new(
-                    INITIAL_CURSOR_VALUE,
-                ))))
+                Some(consumer_engine::new_work_sequence())
             } else {
                 None
             }
@@ -461,12 +458,10 @@ struct ConsumerThreadConfig {
     work_sequence: Option<Arc<CachePadded<AtomicI64>>>,
 }
 
-/// Start a consumer thread for processing events
+/// Start a consumer thread for processing events.
 ///
-/// Single-consumer stages use a sequential batch loop (LMAX BatchEventProcessor).
-/// Parallel same-stage consumers (width > 1) use LMAX WorkerPool scheme A:
-/// CAS-claim sequences from a shared work cursor for exclusive, lock-free ownership.
-#[allow(clippy::too_many_lines)]
+/// Single-consumer stages use the unified sequential batch engine.
+/// Parallel same-stage consumers (width > 1) use the unified WorkerPool engine.
 fn start_consumer_thread<E, H, W>(
     ring_buffer: Arc<RingBuffer<E>>,
     sequence_barrier: Arc<ProcessingSequenceBarrier<W>>,
@@ -478,7 +473,6 @@ where
     H: EventHandler<E> + Send + 'static,
     W: WaitStrategy + 'static,
 {
-    // Create a sequence for this consumer (gating + progress)
     let consumer_sequence = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
     let consumer_sequence_clone = consumer_sequence.clone();
 
@@ -493,11 +487,9 @@ where
     let thread_name_clone = thread_name.clone();
     let is_work_processor = work_sequence.is_some();
 
-    // Start the consumer thread
     let join_handle = thread::Builder::new()
         .name(thread_name.clone())
         .spawn(move || {
-            // Set CPU affinity if specified
             if let Some(core_id) = cpu_affinity {
                 if let Err(e) = set_thread_affinity(core_id) {
                     #[cfg(debug_assertions)]
@@ -509,144 +501,39 @@ where
                 }
             }
 
-            // Lifecycle: notify handler of start
             if let Err(e) = event_handler.on_start() {
                 crate::internal_error!(
                     "EventHandler on_start failed in thread '{thread_name}': {e:?}"
                 );
             }
 
+            let control = LoopControl {
+                shutdown: &shutdown_flag,
+                running: None,
+            };
+
             if is_work_processor {
-                // ---------------------------------------------------------------
-                // LMAX WorkProcessor-inspired CAS work claim (WorkerPool scheme A)
-                //
-                // Shared work_sequence starts at INITIAL_CURSOR_VALUE (-1).
-                // Each worker:
-                //   1. CAS-claims next sequence: work_sequence from n-1 -> n
-                //   2. Publishes progress as n-1 before waiting (gating safety)
-                //   3. Waits on barrier until claimed sequence is available
-                //      (must not re-claim on wait retry — exclusive ownership)
-                //   4. Processes exclusively (claim grants sole ownership)
-                //   5. Updates worker sequence to n
-                //
-                // Minimum of worker sequences provides producer backpressure.
-                // No per-slot Mutex — exclusive claim is lock-free.
-                // ---------------------------------------------------------------
                 let work_seq = work_sequence.expect("work processor requires work_sequence");
-                let mut cached_available = INITIAL_CURSOR_VALUE;
-
-                'work: while !shutdown_flag.load(Ordering::Acquire) {
-                    // Claim the next sequence via CAS on the shared work cursor.
-                    let claimed = loop {
-                        if shutdown_flag.load(Ordering::Acquire) {
-                            break 'work;
-                        }
-                        let current = work_seq.load(Ordering::Acquire);
-                        let next = current + 1;
-                        // Publish that this worker is done through `current` so
-                        // gating does not stall producers while we wait for `next`.
-                        consumer_sequence_clone.set(current);
-                        match work_seq.compare_exchange(
-                            current,
-                            next,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        ) {
-                            Ok(_) => break next,
-                            Err(_) => {
-                                // Lost the race — another worker claimed this sequence.
-                                std::hint::spin_loop();
-                            }
-                        }
-                    };
-
-                    // Wait until the claimed sequence is available. Never re-claim
-                    // on transient wait failure — that would drop exclusive ownership.
-                    while claimed > cached_available {
-                        if shutdown_flag.load(Ordering::Acquire) {
-                            break 'work;
-                        }
-                        match sequence_barrier.wait_for_with_shutdown(claimed, &shutdown_flag) {
-                            Ok(available) => {
-                                cached_available = available;
-                            }
-                            Err(_) if shutdown_flag.load(Ordering::Acquire) => {
-                                break 'work;
-                            }
-                            Err(_) => {
-                                // Timeout / transient alert: retry wait for the same claim.
-                                std::hint::spin_loop();
-                            }
-                        }
-                    }
-
-                    let end_of_batch = claimed == cached_available;
-                    let _ = event_handler.on_batch_start(1, cached_available - claimed + 1);
-
-                    // SAFETY: CAS claim grants exclusive ownership of `claimed`.
-                    // No other worker will process this sequence.
-                    let event = unsafe { &mut *ring_buffer.get_mut_unchecked(claimed) };
-
-                    if let Err(e) = event_handler.on_event(event, claimed, end_of_batch) {
-                        #[cfg(debug_assertions)]
-                        eprintln!(
-                            "Event processing error in thread '{thread_name}' at sequence {claimed}: {e:?}"
-                        );
-                        #[cfg(not(debug_assertions))]
-                        let _ = e;
-                    }
-
-                    // Publish progress after processing so gating observes completion.
-                    consumer_sequence_clone.set(claimed);
-                }
+                consumer_engine::run_work_processor_loop(
+                    &ring_buffer,
+                    &sequence_barrier,
+                    &mut event_handler,
+                    &consumer_sequence_clone,
+                    &work_seq,
+                    control,
+                    &thread_name,
+                );
             } else {
-                // Sequential BatchEventProcessor-style loop for width-1 stages.
-                let mut next_sequence = 0i64;
-
-                while !shutdown_flag.load(Ordering::Acquire) {
-                    if let Ok(available_sequence) =
-                        sequence_barrier.wait_for_with_shutdown(next_sequence, &shutdown_flag)
-                    {
-                        let batch_size = available_sequence - next_sequence + 1;
-                        let queue_depth = available_sequence - consumer_sequence_clone.get();
-                        let _ = event_handler.on_batch_start(batch_size, queue_depth);
-
-                        // Process ALL available events in this batch.
-                        // Never check shutdown inside the inner loop — published events
-                        // must be fully consumed before stopping (LMAX Disruptor contract).
-                        while next_sequence <= available_sequence {
-                            let end_of_batch = next_sequence == available_sequence;
-
-                            // SAFETY: exclusive access to this sequence range by topology.
-                            let event =
-                                unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
-
-                            if let Err(e) =
-                                event_handler.on_event(event, next_sequence, end_of_batch)
-                            {
-                                #[cfg(debug_assertions)]
-                                eprintln!(
-                                    "Event processing error in thread '{thread_name}' at sequence {next_sequence}: {e:?}"
-                                );
-                                #[cfg(not(debug_assertions))]
-                                let _ = e;
-                            }
-
-                            next_sequence += 1;
-                        }
-
-                        // Publish progress once per batch (LMAX BatchEventProcessor).
-                        consumer_sequence_clone.set(available_sequence);
-                    } else {
-                        if shutdown_flag.load(Ordering::Acquire) {
-                            break;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
-                }
+                consumer_engine::run_sequential_batch_loop(
+                    &ring_buffer,
+                    &sequence_barrier,
+                    &mut event_handler,
+                    &consumer_sequence_clone,
+                    control,
+                    &thread_name,
+                );
             }
 
-            // Lifecycle: notify handler of shutdown
             if let Err(e) = event_handler.on_shutdown() {
                 crate::internal_error!(
                     "EventHandler on_shutdown failed in thread '{thread_name}': {e:?}"

@@ -8,6 +8,7 @@ use crate::disruptor::sequence_barrier::ProcessingSequenceBarrier;
 use crate::disruptor::{is_power_of_two, DisruptorError, Result, Sequence, WaitStrategy};
 use arc_swap::ArcSwap;
 use crossbeam_utils::CachePadded;
+use std::cell::UnsafeCell;
 use std::convert::TryFrom;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -364,13 +365,21 @@ where
     /// Writes (add/remove) use `rcu()` with CAS retry — acceptable since they only occur
     /// during setup/shutdown, not on the hot path.
     gating_sequences: ArcSwap<Vec<Arc<Sequence>>>,
-    /// Next sequence value to be claimed (equivalent to LMAX nextValue)
-    /// Using AtomicI64 for Rust thread safety, but logically only one thread accesses it
-    next_value: AtomicI64,
-    /// Cached minimum gating sequence (equivalent to LMAX cachedValue)
-    /// Using AtomicI64 for Rust thread safety, but logically only one thread accesses it
-    cached_value: AtomicI64,
+    /// Next sequence value to be claimed (equivalent to LMAX nextValue).
+    ///
+    /// Exclusive to the single publishing thread. Stored in `UnsafeCell` (not atomics)
+    /// because LMAX guarantees single-threaded access; `SimpleProducer` is `!Sync` to
+    /// reinforce that discipline at the handle layer.
+    next_value: UnsafeCell<i64>,
+    /// Cached minimum gating sequence (equivalent to LMAX cachedValue).
+    /// Same single-publisher exclusivity as `next_value`.
+    cached_value: UnsafeCell<i64>,
 }
+
+// SAFETY: `next_value` / `cached_value` are only read/written by the single publisher
+// thread that owns the producer handle. Other threads access only `cursor`, gating
+// sequences, and wait strategy — never these cells.
+unsafe impl<W: WaitStrategy + 'static> Sync for SingleProducerSequencer<W> {}
 
 impl<W> SingleProducerSequencer<W>
 where
@@ -394,9 +403,29 @@ where
             needs_signal,
             cursor: Arc::new(Sequence::new_with_initial_value()),
             gating_sequences: ArcSwap::from_pointee(Vec::new()),
-            next_value: AtomicI64::new(-1),
-            cached_value: AtomicI64::new(-1),
+            next_value: UnsafeCell::new(-1),
+            cached_value: UnsafeCell::new(-1),
         }
+    }
+
+    #[inline]
+    unsafe fn next_value(&self) -> i64 {
+        *self.next_value.get()
+    }
+
+    #[inline]
+    unsafe fn set_next_value(&self, v: i64) {
+        *self.next_value.get() = v;
+    }
+
+    #[inline]
+    unsafe fn cached_value(&self) -> i64 {
+        *self.cached_value.get()
+    }
+
+    #[inline]
+    unsafe fn set_cached_value(&self, v: i64) {
+        *self.cached_value.get() = v;
     }
 
     /// Create a barrier that holds a `SequencerEnum::Single` reference back to this sequencer.
@@ -417,11 +446,12 @@ where
     /// Check if there's available capacity for the required number of sequences
     /// This matches the LMAX Disruptor SingleProducerSequencer.hasAvailableCapacity method
     fn has_available_capacity_internal(&self, required_capacity: usize, do_store: bool) -> bool {
-        let next_value = self.next_value.load(Ordering::Relaxed);
+        // SAFETY: single-publisher exclusive access to next/cached.
+        let next_value = unsafe { self.next_value() };
         let required_capacity_i64 =
             i64::try_from(required_capacity).expect("required capacity must fit into i64");
         let wrap_point = (next_value + required_capacity_i64) - self.buffer_size_i64;
-        let cached_gating_sequence = self.cached_value.load(Ordering::Relaxed);
+        let cached_gating_sequence = unsafe { self.cached_value() };
 
         if wrap_point > cached_gating_sequence || cached_gating_sequence > next_value {
             if do_store {
@@ -430,7 +460,7 @@ where
             }
 
             let min_sequence = self.get_minimum_sequence();
-            self.cached_value.store(min_sequence, Ordering::Relaxed);
+            unsafe { self.set_cached_value(min_sequence) };
 
             if wrap_point > min_sequence {
                 return false;
@@ -465,11 +495,12 @@ where
             return Err(DisruptorError::InvalidSequence(n));
         }
 
-        // This follows the exact LMAX Disruptor SingleProducerSequencer.next(int n) logic
-        let next_value = self.next_value.load(Ordering::Relaxed);
+        // This follows the exact LMAX Disruptor SingleProducerSequencer.next(int n) logic.
+        // SAFETY: single-publisher exclusive access.
+        let next_value = unsafe { self.next_value() };
         let next_sequence = next_value + n;
         let wrap_point = next_sequence - self.buffer_size_i64;
-        let cached_gating_sequence = self.cached_value.load(Ordering::Relaxed);
+        let cached_gating_sequence = unsafe { self.cached_value() };
 
         if wrap_point > cached_gating_sequence || cached_gating_sequence > next_value {
             // Set cursor with volatile semantics (equivalent to cursor.setVolatile in LMAX)
@@ -486,12 +517,11 @@ where
                 std::hint::spin_loop();
             }
 
-            // Update cached value
-            self.cached_value.store(min_sequence, Ordering::Relaxed);
+            unsafe { self.set_cached_value(min_sequence) };
         }
 
         // Update next_value (equivalent to this.nextValue = nextSequence in LMAX)
-        self.next_value.store(next_sequence, Ordering::Relaxed);
+        unsafe { self.set_next_value(next_sequence) };
 
         Ok(next_sequence)
     }
@@ -515,8 +545,9 @@ where
         }
 
         // Update next_value and return the sequence (equivalent to this.nextValue += n)
-        let next_sequence = self.next_value.load(Ordering::Relaxed) + n;
-        self.next_value.store(next_sequence, Ordering::Relaxed);
+        // SAFETY: single-publisher exclusive access.
+        let next_sequence = unsafe { self.next_value() + n };
+        unsafe { self.set_next_value(next_sequence) };
 
         Some(next_sequence)
     }
@@ -559,7 +590,8 @@ where
 
     fn remaining_capacity(&self) -> i64 {
         // This follows the exact LMAX Disruptor SingleProducerSequencer.remainingCapacity logic
-        let next_value = self.next_value.load(Ordering::Relaxed);
+        // SAFETY: single-publisher exclusive access.
+        let next_value = unsafe { self.next_value() };
         let consumed = self.get_minimum_sequence();
 
         // If no consumers are registered, consumed will be i64::MAX

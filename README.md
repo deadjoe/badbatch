@@ -237,9 +237,14 @@ fn main() {
 }
 ```
 
-**API note (modernization):** Prefer the Builder path (`build_*` + `WaitStrategy` types such as `BusySpinWaitStrategy` or simplified `simple_wait_strategy::BusySpin`). Same-stage parallel handlers use **WorkerPool work-sharing** (CAS claim — each sequence processed by exactly one worker). User-owned threads: `EventPoller` / `open_single_producer_poller`. `ElegantConsumer` remains for lightweight experiments.
+**API surface (preferred first):**
 
-See `docs/MODERNIZATION.md` for architecture decisions.
+1. **Builder** — `build_single_producer` / `build_multi_producer` (default production path)
+2. **EventPoller** — `open_single_producer_poller` for user-owned threads
+3. **LMAX DSL** — `Disruptor::…` behind feature `lmax-dsl` (on by default)
+4. **Extras** — `ElegantConsumer` behind feature `extras` (on by default)
+
+Core-only build: `cargo test --no-default-features`. Same-stage parallel handlers use **WorkerPool work-sharing** (CAS claim). See `docs/MODERNIZATION.md`.
 
 ## 🔧 Development
 

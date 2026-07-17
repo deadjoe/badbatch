@@ -53,6 +53,9 @@ pub mod internal_log;
 // Event processing
 pub mod event_processor;
 
+// Unified sequential + WorkerPool consumer loops
+pub mod consumer_engine;
+
 // Sequence barriers for coordination
 pub mod sequence_barrier;
 
@@ -71,19 +74,22 @@ pub mod builder;
 // Thread management and CPU affinity (inspired by disruptor-rs)
 pub mod thread_management;
 
-// Elegant consumer handling (inspired by disruptor-rs)
+// Elegant consumer handling (inspired by disruptor-rs) — optional extras surface
+#[cfg(feature = "extras")]
 pub mod elegant_consumer;
 
 // User-driven event polling (inspired by disruptor-rs)
 pub mod event_poller;
 
-// Main Disruptor DSL
+// Main Disruptor DSL (LMAX-style) — available under `lmax-dsl` feature (default on)
+#[cfg(feature = "lmax-dsl")]
 #[allow(clippy::module_inception)]
 pub mod disruptor;
 
 // Re-export core types for convenience
 pub use sequence::Sequence;
 // pub use core_interfaces::{Cursored, Sequenced, DataProvider, EventSink}; // Temporarily disabled
+#[cfg(feature = "lmax-dsl")]
 pub use disruptor::Disruptor;
 pub use event_factory::{DefaultEventFactory, EventFactory};
 pub use event_handler::{EventHandler, NoOpEventHandler};
@@ -101,8 +107,9 @@ pub use wait_strategy::{
     YieldingWaitStrategy,
 };
 
-// Re-export builder functions and producer types (inspired by disruptor-rs)
+// Preferred public path: monomorphized Builder + Producer + EventPoller
 pub use builder::{build_multi_producer, build_single_producer, CloneableProducer};
+#[cfg(feature = "extras")]
 pub use elegant_consumer::ElegantConsumer;
 pub use event_poller::{open_single_producer_poller, EventBatch, EventPoller, Polling};
 pub use producer::{MissingFreeSlots, Producer, RingBufferFull, SimpleProducer};

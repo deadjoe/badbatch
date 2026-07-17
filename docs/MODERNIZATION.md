@@ -16,12 +16,15 @@ Internal alignment doc for agent/developer work. Reflects **current intent**, no
 | Phase | Scope | Status |
 |-------|--------|--------|
 | 0 | Trust: honest docs/CI, Miri job, latest stable MSRV | done (MSRV 1.97 / v0.2.0; honest CI + Miri job) |
-| 1 | API convergence, WaitStrategy merge, module split, quarantine SharedRingBuffer | done (simple ZSTs impl WaitStrategy; ElegantConsumer demoted in docs; SharedRingBuffer honesty) |
-| 2 | Monomorphize hot path (`W`/`Barrier`/`Handler`), remove hot-path `dyn` | done (`Arc<W>`, `ProcessingSequenceBarrier<W>`, owned `H`) |
-| 3 | LMAX WorkerPool / CAS work-sequence for same-stage parallel consumers (no slot Mutex) | done (scheme A CAS claim; post-review fix: no re-claim on wait retry) |
-| 4 | Slot padding Align128; unify with Sequence 128B padding model | done (`CacheLine128`; `with_cache_line_padding` → 128) |
-| 5 | Verification: Miri, loom (as useful), TLA consistency, bench notes | done for this pass (Miri CI job, CONSISTENCY notes; loom deferred) |
-| 6 | Optional: EventPoller, read-only fan-out typing | EventPoller done (`open_single_producer_poller`); read-only fan-out deferred |
+| 1 | API convergence, WaitStrategy merge, module split, quarantine SharedRingBuffer | done (`lmax-dsl` / `extras` features; preferred Builder+Poller; SharedRingBuffer honesty) |
+| 2 | Monomorphize hot path (`W`/`Barrier`/`Handler`), remove hot-path `dyn` | done |
+| 3 | LMAX WorkerPool / CAS work-sequence for same-stage parallel consumers (no slot Mutex) | done |
+| 4 | Slot padding Align128; unify with Sequence 128B padding model | done |
+| 5 | Verification: Miri, loom (as useful), TLA consistency, bench notes | done (Miri CI; claim stress test; baseline script; loom optional deferred) |
+| 6 | EventPoller / read-only fan-out | EventPoller done; read-only fan-out deferred |
+| N1 | Unified consumer engine | done (`consumer_engine`; Builder + BatchEventProcessor share loops) |
+| N2 | macOS performance baseline harness | done (`scripts/run_baseline.sh`) |
+| N3 | WorkerPool claim stress | done (`tests/worker_pool_claim_stress.rs`) |
 
 ## Architecture decisions
 
