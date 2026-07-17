@@ -10,7 +10,6 @@ mod fluent;
 mod handle;
 
 #[cfg(test)]
-#[path = "tests.rs"]
 mod tests;
 
 pub use consumer::{Consumer, HasConsumers, NoConsumers};

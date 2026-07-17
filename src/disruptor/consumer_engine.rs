@@ -9,26 +9,71 @@
 
 use crate::disruptor::{
     sequence_barrier::{ProcessingSequenceBarrier, SequenceBarrier},
-    EventHandler, ExceptionHandler, RingBuffer, Sequence, WaitStrategy, INITIAL_CURSOR_VALUE,
+    DisruptorError, EventHandler, ExceptionHandler, Result, RingBuffer, Sequence, WaitStrategy,
+    INITIAL_CURSOR_VALUE,
 };
 use crossbeam_utils::CachePadded;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
-/// Stop conditions for a consumer loop.
+/// How a managed consumer executes once a barrier is ready.
+#[derive(Clone)]
+pub enum RunMode {
+    /// Exclusive sequential drain (single mutable or any fan-out consumer).
+    Sequential,
+    /// LMAX WorkerPool: CAS-claim from shared work cursor.
+    WorkPool(Arc<CachePadded<AtomicI64>>),
+}
+
+/// Single stop source for consumer loops (no dual-flag / static convention).
+#[derive(Clone, Copy)]
+pub enum StopFlag<'a> {
+    /// Builder path: `true` means shut down.
+    External(&'a AtomicBool),
+    /// BatchEventProcessor path: `false` means halt (pair with barrier.alert()).
+    Running(&'a AtomicBool),
+}
+
+impl StopFlag<'_> {
+    /// Whether the consumer loop should keep processing.
+    #[inline]
+    pub fn should_continue(self) -> bool {
+        match self {
+            Self::External(flag) => !flag.load(Ordering::Acquire),
+            Self::Running(flag) => flag.load(Ordering::Acquire),
+        }
+    }
+}
+
+/// Control block for a consumer loop iteration.
 #[derive(Clone, Copy)]
 pub struct LoopControl<'a> {
-    /// Cooperative shutdown flag (Builder path).
-    pub shutdown: &'a AtomicBool,
-    /// Optional running flag (BatchEventProcessor path). When `Some` and false, exit.
-    pub running: Option<&'a AtomicBool>,
+    /// Cooperative stop source for this loop.
+    pub stop: StopFlag<'a>,
 }
 
 impl LoopControl<'_> {
     #[inline]
     fn should_continue(self) -> bool {
-        !self.shutdown.load(Ordering::Acquire)
-            && self.running.is_none_or(|r| r.load(Ordering::Acquire))
+        self.stop.should_continue()
+    }
+
+    /// Wait until `sequence` is available or stop/alert interrupts.
+    fn wait_for<W: WaitStrategy + 'static>(
+        self,
+        barrier: &ProcessingSequenceBarrier<W>,
+        sequence: i64,
+    ) -> Result<i64> {
+        match self.stop {
+            StopFlag::External(shutdown) => barrier.wait_for_with_shutdown(sequence, shutdown),
+            StopFlag::Running(running) => {
+                if !running.load(Ordering::Acquire) {
+                    return Err(DisruptorError::Alert);
+                }
+                // Halt pairs `running=false` with `barrier.alert()`.
+                barrier.wait_for(sequence)
+            }
+        }
     }
 }
 
@@ -78,7 +123,7 @@ pub fn run_sequential_batch_loop_with_exceptions<E, H, W>(
     let mut next_sequence = consumer_sequence.get() + 1;
 
     while control.should_continue() {
-        match sequence_barrier.wait_for_with_shutdown(next_sequence, control.shutdown) {
+        match control.wait_for(sequence_barrier, next_sequence) {
             Ok(available_sequence) => {
                 if available_sequence < next_sequence {
                     continue;
@@ -162,7 +207,7 @@ pub fn run_work_processor_loop<E, H, W>(
             if !control.should_continue() {
                 break 'work;
             }
-            match sequence_barrier.wait_for_with_shutdown(claimed, control.shutdown) {
+            match control.wait_for(sequence_barrier, claimed) {
                 Ok(available) => cached_available = available,
                 Err(_) if !control.should_continue() => break 'work,
                 Err(_) => std::hint::spin_loop(),
@@ -215,7 +260,7 @@ pub fn run_sequential_readonly_loop<E, F, W>(
     let mut next_sequence = consumer_sequence.get() + 1;
 
     while control.should_continue() {
-        match sequence_barrier.wait_for_with_shutdown(next_sequence, control.shutdown) {
+        match control.wait_for(sequence_barrier, next_sequence) {
             Ok(available_sequence) => {
                 if available_sequence < next_sequence {
                     continue;
@@ -332,11 +377,11 @@ mod tests {
             &mut handler,
             &consumer_seq,
             LoopControl {
-                shutdown: &shutdown,
-                running: Some(&running),
+                stop: StopFlag::Running(&running),
             },
             "engine-test",
         );
+        let _ = shutdown;
 
         assert_eq!(count.load(Ordering::SeqCst), 5);
         assert_eq!(consumer_seq.get(), 4);

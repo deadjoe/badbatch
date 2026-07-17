@@ -5,7 +5,7 @@
 //! sequence barriers to ensure proper ordering and dependencies.
 
 use crate::disruptor::{
-    consumer_engine::{self, LoopControl},
+    consumer_engine::{self, LoopControl, StopFlag},
     DisruptorError, EventHandler, ExceptionHandler, ProcessingSequenceBarrier, Result, RingBuffer,
     Sequence, SequenceBarrier, WaitStrategy,
 };
@@ -13,9 +13,6 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-
-/// Shared false flag for BatchEventProcessor path (stop is via `running` + barrier alert).
-static BEP_NEVER_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 /// Trait for event processors
 ///
@@ -197,8 +194,7 @@ where
             handler,
             &self.sequence,
             LoopControl {
-                shutdown: &BEP_NEVER_SHUTDOWN,
-                running: Some(&self.running),
+                stop: StopFlag::Running(&self.running),
             },
             "batch-event-processor",
             Some(self.exception_handler.as_ref()),

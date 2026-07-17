@@ -1,5 +1,12 @@
 //! Read-only fan-out: every same-stage consumer sees every sequence (`&E`).
-//! Distinct from WorkerPool work-sharing (CAS claim, one consumer per sequence).
+//! Distinct from `WorkerPool` work-sharing (CAS claim, one consumer per sequence).
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::items_after_statements,
+    clippy::similar_names
+)]
 
 use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
 use std::collections::BTreeSet;
@@ -17,25 +24,25 @@ fn fan_out_both_consumers_see_all_sequences() {
     const TOTAL: i64 = 10_000;
     const BUFFER: usize = 1024;
 
-    let a = Arc::new(Mutex::new(Vec::with_capacity(TOTAL as usize)));
-    let b = Arc::new(Mutex::new(Vec::with_capacity(TOTAL as usize)));
-    let ca = Arc::new(AtomicU64::new(0));
-    let cb = Arc::new(AtomicU64::new(0));
-    let a_h = Arc::clone(&a);
-    let b_h = Arc::clone(&b);
-    let ca_h = Arc::clone(&ca);
-    let cb_h = Arc::clone(&cb);
+    let seqs_a = Arc::new(Mutex::new(Vec::with_capacity(TOTAL as usize)));
+    let seqs_b = Arc::new(Mutex::new(Vec::with_capacity(TOTAL as usize)));
+    let count_a = Arc::new(AtomicU64::new(0));
+    let count_b = Arc::new(AtomicU64::new(0));
+    let seqs_a_h = Arc::clone(&seqs_a);
+    let seqs_b_h = Arc::clone(&seqs_b);
+    let count_a_h = Arc::clone(&count_a);
+    let count_b_h = Arc::clone(&count_b);
 
     let mut d = build_single_producer(BUFFER, Ev::default, BusySpinWaitStrategy)
         .fan_out_events_with(move |e: &Ev, sequence, _| {
             assert_eq!(e.v, sequence);
-            a_h.lock().unwrap().push(sequence);
-            ca_h.fetch_add(1, Ordering::Relaxed);
+            seqs_a_h.lock().unwrap().push(sequence);
+            count_a_h.fetch_add(1, Ordering::Relaxed);
         })
         .fan_out_events_with(move |e: &Ev, sequence, _| {
             assert_eq!(e.v, sequence);
-            b_h.lock().unwrap().push(sequence);
-            cb_h.fetch_add(1, Ordering::Relaxed);
+            seqs_b_h.lock().unwrap().push(sequence);
+            count_b_h.fetch_add(1, Ordering::Relaxed);
         })
         .build();
 
@@ -44,22 +51,23 @@ fn fan_out_both_consumers_see_all_sequences() {
     }
 
     let deadline = Instant::now() + Duration::from_secs(15);
-    while (ca.load(Ordering::Acquire) < TOTAL as u64 || cb.load(Ordering::Acquire) < TOTAL as u64)
+    while (count_a.load(Ordering::Acquire) < TOTAL as u64
+        || count_b.load(Ordering::Acquire) < TOTAL as u64)
         && Instant::now() < deadline
     {
         std::hint::spin_loop();
     }
     d.shutdown();
 
-    assert_eq!(ca.load(Ordering::Acquire), TOTAL as u64);
-    assert_eq!(cb.load(Ordering::Acquire), TOTAL as u64);
+    assert_eq!(count_a.load(Ordering::Acquire), TOTAL as u64);
+    assert_eq!(count_b.load(Ordering::Acquire), TOTAL as u64);
 
-    for list in [&a, &b] {
+    for list in [&seqs_a, &seqs_b] {
         let mut vals = list.lock().unwrap().clone();
         vals.sort_unstable();
         let unique: BTreeSet<_> = vals.iter().copied().collect();
         assert_eq!(unique.len(), vals.len());
-        assert_eq!(vals.len() as i64, TOTAL);
+        assert_eq!(vals.len(), TOTAL as usize);
         assert_eq!(vals[0], 0);
         assert_eq!(*vals.last().unwrap(), TOTAL - 1);
     }
@@ -77,38 +85,40 @@ fn cannot_mix_fanout_and_mutable_on_same_stage() {
 #[test]
 fn worker_pool_still_partitions_not_fanout() {
     // Control: two mutable handlers must NOT both see all events.
-    let a = Arc::new(AtomicU64::new(0));
-    let b = Arc::new(AtomicU64::new(0));
-    let a_h = Arc::clone(&a);
-    let b_h = Arc::clone(&b);
     const TOTAL: u64 = 5_000;
+
+    let count_a = Arc::new(AtomicU64::new(0));
+    let count_b = Arc::new(AtomicU64::new(0));
+    let count_a_h = Arc::clone(&count_a);
+    let count_b_h = Arc::clone(&count_b);
 
     let mut d = build_single_producer(1024, Ev::default, BusySpinWaitStrategy)
         .handle_events_with(move |_e: &mut Ev, _, _| {
-            a_h.fetch_add(1, Ordering::Relaxed);
+            count_a_h.fetch_add(1, Ordering::Relaxed);
         })
         .handle_events_with(move |_e: &mut Ev, _, _| {
-            b_h.fetch_add(1, Ordering::Relaxed);
+            count_b_h.fetch_add(1, Ordering::Relaxed);
         })
         .build();
 
     for i in 0..TOTAL {
-        d.publish(|e| e.v = i as i64);
+        d.publish(|e| e.v = i.cast_signed());
     }
 
     let deadline = Instant::now() + Duration::from_secs(15);
-    while a.load(Ordering::Acquire) + b.load(Ordering::Acquire) < TOTAL && Instant::now() < deadline
+    while count_a.load(Ordering::Acquire) + count_b.load(Ordering::Acquire) < TOTAL
+        && Instant::now() < deadline
     {
         std::hint::spin_loop();
     }
     d.shutdown();
 
-    let sum = a.load(Ordering::Acquire) + b.load(Ordering::Acquire);
+    let sum = count_a.load(Ordering::Acquire) + count_b.load(Ordering::Acquire);
     assert_eq!(sum, TOTAL);
     // Work-sharing: neither side should have seen *all* events (probabilistically
     // for large N; strict: neither equals TOTAL unless one starves entirely).
-    assert!(a.load(Ordering::Acquire) > 0);
-    assert!(b.load(Ordering::Acquire) > 0);
-    assert!(a.load(Ordering::Acquire) < TOTAL);
-    assert!(b.load(Ordering::Acquire) < TOTAL);
+    assert!(count_a.load(Ordering::Acquire) > 0);
+    assert!(count_b.load(Ordering::Acquire) > 0);
+    assert!(count_a.load(Ordering::Acquire) < TOTAL);
+    assert!(count_b.load(Ordering::Acquire) < TOTAL);
 }
