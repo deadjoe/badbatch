@@ -68,6 +68,12 @@ All 5 TLA+ models re-verified successfully after these changes.
 2. **SP `next_value`/`cached_value` → `UnsafeCell`**: still single-publisher exclusive; cursor/gating remain the cross-thread coordination surface (matches LMAX nextValue/cachedValue thread discipline).
 3. **API features**: `lmax-dsl` / `extras` gate secondary surfaces; default keeps them on for continuity.
 
+## Round-5 Concurrency evidence (2026-07-17)
+
+1. **Loom** (`tests/loom_work_claim.rs`): pure CAS claim algorithm (work cursor init -1, claim if next < max) under exhaustive interleavings — partitions sequences with no duplicates. Maps to WorkerPool / multi-producer claim shape; does not model full barrier wait.
+2. **Stress** (`worker_pool_claim_stress`, `mpsc_exactly_once_stress`): large-N unique claims; MPSC 4-producer exactly-once contiguous consume; SPSC pipeline stage-order belt check.
+3. Re-run: `./scripts/loom-smoke.sh` and `cargo test --test mpsc_exactly_once_stress --release`.
+
 ## Suggested Model Enhancements (Optional)
 
 - Add a simple safety property asserting per-reader monotonic consumption (prefix strictly increasing), though it’s already implied by the state machine and `Liveness`.

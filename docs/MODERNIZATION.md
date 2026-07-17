@@ -27,6 +27,7 @@ Internal alignment doc for agent/developer work. Reflects **current intent**, no
 | N3 | WorkerPool claim stress | done (`tests/worker_pool_claim_stress.rs`) |
 | P0 | Performance evidence closed loop | done (3-run medians on Apple Silicon; padding/batch/contention conclusions) |
 | P1 | builder split + feature/docs tighten | done (`builder/{core,consumer,handle,fluent,entry}`; core-only CI job) |
+| P2 | Loom claim models + MPSC exactly-once stress | done (`tests/loom_work_claim.rs`, `mpsc_exactly_once_stress.rs`, CI loom job) |
 
 ## Architecture decisions
 
