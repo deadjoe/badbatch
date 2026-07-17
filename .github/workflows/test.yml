@@ -1,115 +1,124 @@
+# CI gate for BadBatch (Linux).
+#
+# Jobs:
+#   test  — fmt, clippy, full suite via scripts/test-all.sh, core-only + stress
+#   loom  — small WorkerPool claim models (release)
+#   miri  — nightly Miri on ring_buffer + sequence (must override rust-toolchain.toml)
+#
+# The repo pins `stable` via rust-toolchain.toml. The Miri job sets
+# RUSTUP_TOOLCHAIN=nightly so cargo/miri do not fall back to stable (which has no miri).
+
 name: Tests
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main ]
+    branches: [main]
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
 
 jobs:
   test:
     name: Test (Linux stable)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Install Rust (stable)
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt, clippy, llvm-tools-preview
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
-    - name: Cache dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-stable
+          cache-on-failure: true
 
-    - name: Install testing tools
-      run: |
-        cargo install cargo-llvm-cov cargo-audit cargo-deny --locked || cargo install cargo-llvm-cov cargo-audit cargo-deny
+      - name: Install cargo-audit and cargo-deny
+        run: |
+          cargo install cargo-audit cargo-deny --locked --force 2>/dev/null \
+            || cargo install cargo-audit cargo-deny --locked
 
-    - name: Make test script executable
-      run: chmod +x scripts/test-all.sh
+      - name: Full test suite (fmt, clippy, tests, audit, deny, …)
+        env:
+          BB_CI: "1"
+          # Coverage is optional locally; skip in CI to keep the gate fast and reliable.
+          BB_SKIP_COVERAGE: "1"
+        run: |
+          chmod +x scripts/test-all.sh
+          ./scripts/test-all.sh
 
-    - name: Run test suite
-      env:
-        BB_CI: "1"
-      run: ./scripts/test-all.sh
+      - name: Core-only library tests (--no-default-features)
+        run: cargo test --lib --no-default-features --locked
 
-    - name: Core-only library tests (no default features)
-      run: cargo test --lib --no-default-features --locked
-
-    - name: Concurrency stress (claim + MPSC exactly-once)
-      run: |
-        cargo test --test worker_pool_claim_stress --test mpsc_exactly_once_stress --release --locked
+      - name: Concurrency stress (claim + MPSC exactly-once, release)
+        run: |
+          cargo test --test worker_pool_claim_stress --test mpsc_exactly_once_stress --release --locked
 
   loom:
     name: Loom claim models
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Install Rust (stable)
-      uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
 
-    - name: Cache dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-loom-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-loom-
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: loom-stable
+          cache-on-failure: true
 
-    - name: Loom — WorkerPool / multi-claim models
-      # Keep models tiny; release mode recommended for loom.
-      run: cargo test --test loom_work_claim --release --locked
+      - name: Loom — WorkerPool / multi-claim models
+        # Keep models tiny; release mode recommended for loom.
+        run: cargo test --test loom_work_claim --release --locked
 
   miri:
     name: Miri (nightly)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Override repo rust-toolchain.toml (channel = stable) for this job only.
+      RUSTUP_TOOLCHAIN: nightly
+      MIRIFLAGS: -Zmiri-strict-provenance
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Install Rust (nightly + miri)
-      uses: dtolnay/rust-toolchain@nightly
-      with:
-        components: miri
+      - name: Install Rust (nightly + miri)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+          # Ensure the installed toolchain name matches RUSTUP_TOOLCHAIN.
+          toolchain: nightly
 
-    - name: Cache dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-miri-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-miri-
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: miri-nightly
+          cache-on-failure: true
 
-    - name: Setup Miri
-      run: cargo miri setup
+      - name: Setup Miri
+        run: cargo miri setup
 
-    - name: Miri — ring buffer / sequence safety subset
-      # Full concurrent suites are too slow/noisy under Miri; focus on the
-      # aliasing-critical ring buffer and sequence primitives that use unsafe.
-      # Precise module filters avoid pulling in proptest (needs cwd under isolation).
-      env:
-        MIRIFLAGS: -Zmiri-strict-provenance
-      run: |
-        cargo miri test --lib disruptor::ring_buffer::tests
-        cargo miri test --lib disruptor::sequence::tests -- --skip thread_safety
+      - name: Miri — ring buffer / sequence safety subset
+        # Full concurrent suites are too slow/noisy under Miri; focus on the
+        # aliasing-critical ring buffer and sequence primitives that use unsafe.
+        # Precise module filters avoid pulling in proptest (cwd isolation issues).
+        run: |
+          cargo miri test --lib disruptor::ring_buffer::tests
+          cargo miri test --lib disruptor::sequence::tests -- --skip thread_safety

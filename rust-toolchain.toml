@@ -1,5 +1,8 @@
-# Always use the latest stable toolchain via rustup (CI and local).
+# Default toolchain for local work and most CI jobs.
 # MSRV is declared separately as package.rust-version in Cargo.toml.
+#
+# CI Miri job must not use this channel: it sets RUSTUP_TOOLCHAIN=nightly
+# (see .github/workflows/test.yml). Do not put miri here — it is nightly-only.
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]
