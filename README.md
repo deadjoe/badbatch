@@ -297,6 +297,20 @@ cargo bench --bench throughput_comparison
 cargo bench --bench latency_comparison
 ```
 
+### Repository notes
+
+- **`Cargo.lock` is tracked on purpose.** This is a library crate, but CI runs
+  `cargo test --locked` / audit / deny against a pinned graph so builds stay
+  reproducible. Dependents that use badbatch as a library do **not** inherit this
+  lockfile.
+- **`proptest-regressions/`** is proptest’s on-disk regression corpus (seed cases that
+  previously failed). Keep it under version control; do not delete casually. See
+  [proptest book — regression files](https://proptest.github.io/proptest/proptest/failure_persistence.html).
+- **Docs layout:** root `README.md` / `DESIGN.md` are the public surface;
+  `docs/MODERNIZATION.md` is the engineering alignment map; `docs/private/` is
+  gitignored for local drafts. See [`docs/README.md`](docs/README.md).
+- **Changelog / MSRV:** see [`CHANGELOG.md`](CHANGELOG.md).
+
 ### Code Quality
 
 ```bash
