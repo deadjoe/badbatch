@@ -299,6 +299,10 @@ cargo bench --bench latency_comparison
 
 ### Repository notes
 
+- **Cross-thread sharing of the ring** uses the Disruptor protocol only
+  (`build_*_producer`, `CloneableProducer`, consumers, `EventPoller`). There is
+  no mutex-wrapped “shared ring buffer” API — that pattern bypasses claim/publish
+  and is not lock-free.
 - **`Cargo.lock` is tracked on purpose.** This is a library crate, but CI runs
   `cargo test --locked` / audit / deny against a pinned graph so builds stay
   reproducible. Dependents that use badbatch as a library do **not** inherit this

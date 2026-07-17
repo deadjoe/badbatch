@@ -36,6 +36,9 @@ compiler, or when CI stabilizes on a new stable series. Patch toolchain updates
 
 - Dishonest `Clone` on consumer join-handle ownership paths.
 - Dual fluent `ClosureEventHandler` and static stop conventions.
+- **`SharedRingBuffer` and feature `shared-ring-buffer`** — was a global `RwLock`
+  over the ring (not LMAX protocol). Share via Builder / `CloneableProducer` /
+  `EventPoller` instead.
 
 ## [0.1.x] — prior
 
