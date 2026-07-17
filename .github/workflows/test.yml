@@ -46,6 +46,9 @@ jobs:
         BB_CI: "1"
       run: ./scripts/test-all.sh
 
+    - name: Core-only library tests (no default features)
+      run: cargo test --lib --no-default-features --locked
+
   miri:
     name: Miri (nightly)
     runs-on: ubuntu-latest

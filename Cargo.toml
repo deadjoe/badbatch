@@ -34,8 +34,10 @@ proptest = "1.10"  # Property-based testing
 # Preferred core path is always on: Builder + Producer + EventPoller + sequencers.
 # `lmax-dsl` keeps the classic Disruptor DSL (default on for continuity of tests/docs).
 # `extras` gates ElegantConsumer and other experimental surfaces.
-# Core Builder/Poller always available. Optional surfaces enabled by default so
-# existing tests/docs keep compiling; use `--no-default-features` for the slim core.
+# Core (always on): Builder + Producer + EventPoller + sequencers + consumer_engine.
+# Optional surfaces stay default-on for continuity; CI also runs --no-default-features.
+#   lmax-dsl — classic Disruptor DSL / BatchEventProcessor-oriented API
+#   extras   — ElegantConsumer and similar experimental helpers
 default = ["lmax-dsl", "extras"]
 lmax-dsl = []
 extras = []
