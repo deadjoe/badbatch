@@ -9,7 +9,7 @@
 //! Analysis of API discrepancies between documentation and implementation
 //!
 //! This test file specifically checks for discrepancies between what's documented
-//! in README.md and DESIGN.md versus what's actually implemented.
+//! in README.md and docs/DESIGN.md versus what's actually implemented.
 
 use badbatch::disruptor::*;
 

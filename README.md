@@ -1,8 +1,5 @@
 <div align="center">
   <img src="badbatch.png" alt="BadBatch logo" width="200"/>
-
-  # BadBatch
-
   [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
   [![Tests](https://github.com/deadjoe/badbatch/workflows/Tests/badge.svg)](https://github.com/deadjoe/badbatch/actions)
 </div>
@@ -107,7 +104,7 @@ let (mut poller, mut producer) =
 
 Core-only: `cargo test --lib --no-default-features`.
 
-Engineering notes: [`docs/MODERNIZATION.md`](docs/MODERNIZATION.md), [`docs/README.md`](docs/README.md).
+Engineering notes: [`docs/MODERNIZATION.md`](docs/MODERNIZATION.md). Design background: [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ---
 
@@ -249,7 +246,7 @@ CI (GitHub Actions): stable tests, `--no-default-features`, loom claim tests, Mi
 | Formal methods | TLA+ **model checking** under `verification/` (not a complete proof of the Rust binary) |
 | Performance claims | No portable “N Mops” guarantee; use benches + `BASELINE.md` as machine-specific data |
 
-Design background: [`DESIGN.md`](DESIGN.md). Consistency notes: [`verification/CONSISTENCY.md`](verification/CONSISTENCY.md).
+Consistency notes: [`verification/CONSISTENCY.md`](verification/CONSISTENCY.md).
 
 ### TLA+ models
 
@@ -291,7 +288,9 @@ Copyright 2025–2026 Joe <smartjoe@gmail.com>
 ## Links
 
 - [Issues](https://github.com/deadjoe/badbatch/issues)  
-- [DESIGN.md](DESIGN.md)  
+- [docs/DESIGN.md](docs/DESIGN.md)  
 - [CHANGELOG.md](CHANGELOG.md)  
 - [verification/](verification/)  
 - [benches/](benches/)  
+- [benches/README.md](benches/README.md)  
+ 

@@ -6,7 +6,7 @@
     clippy::cargo
 )]
 
-//! Test file to verify that the API examples in README.md and DESIGN.md actually compile and work
+//! Test file to verify that the API examples in README.md and docs/DESIGN.md actually compile and work
 //!
 //! This test verifies that the documented API patterns work correctly with the current codebase.
 
