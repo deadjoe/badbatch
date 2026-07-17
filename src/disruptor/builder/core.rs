@@ -156,11 +156,25 @@ where
         widths
     });
 
-    // LMAX WorkerPool scheme A: one shared work-sequence cursor per parallel stage.
+    // Per-stage mode: WorkerPool only when multiple *mutable* handlers share a stage.
+    // Read-only fan-out stages never share a work cursor (each consumer sees all events).
+    let stage_readonly: Vec<bool> = stage_widths
+        .iter()
+        .enumerate()
+        .map(|(stage, _)| {
+            consumers
+                .iter()
+                .find(|c| c.stage_index == stage)
+                .is_some_and(|c| c.readonly)
+        })
+        .collect();
+
     let stage_work_sequences: Vec<Option<Arc<CachePadded<AtomicI64>>>> = stage_widths
         .iter()
-        .map(|width| {
-            if *width > 1 {
+        .enumerate()
+        .map(|(stage, width)| {
+            let readonly = stage_readonly.get(stage).copied().unwrap_or(false);
+            if *width > 1 && !readonly {
                 Some(consumer_engine::new_work_sequence())
             } else {
                 None
@@ -182,6 +196,7 @@ where
             thread_name,
             cpu_affinity,
             stage_index,
+            readonly: _,
         } = consumer_info;
 
         let dependent_sequences = if stage_index == 0 {

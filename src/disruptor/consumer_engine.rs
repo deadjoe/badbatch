@@ -196,6 +196,60 @@ pub fn new_work_sequence() -> Arc<CachePadded<AtomicI64>> {
     Arc::new(CachePadded::new(AtomicI64::new(INITIAL_CURSOR_VALUE)))
 }
 
+/// Sequential **read-only** fan-out loop: every consumer sees every published sequence
+/// via shared `&E` (no exclusive claim, no slot locks).
+///
+/// Distinct from WorkerPool: this is broadcast-style observation, not work-sharing.
+pub fn run_sequential_readonly_loop<E, F, W>(
+    ring_buffer: &RingBuffer<E>,
+    sequence_barrier: &ProcessingSequenceBarrier<W>,
+    on_event: &mut F,
+    consumer_sequence: &Sequence,
+    control: LoopControl<'_>,
+    thread_name: &str,
+) where
+    E: Send + Sync,
+    F: FnMut(&E, i64, bool) -> crate::disruptor::Result<()>,
+    W: WaitStrategy + 'static,
+{
+    let mut next_sequence = consumer_sequence.get() + 1;
+
+    while control.should_continue() {
+        match sequence_barrier.wait_for_with_shutdown(next_sequence, control.shutdown) {
+            Ok(available_sequence) => {
+                if available_sequence < next_sequence {
+                    continue;
+                }
+
+                while next_sequence <= available_sequence {
+                    let end_of_batch = next_sequence == available_sequence;
+                    // Immutable shared access: fan-out consumers do not mutate slots.
+                    let event = ring_buffer.get(next_sequence);
+                    if let Err(e) = on_event(event, next_sequence, end_of_batch) {
+                        #[cfg(debug_assertions)]
+                        {
+                            eprintln!(
+                                "Readonly fan-out error in '{thread_name}' at sequence {next_sequence}: {e:?}"
+                            );
+                        }
+                        #[cfg(not(debug_assertions))]
+                        {
+                            let _ = (e, thread_name);
+                        }
+                    }
+                    next_sequence += 1;
+                }
+
+                consumer_sequence.set(available_sequence);
+            }
+            Err(_) if !control.should_continue() => break,
+            Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

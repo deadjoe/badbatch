@@ -244,7 +244,14 @@ fn main() {
 3. **LMAX DSL** — `Disruptor::…` behind feature `lmax-dsl` (on by default)
 4. **Extras** — `ElegantConsumer` behind feature `extras` (on by default)
 
-Core-only build: `cargo test --no-default-features`. Same-stage parallel handlers use **WorkerPool work-sharing** (CAS claim). See `docs/MODERNIZATION.md`.
+**Same-stage parallelism (two different modes — do not mix on one stage):**
+
+| API | Semantics |
+|-----|-----------|
+| `handle_events_with` (2+) | **WorkerPool** work-sharing: CAS claim, one mutable handler per sequence |
+| `fan_out_events_with` (1+) | **Read-only fan-out**: every consumer sees every event via `&E` |
+
+Core-only build: `cargo test --no-default-features`. See `docs/MODERNIZATION.md`.
 
 **Performance baseline (macOS):** checked-in medians in `benches/results/BASELINE.md`. Reproduce:
 
