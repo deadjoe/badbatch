@@ -23,8 +23,9 @@ Internal alignment doc for agent/developer work. Reflects **current intent**, no
 | 5 | Verification: Miri, loom (as useful), TLA consistency, bench notes | done (Miri CI; claim stress test; baseline script; loom optional deferred) |
 | 6 | EventPoller / read-only fan-out | EventPoller done; read-only fan-out deferred |
 | N1 | Unified consumer engine | done (`consumer_engine`; Builder + BatchEventProcessor share loops) |
-| N2 | macOS performance baseline harness | done (`scripts/run_baseline.sh`) |
+| N2 | macOS performance baseline harness | done (`baseline_metrics` + `benches/results/BASELINE.md` medians) |
 | N3 | WorkerPool claim stress | done (`tests/worker_pool_claim_stress.rs`) |
+| P0 | Performance evidence closed loop | done (3-run medians on Apple Silicon; padding/batch/contention conclusions) |
 
 ## Architecture decisions
 
