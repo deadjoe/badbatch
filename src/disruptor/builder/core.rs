@@ -1,10 +1,10 @@
-//! DisruptorCore and topology assembly (create_disruptor_core).
+//! DisruptorCore and topology assembly (`create_disruptor_core`).
 //!
-//! Consumer threads are started here; the hot loops live in [`crate::disruptor::consumer_engine`].
+//! Consumer threads are started here; hot loops live in [`crate::disruptor::consumer_engine`].
 
 use super::consumer::{Consumer, ConsumerInfo, ConsumerThreadConfig};
 use crate::disruptor::{
-    consumer_engine,
+    consumer_engine::RunMode,
     event_factory::ClosureEventFactory,
     producer::SimpleProducer,
     ring_buffer::SlotPadding,
@@ -12,28 +12,24 @@ use crate::disruptor::{
     sequencer::{MultiProducerSequencer, SequencerEnum, SingleProducerSequencer},
     RingBuffer, Sequence, Sequencer, WaitStrategy,
 };
-use crossbeam_utils::CachePadded;
-use std::sync::{
-    atomic::{AtomicBool, AtomicI64, Ordering},
-    Arc,
-};
+use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
 
-/// Core Disruptor components shared between DSL and Builder APIs
+/// Core Disruptor components shared between DSL and Builder APIs.
 ///
-/// This struct contains the common implementation used by both the DSL-style
-/// Disruptor class and the Builder-style API to avoid code duplication.
+/// Holds the ring buffer, sequencer, consumer handles, and gating sequences so
+/// both the classic DSL and the type-state Builder share one assembly path.
 #[derive(Debug, Clone)]
 pub struct DisruptorCore<E, W>
 where
     W: WaitStrategy + 'static,
 {
-    /// Shared ring buffer storing all events managed by the disruptor.
+    /// Shared ring buffer storing events.
     pub ring_buffer: Arc<RingBuffer<E>>,
-    /// Sequencer coordinating producer access to the ring buffer (enum dispatch, no vtable).
+    /// Sequencer coordinating producer access (enum dispatch, no vtable).
     pub sequencer: SequencerEnum<W>,
-    /// Consumer handles that process published events.
+    /// Managed consumer threads.
     pub consumers: Vec<Consumer>,
-    /// Shared flag signaling graceful shutdown to consumer threads.
+    /// Cooperative shutdown flag observed by builder-spawned consumers.
     pub shutdown_flag: Arc<AtomicBool>,
     gating_sequences: Vec<Arc<Sequence>>,
 }
@@ -43,7 +39,7 @@ where
     E: Send + Sync + 'static,
     W: WaitStrategy + 'static,
 {
-    /// Create a new DisruptorCore with the given components
+    /// Create a core from already-assembled components.
     pub fn new(
         ring_buffer: Arc<RingBuffer<E>>,
         sequencer: SequencerEnum<W>,
@@ -60,30 +56,29 @@ where
         }
     }
 
-    /// Get the buffer size
+    /// Ring buffer capacity (power of two).
     pub fn buffer_size(&self) -> usize {
         self.ring_buffer.buffer_size()
     }
 
-    /// Get the number of consumers
+    /// Number of started consumer threads.
     pub fn consumer_count(&self) -> usize {
         self.consumers.len()
     }
 
-    /// Shutdown all consumers
+    /// Signal shutdown and join all consumer threads.
     pub fn shutdown(&mut self) {
         if self.shutdown_flag.swap(true, Ordering::AcqRel) {
             return;
         }
 
-        // Wait for all consumer threads to finish
         for mut consumer in self.consumers.drain(..) {
             if let Some(handle) = consumer.join_handle.take() {
                 if let Err(e) = handle.join() {
                     #[cfg(debug_assertions)]
                     eprintln!(
-                        "Error joining consumer thread '{thread_name}': {e:?}",
-                        thread_name = consumer.thread_name
+                        "Error joining consumer thread '{}': {e:?}",
+                        consumer.thread_name
                     );
                     #[cfg(not(debug_assertions))]
                     let _ = e;
@@ -91,23 +86,18 @@ where
             }
         }
 
-        // Remove gating sequences to restore full producer capacity
         for sequence in self.gating_sequences.drain(..) {
             self.sequencer.remove_gating_sequence(sequence);
         }
     }
 
-    /// Create a producer for this disruptor core
+    /// Create a producer bound to this core's ring buffer and sequencer.
     pub fn create_producer(&self) -> SimpleProducer<E, W> {
         SimpleProducer::new(self.ring_buffer.clone(), self.sequencer.clone())
     }
 }
 
-/// Factory function to create a DisruptorCore from components
-///
-/// This function provides a unified way to create DisruptorCore instances
-/// that can be used by both DSL-style and Builder-style APIs.
-#[allow(clippy::too_many_lines)]
+/// Assemble ring, sequencer, barriers, and start consumers.
 pub fn create_disruptor_core<E, F, W>(
     size: usize,
     event_factory: F,
@@ -121,72 +111,38 @@ where
     F: Fn() -> E + Send + Sync + 'static,
     W: WaitStrategy + 'static,
 {
-    // Create the ring buffer
     let closure_factory = ClosureEventFactory::new(event_factory);
     let ring_buffer = Arc::new(
         RingBuffer::new_with_padding(size, closure_factory, slot_padding)
             .expect("Failed to create ring buffer"),
     );
 
-    // Monomorphized wait strategy — stored as Arc<W>, no dyn vtable.
     let wait_strategy_arc = Arc::new(wait_strategy);
-
-    // Create the appropriate sequencer
     let sequencer: SequencerEnum<W> = if is_multi_producer {
         SequencerEnum::Multi(Arc::new(MultiProducerSequencer::new(
             size,
-            wait_strategy_arc.clone(),
+            Arc::clone(&wait_strategy_arc),
         )))
     } else {
         SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
             size,
-            wait_strategy_arc.clone(),
+            Arc::clone(&wait_strategy_arc),
         )))
     };
 
-    // Create shutdown flag
     let shutdown_flag = Arc::new(AtomicBool::new(false));
 
-    let max_stage_index = consumers.iter().map(|consumer| consumer.stage_index).max();
-    let stage_widths = max_stage_index.map_or_else(Vec::new, |max_stage| {
-        let mut widths = vec![0_usize; max_stage + 1];
-        for consumer in &consumers {
-            widths[consumer.stage_index] += 1;
-        }
-        widths
-    });
-
-    // Per-stage mode: WorkerPool only when multiple *mutable* handlers share a stage.
-    // Read-only fan-out stages never share a work cursor (each consumer sees all events).
-    let stage_readonly: Vec<bool> = stage_widths
+    let stage_count = consumers
         .iter()
-        .enumerate()
-        .map(|(stage, _)| {
-            consumers
-                .iter()
-                .find(|c| c.stage_index == stage)
-                .is_some_and(|c| c.readonly)
-        })
-        .collect();
+        .map(|c| c.stage_index)
+        .max()
+        .map_or(0, |m| m + 1);
 
-    let stage_work_sequences: Vec<Option<Arc<CachePadded<AtomicI64>>>> = stage_widths
-        .iter()
-        .enumerate()
-        .map(|(stage, width)| {
-            let readonly = stage_readonly.get(stage).copied().unwrap_or(false);
-            if *width > 1 && !readonly {
-                Some(consumer_engine::new_work_sequence())
-            } else {
-                None
-            }
-        })
-        .collect();
+    let stage_modes = super::consumer::stage_run_modes(&consumers, stage_count.max(1));
 
-    // Start consumer threads
     let mut consumer_threads: Vec<Consumer> = Vec::new();
     let mut consumer_sequences: Vec<Arc<Sequence>> = Vec::new();
-    let mut stage_sequences = stage_widths
-        .iter()
+    let mut stage_sequences = (0..stage_count.max(1))
         .map(|_| Vec::<Arc<Sequence>>::new())
         .collect::<Vec<_>>();
 
@@ -196,59 +152,53 @@ where
             thread_name,
             cpu_affinity,
             stage_index,
-            readonly: _,
+            access: _,
         } = consumer_info;
 
         let dependent_sequences = if stage_index == 0 {
             Vec::new()
         } else {
-            let previous_stage_sequences = stage_sequences
+            let previous = stage_sequences
                 .get(stage_index - 1)
                 .expect("consumer stages must be contiguous");
             assert!(
-                !previous_stage_sequences.is_empty(),
+                !previous.is_empty(),
                 "dependent consumer stage must have upstream consumers"
             );
-            previous_stage_sequences.clone()
+            previous.clone()
         };
 
-        // Monomorphized barrier so wait_for has no dyn vtable on the hot path.
         let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
             sequencer.get_cursor(),
-            wait_strategy_arc.clone(),
+            Arc::clone(&wait_strategy_arc),
             dependent_sequences,
             sequencer.clone(),
         ));
 
-        let work_sequence = stage_work_sequences
+        let run_mode = stage_modes
             .get(stage_index)
-            .and_then(Option::as_ref)
-            .cloned();
+            .cloned()
+            .unwrap_or(RunMode::Sequential);
 
-        // Start the consumer thread
         let (consumer_sequence, consumer) = starter(
-            ring_buffer.clone(),
+            Arc::clone(&ring_buffer),
             sequence_barrier,
             ConsumerThreadConfig {
                 thread_name,
                 cpu_affinity,
-                shutdown_flag: shutdown_flag.clone(),
-                work_sequence,
+                shutdown_flag: Arc::clone(&shutdown_flag),
+                run_mode,
             },
         );
 
-        let stage_sequence = consumer_sequence.clone();
-        consumer_sequences.push(consumer_sequence);
+        consumer_sequences.push(Arc::clone(&consumer_sequence));
         stage_sequences
             .get_mut(stage_index)
             .expect("consumer stage must exist")
-            .push(stage_sequence);
+            .push(consumer_sequence);
         consumer_threads.push(consumer);
     }
 
-    // Register consumer sequences with the sequencer for backpressure.
-    // For parallel stages, each worker's sequence is a gating sequence; the
-    // minimum across workers provides correct backpressure (LMAX WorkerPool).
     if !consumer_sequences.is_empty() {
         sequencer.add_gating_sequences(&consumer_sequences);
     }
@@ -262,23 +212,10 @@ where
     )
 }
 
-/// Set CPU affinity for the current thread
-///
-/// This function attempts to pin the current thread to a specific CPU core.
-/// It uses the core_affinity crate for cross-platform support.
-///
-/// # Arguments
-/// * `core_id` - The CPU core ID to pin the thread to
-///
-/// # Returns
-/// * `Ok(())` if the affinity was set successfully
-/// * `Err(String)` if setting affinity failed
 pub(crate) fn set_thread_affinity(core_id: usize) -> Result<(), String> {
-    // Get available CPU cores
     let core_ids = core_affinity::get_core_ids()
         .ok_or_else(|| "Failed to get available CPU cores".to_string())?;
 
-    // Check if the requested core ID is valid
     if core_id >= core_ids.len() {
         return Err(format!(
             "Invalid core ID: {core_id}. Available cores: 0-{}",
@@ -286,7 +223,6 @@ pub(crate) fn set_thread_affinity(core_id: usize) -> Result<(), String> {
         ));
     }
 
-    // Set the affinity to the specified core
     let target_core = core_ids[core_id];
     if core_affinity::set_for_current(target_core) {
         Ok(())

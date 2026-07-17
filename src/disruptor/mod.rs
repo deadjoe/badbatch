@@ -92,7 +92,7 @@ pub use sequence::Sequence;
 #[cfg(feature = "lmax-dsl")]
 pub use disruptor::Disruptor;
 pub use event_factory::{DefaultEventFactory, EventFactory};
-pub use event_handler::{EventHandler, NoOpEventHandler};
+pub use event_handler::{ClosureEventHandler, EventHandler, NoOpEventHandler};
 pub use event_processor::{BatchEventProcessor, EventProcessor};
 pub use event_translator::{
     EventTranslator, EventTranslatorOneArg, EventTranslatorThreeArg, EventTranslatorTwoArg,

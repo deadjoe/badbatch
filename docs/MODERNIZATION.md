@@ -29,6 +29,12 @@ Internal alignment doc for agent/developer work. Reflects **current intent**, no
 | P1 | builder split + feature/docs tighten | done (`builder/{core,consumer,handle,fluent,entry}`; core-only CI job) |
 | P2 | Loom claim models + MPSC exactly-once stress | done (`tests/loom_work_claim.rs`, `mpsc_exactly_once_stress.rs`, CI loom job) |
 | P3 | Read-only fan-out (`fan_out_events_with`) vs WorkerPool | done (engine + builder; mix rejected; stress tests) |
+| R1 | Review cleanup: `ConsumerAccess` + `RunMode` (no readonly bool / Option work magic) | done |
+| R2 | Unified `spawn_named` + `SharedBuilderState` push helpers | done |
+| R3 | Single `ClosureEventHandler` (`event_handler`; re-exported) | done |
+| R4 | `StopFlag` / `LoopControl` (no dual-flag / static stop) | done |
+| R5 | Split `builder/tests` by topic | done |
+| R6 | Feature/docs honesty (defaults stay for continuity; core-only CI) | done |
 
 ## Architecture decisions
 
@@ -40,8 +46,9 @@ Internal alignment doc for agent/developer work. Reflects **current intent**, no
 ### AD-2: Primary public API
 
 - **Preferred path**: monomorphized Builder (`build_single_producer` / `build_multi_producer`).
-- LMAX-style `Disruptor` DSL remains as a compatibility/learning surface until folded under a feature or thin wrapper.
-- `ElegantConsumer` / dual wait-strategy story must converge so users are not misled.
+- LMAX-style `Disruptor` DSL remains as a compatibility/learning surface under feature `lmax-dsl`.
+- `ElegantConsumer` lives under feature `extras`.
+- **Default features** still enable `lmax-dsl` + `extras` so existing tests/docs keep working; CI also runs `--no-default-features` for the core-only surface.
 
 ### AD-3: Parallel same-stage consumers
 
