@@ -29,6 +29,8 @@ core_affinity = "0.8"
 criterion = { version = "0.7", features = ["html_reports"] }
 crossbeam = "0.8"  # For performance comparison benchmarks
 proptest = "1.10"  # Property-based testing
+# Exhaustive concurrency exploration for small WorkerPool claim models (P2).
+loom = "0.7"
 
 [features]
 # Preferred core path is always on: Builder + Producer + EventPoller + sequencers.
