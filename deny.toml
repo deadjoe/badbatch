@@ -89,10 +89,14 @@ allow = [
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
     "Unicode-3.0",            # Used by unicode-ident
+    "Unicode-DFS-2016",
     "Unlicense",              # Used by memchr, aho-corasick, termcolor, walkdir, same-file
     "BSL-1.0",                # Used by ryu (Boost Software License)
-    "AGPL-3.0",               # Our project license
+    "Zlib",
 ]
 # Suppress warnings for allowed licenses that are not currently encountered.
 # We keep the allowlist stable to avoid churn when dependencies change.

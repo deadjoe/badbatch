@@ -1,104 +1,115 @@
-<div align="center">
-  <img src="badbatch.png" alt="BadBatch Logo" width="200"/>
+# BadBatch
 
-  # BadBatch Disruptor Engine
+A Rust implementation of the [LMAX Disruptor](https://github.com/LMAX-Exchange/disruptor) pattern: a pre-allocated ring buffer with sequence-based coordination for high-throughput, low-latency event processing between threads.
 
-  [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-  [![Tests](https://github.com/deadjoe/badbatch/workflows/Tests/badge.svg)](https://github.com/deadjoe/badbatch/actions)
+**Preferred API:** monomorphized Builder (`build_single_producer` / `build_multi_producer`), `Producer`, and `EventPoller`. An LMAX-style DSL (`Disruptor`) and `ElegantConsumer` are available behind optional features (enabled by default).
 
-</div>
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Tests](https://github.com/deadjoe/badbatch/workflows/Tests/badge.svg)](https://github.com/deadjoe/badbatch/actions)
 
-> A high-performance, lock-free disruptor engine written in Rust, implementing the LMAX Disruptor pattern with modern Rust optimizations and disruptor-rs inspired features.
+---
 
-## 🚀 Features
+## What this crate provides
 
-### 🔥 LMAX Disruptor Core Engine
+- **Ring buffer** — power-of-two capacity, pre-allocated slots, access coordinated by sequencers (not by locking the buffer)
+- **Single- and multi-producer sequencers** — multi-producer uses an availability structure (bitmap path for larger buffers; legacy path for smaller ones)
+- **Wait strategies** — Blocking, BusySpin, Yielding, Sleeping
+- **Consumers** — sequential handlers, same-stage WorkerPool (CAS work-claim), read-only fan-out (`fan_out_events_with`), pipeline stages via `and_then`
+- **Event handlers / factories / translators** — LMAX-style extension points
+- **Optional surfaces** — feature `lmax-dsl` (classic `Disruptor` DSL), feature `extras` (`ElegantConsumer`)
 
-- **Lock-free ring buffer** with power-of-2 sizing for maximum performance
-- **Multiple wait strategies**: Blocking, BusySpin, Yielding, Sleeping
-- **Event processors** with batch processing capabilities
-- **Single and multi-producer** support (multi-producer uses bitmap availability tracking by default for buffer size ≥ 64)
-- **Comprehensive exception handling** with custom error types
-- **Sequence barriers** and dependency management
-- **Event factories, handlers, and translators** for flexible event processing
-- **Full compatibility** with original LMAX Disruptor patterns
+Cross-thread use is **protocol-based** (claim / publish / barriers / consumer sequences). There is no mutex-wrapped “shared ring buffer” API.
 
-### ⚡ Modern Rust Optimizations (inspired by disruptor-rs)
+**Platforms:** macOS and Linux. Windows is not a target.
 
-- **Simplified Producer API**: Closure-based publishing with `producer.publish(|event| { ... })`
-- **Batch Publishing**: Efficient `BatchIterMut` for zero-copy batch operations
-- **Builder Pattern**: Fluent API with `build_single_producer(...)` / `build_multi_producer(...)`
-- **Thread Management**: CPU affinity support with `ThreadBuilder::new().pin_at_core(1)`
-- **Elegant Consumer**: Automatic lifecycle management with `ElegantConsumer::new()`
-- **Simple Wait Strategies**: Streamlined strategies for easier usage
+**MSRV:** Rust **1.97** (`rust-version` in `Cargo.toml`). Prefer current stable via `rust-toolchain.toml`.
 
-### 🔬 Formal Verification & Benchmarking
+---
 
-- **TLA+ Verification**: Mathematical proofs of correctness for SPMC, MPMC, and pipeline dependency scenarios
-- **Comprehensive Benchmarks**: 7 specialized benchmark suites covering latency, throughput, and scaling
-- **Performance Testing**: Systematic evaluation against std::mpsc and crossbeam channels
-- **Property Testing**: Invariant checking with proptest for robust validation
+## Quick start (Builder — recommended)
 
-## 📊 Performance & Safety
+```rust
+use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
 
-- **Zero-cost abstractions** with Rust's type system
-- **Memory safety** without garbage collection
-- **Thread safety** guaranteed at compile time
-- **Lock-free data structures** for maximum throughput
-- **NUMA-aware** design considerations
+#[derive(Debug, Default)]
+struct MyEvent {
+    value: i64,
+}
 
-## 🏗️ Architecture
+fn main() {
+    let mut handle = build_single_producer(1024, MyEvent::default, BusySpinWaitStrategy)
+        .handle_events_with(|event, sequence, _end_of_batch| {
+            // process event at `sequence`
+            let _ = (event, sequence);
+        })
+        .build();
 
-BadBatch is a focused, high-performance disruptor library with a clean, modular architecture:
+    handle.publish(|event| event.value = 42);
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│                    BadBatch Disruptor Library               │
-├─────────────────────────────────────────────────────────────┤
-│  ⚡ Core Disruptor Engine                                   │
-│  ├─ Ring Buffer (Lock-free, Power-of-2 Sizing)             │
-│  ├─ Event Processors (Batch Processing)                    │
-│  ├─ Wait Strategies (Blocking, BusySpin, Yielding, Sleeping) │
-│  ├─ Producer Types (Single/Multi with Experimental Bitmap) │
-│  ├─ Sequence Management (Atomic Coordination)              │
-│  ├─ Event Factories, Handlers & Translators               │
-│  └─ Exception Handling (Custom Error Types)                │
-├─────────────────────────────────────────────────────────────┤
-│  🚀 Modern Rust Optimizations                              │
-│  ├─ Builder Pattern (Fluent API)                           │
-│  ├─ Closure-based Publishing                               │
-│  ├─ Batch Operations (Zero-copy)                           │
-│  ├─ Thread Management (CPU Affinity)                       │
-│  ├─ Elegant Consumer (Lifecycle Management)                │
-│  └─ Simple Wait Strategies                                  │
-├─────────────────────────────────────────────────────────────┤
-│  🔧 Performance Features                                    │
-│  ├─ Cache Line Padding (False Sharing Prevention)          │
-│  ├─ Memory Layout Optimization                             │
-│  ├─ Bit Manipulation (Fast Modulo)                         │
-│  ├─ NUMA-aware Design                                       │
-│  └─ Zero-allocation Runtime                                 │
-└─────────────────────────────────────────────────────────────┘
+    handle.batch_publish(5, |batch| {
+        for (i, event) in batch.enumerate() {
+            event.value = i as i64;
+        }
+    });
+
+    handle.shutdown();
+}
 ```
 
-## 🚀 Quick Start
+### Same-stage consumers (do not mix modes on one stage)
 
-### Installation
+| API | Behavior |
+|-----|----------|
+| `handle_events_with` (2+ handlers) | **WorkerPool** — CAS claim; each sequence handled by one mutable consumer |
+| `fan_out_events_with` | **Fan-out** — every consumer observes every sequence via `&E` |
 
-#### From Source
-```bash
-git clone https://github.com/deadjoe/badbatch.git
-cd badbatch
-cargo build --release
+Pipeline stages: `.and_then()` starts a dependent stage that waits on the previous stage’s sequences.
+
+Multi-producer:
+
+```rust
+use badbatch::disruptor::{build_multi_producer, BusySpinWaitStrategy};
+
+#[derive(Default)]
+struct MyEvent { value: i64 }
+
+let handle = build_multi_producer(1024, MyEvent::default, BusySpinWaitStrategy)
+    .handle_events_with(|_e, _s, _b| {})
+    .build();
+// handle.create_producer() / CloneableProducer for additional publishers
 ```
 
-### Basic Usage
+### EventPoller (user-owned thread)
 
-BadBatch is a library for building high-performance event processing systems. Here's how to use it in your Rust projects:
+```rust
+use badbatch::disruptor::{open_single_producer_poller, BusySpinWaitStrategy};
 
-## 📖 Programming API
+#[derive(Default)]
+struct MyEvent { value: i64 }
 
-### Traditional LMAX Disruptor API
+let (mut poller, mut producer) =
+    open_single_producer_poller(1024, MyEvent::default, BusySpinWaitStrategy).unwrap();
+// producer.publish(...); poller.poll() / take() on the consumer thread
+```
+
+### Features
+
+| Feature | Default | Contents |
+|---------|---------|----------|
+| (always on) | — | Builder, sequencers, `consumer_engine`, EventPoller, wait strategies |
+| `lmax-dsl` | yes | Classic `Disruptor` DSL / `BatchEventProcessor`-oriented API |
+| `extras` | yes | `ElegantConsumer` and related helpers |
+| `full-benchmarks` | no | Extra benchmark surface |
+
+Core-only: `cargo test --lib --no-default-features`.
+
+Engineering notes: [`docs/MODERNIZATION.md`](docs/MODERNIZATION.md), [`docs/README.md`](docs/README.md).
+
+---
+
+## LMAX-style DSL (feature `lmax-dsl`)
+
+Requires a monomorphized wait strategy (not `Box<dyn WaitStrategy>`):
 
 ```rust
 use badbatch::disruptor::{
@@ -113,7 +124,6 @@ struct MyEvent {
 }
 
 struct MyEventHandler;
-
 impl EventHandler<MyEvent> for MyEventHandler {
     fn on_event(
         &mut self,
@@ -121,10 +131,7 @@ impl EventHandler<MyEvent> for MyEventHandler {
         sequence: i64,
         end_of_batch: bool,
     ) -> badbatch::disruptor::Result<()> {
-        println!(
-            "Processing event {} with value {} (end_of_batch: {})",
-            sequence, event.value, end_of_batch
-        );
+        let _ = (event, sequence, end_of_batch);
         Ok(())
     }
 }
@@ -133,7 +140,6 @@ struct MyEventTranslator {
     value: i64,
     message: String,
 }
-
 impl EventTranslator<MyEvent> for MyEventTranslator {
     fn translate_to(&self, event: &mut MyEvent, _sequence: i64) {
         event.value = self.value;
@@ -142,335 +148,146 @@ impl EventTranslator<MyEvent> for MyEventTranslator {
 }
 
 fn main() {
-    // Create and configure the Disruptor
     let factory = DefaultEventFactory::<MyEvent>::new();
     let mut disruptor = Disruptor::new(
         factory,
-        1024, // Buffer size (must be power of 2)
+        1024,
         ProducerType::Single,
-        Box::new(BlockingWaitStrategy::new()),
+        BlockingWaitStrategy::new(),
     )
     .unwrap()
     .handle_events_with(MyEventHandler)
     .build();
 
     disruptor.start().unwrap();
-
     disruptor
         .publish_event(MyEventTranslator {
             value: 42,
-            message: "Hello, World!".to_string(),
+            message: "hello".to_string(),
         })
         .unwrap();
-
     disruptor.shutdown().unwrap();
 }
 ```
 
-### Modern disruptor-rs Inspired API
+---
 
-```rust
-use badbatch::disruptor::{
-    build_single_producer, BusySpinWaitStrategy,
-};
+## Development
 
-#[derive(Debug, Default)]
-struct MyEvent {
-    value: i64,
-}
+### Build and test
 
-fn main() {
-    // build_* expects a full LMAX `WaitStrategy` (e.g. BusySpinWaitStrategy).
-    let mut disruptor = build_single_producer(1024, MyEvent::default, BusySpinWaitStrategy)
-        .handle_events_with(|event, sequence, end_of_batch| {
-            println!(
-                "Processing event {} with value {} (batch_end: {})",
-                sequence, event.value, end_of_batch
-            );
-        })
-        .build();
-
-    disruptor.publish(|event| event.value = 42);
-
-    disruptor.batch_publish(5, |batch| {
-        for (i, event) in batch.enumerate() {
-            event.value = i as i64;
-        }
-    });
-
-    disruptor.shutdown();
-}
-```
-
-### ElegantConsumer API
-
-For a lightweight consumer that manages its own thread and can be pinned to a
-specific CPU core, use `ElegantConsumer` with a shared `RingBuffer`:
-
-```rust
-use badbatch::disruptor::{
-    event_factory::ClosureEventFactory, simple_wait_strategy::BusySpin, ElegantConsumer,
-    RingBuffer,
-};
-use std::sync::Arc;
-
-#[derive(Debug, Default)]
-struct MyEvent {
-    value: i64,
-}
-
-fn main() {
-    let factory = ClosureEventFactory::new(MyEvent::default);
-    let ring_buffer = Arc::new(RingBuffer::new(1024, factory).unwrap());
-
-    let consumer = ElegantConsumer::with_affinity(
-        Arc::clone(&ring_buffer),
-        |event, sequence, _end_of_batch| println!("Processing: {} at {}", event.value, sequence),
-        BusySpin,
-        1, // Pin to CPU core 1
-    )
-    .unwrap();
-
-    // Publish events through the same RingBuffer the consumer is reading...
-
-    consumer.shutdown().unwrap();
-}
-```
-
-**API surface (preferred first):**
-
-1. **Builder** — `build_single_producer` / `build_multi_producer` (default production path)
-2. **EventPoller** — `open_single_producer_poller` for user-owned threads
-3. **LMAX DSL** — `Disruptor::…` behind feature `lmax-dsl` (on by default)
-4. **Extras** — `ElegantConsumer` behind feature `extras` (on by default)
-
-**Same-stage parallelism (two different modes — do not mix on one stage):**
-
-| API | Semantics |
-|-----|-----------|
-| `handle_events_with` (2+) | **WorkerPool** work-sharing: CAS claim, one mutable handler per sequence |
-| `fan_out_events_with` (1+) | **Read-only fan-out**: every consumer sees every event via `&E` |
-
-Core-only build: `cargo test --no-default-features`. See `docs/MODERNIZATION.md`.
-
-**Performance baseline (macOS):** checked-in medians in `benches/results/BASELINE.md`. Reproduce:
-
-```bash
-RUSTFLAGS="-C target-cpu=native" ./scripts/run_baseline.sh --full
-```
-
-## 🔧 Development
-
-### Prerequisites
-- Rust **1.97+** stable (see `Cargo.toml` `rust-version`; track latest stable)
-- Git
-- Optional: `nightly` toolchain with `miri` for memory-safety checks
-
-### Building
 ```bash
 git clone https://github.com/deadjoe/badbatch.git
 cd badbatch
-cargo build
+cargo build --release
+
+cargo test
+bash scripts/test-all.sh          # fmt, clippy, tests, audit/deny (as configured)
+
+cargo test --lib
+cargo test --test '*'
+cargo test --doc
 ```
 
-### Testing
+### Benchmarks and baseline
+
+Criterion benches live under `benches/` (SPSC, MPSC, pipeline, latency, throughput, buffer scaling, comprehensive).
 
 ```bash
-# Run all tests
-cargo test
+bash scripts/run_benchmarks.sh quick   # shorter
+bash scripts/run_benchmarks.sh all     # full suite (long)
 
-# Run comprehensive test suite with quality checks
-bash scripts/test-all.sh
-
-# Run specific test categories
-cargo test --lib                    # Unit tests
-cargo test --test '*'               # Integration tests (all integration targets)
-cargo test --doc                    # Documentation tests
-
-# Run performance benchmarks
-bash scripts/run_benchmarks.sh quick    # Quick benchmark suite (2-5 minutes)
-bash scripts/run_benchmarks.sh all      # Full benchmark suite (30-60 minutes)
-
-# Individual benchmark categories
-cargo bench --bench single_producer_single_consumer
-cargo bench --bench throughput_comparison
-cargo bench --bench latency_comparison
+# Checked-in median baseline (Apple Silicon, specific commits — not a portable guarantee):
+# benches/results/BASELINE.md
+RUSTFLAGS="-C target-cpu=native" ./scripts/run_baseline.sh --full
 ```
+
+On AArch64 with LSE (e.g. Apple Silicon), building with `target-cpu=native` or `+lse` can reduce cost of contended atomics on multi-producer paths.
+
+### Slot padding
+
+Events sit inline in the ring. Small events may share a cache line with neighbors. Optional slot padding:
+
+- `with_cache_line_padding(true)` → 128-byte slots  
+- or `with_slot_padding(SlotPadding::CacheLine64 | CacheLine128)`  
+
+Default is **no** padding; measure on your hardware (on Apple Silicon, padding can hurt tiny-event SPSC throughput — see `BASELINE.md`).
 
 ### Repository notes
 
-- **Cross-thread sharing of the ring** uses the Disruptor protocol only
-  (`build_*_producer`, `CloneableProducer`, consumers, `EventPoller`). There is
-  no mutex-wrapped “shared ring buffer” API — that pattern bypasses claim/publish
-  and is not lock-free.
-- **`Cargo.lock` is tracked on purpose.** This is a library crate, but CI runs
-  `cargo test --locked` / audit / deny against a pinned graph so builds stay
-  reproducible. Dependents that use badbatch as a library do **not** inherit this
-  lockfile.
-- **`proptest-regressions/`** is proptest’s on-disk regression corpus (seed cases that
-  previously failed). Keep it under version control; do not delete casually. See
-  [proptest book — regression files](https://proptest.github.io/proptest/proptest/failure_persistence.html).
-- **Docs layout:** root `README.md` / `DESIGN.md` are the public surface;
-  `docs/MODERNIZATION.md` is the engineering alignment map; `docs/private/` is
-  gitignored for local drafts. See [`docs/README.md`](docs/README.md).
-- **Changelog / MSRV:** see [`CHANGELOG.md`](CHANGELOG.md).
+- **`Cargo.lock` is tracked** for reproducible CI (`--locked`). Library dependents do not inherit this lockfile.
+- **`proptest-regressions/`** holds proptest failure seeds; keep under version control.
+- **Changelog / MSRV policy:** [`CHANGELOG.md`](CHANGELOG.md).
 
-### Code Quality
+### Quality tooling
 
 ```bash
-# Comprehensive quality checks (recommended)
-bash scripts/test-all.sh
-
-# Individual quality checks
-cargo fmt                           # Format code
-cargo clippy --all-targets --all-features -- -D warnings  # Lint code
-cargo audit                         # Security audit
-cargo deny check                    # Dependency management
-
-# Documentation
-cargo doc --no-deps --open          # Generate and open docs
-cargo test --doc                    # Test documentation examples
-
-# Coverage analysis (requires cargo-llvm-cov)
-cargo llvm-cov --lib --html         # Generate HTML coverage report
+cargo fmt
+cargo clippy --all-targets --all-features -- -D warnings
+cargo audit
+cargo deny check
+cargo doc --no-deps
 ```
 
-## 📈 Performance
-
-BadBatch is designed for high-performance event processing with the following characteristics:
-
-### Core Performance Features
-
-- **Lock-free architecture**: Zero-cost abstractions with no locks in hot paths
-- **Memory efficiency**: Pre-allocated ring buffer with zero runtime allocation
-- **CPU optimization**: Cache-friendly data structures with proper padding
-- **Rust advantages**: Memory safety without runtime overhead
-- **Mechanical sympathy**: NUMA-aware design and CPU affinity support
-
-### Optimization Techniques
-
-- **Cache Line Padding**: Uses `crossbeam_utils::CachePadded` to prevent false sharing
-- **Lock-free gating sequences (H9)**: Producers read the consumer gating list through `ArcSwap` to avoid lock traffic in backpressure paths.
-- **Bitmap Optimization**: Multi-producer sequencer enables bitmap tracking by default for buffers with size ≥ 64, providing O(1) availability checks (inspired by disruptor-rs). For smaller buffers, it transparently falls back to the legacy LMAX availability buffer.
-- **Batch Processing**: Automatic batching reduces coordination overhead
-- **Bit Manipulation**: Fast modulo operations using bit masks for power-of-2 buffer sizes
-- **Memory Layout**: Optimal data structures (`Box<[UnsafeCell<T>]>`) for better cache locality
-
-### Event Sizing and Cache-Line Padding
-
-BadBatch stores events inline in a contiguous ring buffer. When event structs are smaller than the false-sharing granularity (typically **128 bytes** on modern x86_64/aarch64; Sequence padding already uses `CachePadded` at 128B), adjacent slots can share a cache line and degrade unicast throughput.
-
-If your event is small and you need maximum unicast throughput, either enable Builder slot padding (`with_cache_line_padding(true)` → 128B slots) or align the event type:
-
-```rust
-#[repr(C, align(128))]
-#[derive(Debug, Default)]
-struct MyEvent {
-    value: i64,
-    payload: i64,
-    // Rust pads to 128 bytes automatically due to align(128)
-}
-```
-
-This ensures each slot occupies its own false-sharing unit on modern x86_64/aarch64. Events already ≥ 128 bytes need no extra alignment.
-
-> **Architecture note**: Slot padding eliminates false sharing but increases the ring buffer footprint. Default remains `SlotPadding::None`; opt into `CacheLine128` (Builder `with_cache_line_padding(true)`) or `CacheLine64` via `with_slot_padding` after measuring. On Apple Silicon the larger working set can dominate for tiny events — use the padded SPSC bench variants on your hardware.
-
-### ARM / Apple Silicon Notes
-
-On AArch64, Rust typically targets ARMv8.0-A by default, which can generate LL/SC-based atomics.
-On ARMv8.1+ CPUs with LSE support (Apple Silicon, AWS Graviton 2+, Ampere Altra), enabling LSE can
-significantly reduce the cost of contended atomic RMW operations (e.g., the bitmap `fetch_xor` path).
-
-```bash
-# Best default when building on the target machine:
-RUSTFLAGS="-C target-cpu=native" cargo build --release
-
-# If you ONLY deploy/run on LSE-capable CPUs:
-RUSTFLAGS="-C target-feature=+lse" cargo build --release
-```
-
-### Experimental Features
-
-- **Bitmap Optimization (multi-producer)**: Enabled by default for buffers with size ≥ 64. This provides O(1) availability checking for large buffers using atomic bitmap operations (inspired by disruptor‑rs). For smaller buffers, the multi-producer sequencer transparently falls back to the legacy LMAX availability buffer. You can evaluate performance trade‑offs via the provided benchmarks.
-
-### Benchmark Results
-
-Our comprehensive benchmark suite covers multiple scenarios:
-
-- **SPSC (Single Producer Single Consumer)**: Tests different wait strategies with varying burst sizes
-- **MPSC (Multi Producer Single Consumer)**: Evaluates producer coordination and scalability  
-- **Pipeline Processing**: Complex event processing chains with dependencies
-- **Latency Comparison**: Head-to-head performance against std::mpsc and crossbeam channels
-- **Throughput Analysis**: Raw event processing rates across different configurations
-- **Buffer Scaling**: Performance characteristics with buffer sizes from 64 to 8192 slots
-
-Run `./scripts/run_benchmarks.sh all` to execute the full performance evaluation suite.
-
-## 🤝 Contributing
-
-We welcome contributions! Please follow these steps:
-
-### Development Process
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Run the test suite
-6. Submit a pull request
-
-### Code of Conduct
-This project adheres to the [Rust Code of Conduct](https://www.rust-lang.org/policies/code-of-conduct).
-
-## 📄 License
-
-This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
-
-See the [LICENSE](LICENSE) file for details.
-
-## 🔬 Formal Verification
-
-BadBatch includes comprehensive TLA+ formal verification models that mathematically prove the correctness of our concurrent algorithms:
-
-### Verification Models
-- **BadBatchSPMC.tla**: Single Producer Multi Consumer verification (✅ 7,197 states verified)
-- **BadBatchMPMC.tla**: Multi Producer Multi Consumer verification (✅ 161,285 states verified)
-- **BadBatchPipeline.tla**: Consumer dependency chain (pipeline) verification
-- **BadBatchRingBuffer.tla**: Shared ring buffer model/invariants used by the specs above
-- **SimpleSPMC.tla**: Minimal standalone SPMC reference model
-- **MPSC configuration**: MPMC model run with single writer and multiple readers (`mpsc_config.cfg`)
-
-### Verified Properties
-- **Safety**: `TypeOk` (well-typed state), `NoDataRaces` (no concurrent read/write access to slots)
-- **Liveness**: `Liveness` / `EventualConsumption` (all published events are eventually consumed)
-
-Run formal verification:
-```bash
-cd verification
-./verify.sh               # Quick suite (SPMC + MPMC)
-./verify.sh extended      # Extended suite (includes extended MPMC config)
-./verify.sh spmc          # SPMC model only
-./verify.sh mpmc          # MPMC model only
-```
-
-See `verification/README.md` for detailed configuration options, state counts, and running the pipeline/MPSC models.
-
-## 🙏 Acknowledgments
-
-- [LMAX Disruptor](https://github.com/LMAX-Exchange/disruptor) - Original Java implementation and design patterns
-- [disruptor-rs](https://github.com/nicholassm/disruptor-rs) - Rust implementation inspiration for modern API design
-- [Rust Community](https://www.rust-lang.org/community) - For the amazing ecosystem and safety guarantees
-- [crossbeam-utils](https://github.com/crossbeam-rs/crossbeam) - Cache-friendly atomic operations
-- [TLA+](https://lamport.azurewebsites.net/tla/tla.html) - Formal verification methodology
-
-## 📞 Support
-
-- 🐛 [Issue Tracker](https://github.com/deadjoe/badbatch/issues)
-- 💬 [Discussions](https://github.com/deadjoe/badbatch/discussions)
-- 📖 [DESIGN.md](DESIGN.md) - Comprehensive design documentation
-- 🔬 [Verification](verification/) - TLA+ formal verification models
-- 📊 [Benchmarks](benches/) - Performance evaluation suite
+CI (GitHub Actions): stable tests, `--no-default-features`, loom claim tests, Miri on selected modules (nightly).
 
 ---
 
-**Made with ❤️ in Rust**
+## Implementation notes (accurate scope)
+
+| Topic | Reality in this repo |
+|-------|----------------------|
+| Lock-free core | Ring + sequencers + consumer loops use atomics/CAS; **Blocking** wait uses a mutex/condvar by design |
+| Monomorphization | Preferred Builder path is generic over wait strategy and handlers |
+| Multi-producer availability | Bitmap-style path for larger buffers; fallback for smaller sizes (see sequencer) |
+| Gating sequences | `arc-swap` for producer-side gating list reads |
+| Affinity | Optional `pin_at_core` / `ThreadBuilder` — not a full NUMA runtime |
+| Formal methods | TLA+ **model checking** under `verification/` (not a complete proof of the Rust binary) |
+| Performance claims | No portable “N Mops” guarantee; use benches + `BASELINE.md` as machine-specific data |
+
+Design background: [`DESIGN.md`](DESIGN.md). Consistency notes: [`verification/CONSISTENCY.md`](verification/CONSISTENCY.md).
+
+### TLA+ models
+
+Models and scripts live in `verification/`:
+
+- `BadBatchSPMC.tla`, `BadBatchMPMC.tla`, `BadBatchPipeline.tla`, `BadBatchRingBuffer.tla`, `SimpleSPMC.tla`
+- Runner: `cd verification && ./verify.sh` (see `verification/README.md` for configs and state counts)
+
+---
+
+## Contributing
+
+1. Fork and branch  
+2. Keep changes focused; add tests for behavioral changes  
+3. Run `bash scripts/test-all.sh` (or at least `cargo test` + clippy)  
+4. Open a pull request  
+
+This project follows the [Rust Code of Conduct](https://www.rust-lang.org/policies/code-of-conduct).
+
+---
+
+## License
+
+Licensed under the **Apache License, Version 2.0** ([LICENSE](LICENSE)).
+
+```
+Copyright 2025–2026 Joe <smartjoe@gmail.com>
+```
+
+---
+
+## Acknowledgments
+
+- [LMAX Disruptor](https://github.com/LMAX-Exchange/disruptor) — original design  
+- [disruptor-rs](https://github.com/nicholassm/disruptor-rs) — API ideas for the Builder-style surface  
+- [crossbeam](https://github.com/crossbeam-rs/crossbeam) — `CachePadded` and related utilities  
+- [TLA+](https://lamport.azurewebsites.net/tla/tla.html) — specification language used in `verification/`
+
+## Links
+
+- [Issues](https://github.com/deadjoe/badbatch/issues)  
+- [DESIGN.md](DESIGN.md)  
+- [CHANGELOG.md](CHANGELOG.md)  
+- [verification/](verification/)  
+- [benches/](benches/)  

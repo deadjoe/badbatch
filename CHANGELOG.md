@@ -13,6 +13,10 @@ compiler, or when CI stabilizes on a new stable series. Patch toolchain updates
 
 ## [0.2.0] — 2026-07
 
+### License
+
+- Project license changed from **AGPL-3.0** to **Apache-2.0** (see `LICENSE`, `NOTICE`).
+
 ### Added
 
 - Monomorphized hot path (`WaitStrategy` / barrier / handler generics; no hot-path `dyn`).
