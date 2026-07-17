@@ -43,9 +43,6 @@ loom = "0.7"
 default = ["lmax-dsl", "extras"]
 lmax-dsl = []
 extras = []
-# Non-lock-free convenience wrapper (`SharedRingBuffer` uses RwLock).
-# NOT part of the core lock-free Disruptor path — opt-in only.
-shared-ring-buffer = []
 full-benchmarks = []
 
 [profile.release]

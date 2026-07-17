@@ -11,15 +11,20 @@ use std::convert::TryFrom;
 use std::mem;
 use std::ptr;
 
-#[cfg(feature = "shared-ring-buffer")]
-use std::sync::Arc;
-
 /// The core ring buffer for storing events
 ///
 /// This is the heart of the Disruptor pattern. It pre-allocates all events
 /// and provides lock-free access through careful use of memory barriers and
 /// atomic operations. This follows the exact design from the original LMAX
 /// Disruptor `RingBuffer` with optimizations inspired by disruptor-rs.
+///
+/// # Sharing across threads
+///
+/// `RingBuffer` is `Send + Sync`. Cross-thread use must go through the Disruptor
+/// **protocol** (sequencer claim/publish, sequence barriers, Builder consumers,
+/// [`crate::disruptor::EventPoller`], [`crate::disruptor::CloneableProducer`]) —
+/// not by wrapping the buffer in a global mutex/`RwLock`. Arbitrary concurrent
+/// `get_mut` without a claim is undefined relative to the protocol.
 ///
 /// # Type Parameters
 /// * `T` - The event type stored in the buffer
@@ -492,141 +497,6 @@ where
     }
 }
 
-/// A thread-safe wrapper around the ring buffer
-///
-/// This provides shared access to the ring buffer across multiple threads
-/// using `Arc` and `parking_lot::RwLock` synchronization primitives.
-///
-/// # Not part of the lock-free core
-///
-/// **This type is intentionally non-lock-free.** It is feature-gated behind
-/// `shared-ring-buffer` and is **not** part of the core Disruptor protocol
-/// path (`RingBuffer` + sequencers + barriers). Use it only for convenience
-/// or experimental shared-access scenarios; high-performance code should use
-/// the lock-free `RingBuffer` coordinated by sequencers.
-#[cfg(feature = "shared-ring-buffer")]
-#[derive(Debug)]
-pub struct SharedRingBuffer<T>
-where
-    T: Send + Sync,
-{
-    inner: Arc<parking_lot::RwLock<RingBuffer<T>>>,
-}
-
-#[cfg(feature = "shared-ring-buffer")]
-impl<T> SharedRingBuffer<T>
-where
-    T: Send + Sync,
-{
-    /// Create a new shared ring buffer with a default event factory
-    ///
-    /// # Arguments
-    /// * `buffer_size` - The size of the ring buffer (must be a power of 2)
-    ///
-    /// # Returns
-    /// A new `SharedRingBuffer` instance
-    ///
-    /// # Errors
-    /// Returns `DisruptorError::InvalidBufferSize` if `buffer_size` is not a power of 2
-    pub fn new<F>(buffer_size: usize, event_factory: F) -> Result<Self>
-    where
-        F: EventFactory<T>,
-    {
-        let ring_buffer = RingBuffer::new(buffer_size, event_factory)?;
-        Ok(Self {
-            inner: Arc::new(parking_lot::RwLock::new(ring_buffer)),
-        })
-    }
-
-    /// Create a new shared ring buffer with an explicit slot padding strategy.
-    pub fn new_with_padding<F>(
-        buffer_size: usize,
-        event_factory: F,
-        slot_padding: SlotPadding,
-    ) -> Result<Self>
-    where
-        F: EventFactory<T>,
-    {
-        let ring_buffer = RingBuffer::new_with_padding(buffer_size, event_factory, slot_padding)?;
-        Ok(Self {
-            inner: Arc::new(parking_lot::RwLock::new(ring_buffer)),
-        })
-    }
-
-    /// Get a read-only reference to the event at the specified sequence
-    ///
-    /// # Arguments
-    /// * `sequence` - The sequence number of the event
-    ///
-    /// # Returns
-    /// A mapped read guard containing the event
-    pub fn get(&self, sequence: i64) -> parking_lot::MappedRwLockReadGuard<'_, T> {
-        parking_lot::RwLockReadGuard::map(self.inner.read(), |rb| rb.get(sequence))
-    }
-
-    /// Get a mutable reference to the event at the specified sequence
-    ///
-    /// # Arguments
-    /// * `sequence` - The sequence number of the event
-    ///
-    /// # Returns
-    /// A mapped write guard containing the event
-    pub fn get_mut(&self, sequence: i64) -> parking_lot::MappedRwLockWriteGuard<'_, T> {
-        parking_lot::RwLockWriteGuard::map(self.inner.write(), |rb| rb.get_mut(sequence))
-    }
-
-    /// Get the buffer size
-    ///
-    /// # Returns
-    /// The size of the ring buffer
-    #[must_use]
-    pub fn buffer_size(&self) -> usize {
-        self.inner.read().buffer_size()
-    }
-
-    /// Check if the buffer has available capacity
-    ///
-    /// # Arguments
-    /// * `required_capacity` - The number of slots required
-    /// * `available_capacity` - The number of slots currently available
-    ///
-    /// # Returns
-    /// True if there is sufficient capacity, false otherwise
-    #[must_use]
-    pub fn has_available_capacity(&self, required_capacity: i64, available_capacity: i64) -> bool {
-        self.inner
-            .read()
-            .has_available_capacity(required_capacity, available_capacity)
-    }
-
-    /// Get the remaining capacity
-    ///
-    /// # Arguments
-    /// * `current_sequence` - The current sequence position
-    /// * `next_sequence` - The next sequence position
-    ///
-    /// # Returns
-    /// The remaining capacity in the buffer
-    #[must_use]
-    pub fn remaining_capacity(&self, current_sequence: i64, next_sequence: i64) -> i64 {
-        self.inner
-            .read()
-            .remaining_capacity(current_sequence, next_sequence)
-    }
-}
-
-#[cfg(feature = "shared-ring-buffer")]
-impl<T> Clone for SharedRingBuffer<T>
-where
-    T: Send + Sync,
-{
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,32 +600,6 @@ mod tests {
             let event = buffer.get(0);
             assert_eq!(event.value, 100); // Should be the same slot
         }
-    }
-
-    #[test]
-    #[cfg(feature = "shared-ring-buffer")]
-    fn test_shared_ring_buffer() {
-        let factory = DefaultEventFactory::<TestEvent>::new();
-        let shared_buffer = SharedRingBuffer::new(8, factory).unwrap();
-
-        // Test basic operations
-        assert_eq!(shared_buffer.buffer_size(), 8);
-
-        // Test mutable access
-        {
-            let mut event = shared_buffer.get_mut(0);
-            event.value = 42;
-        }
-
-        // Test read access
-        {
-            let event = shared_buffer.get(0);
-            assert_eq!(event.value, 42);
-        }
-
-        // Test cloning
-        let cloned = shared_buffer.clone();
-        assert_eq!(cloned.buffer_size(), 8);
     }
 
     #[test]
@@ -890,29 +734,6 @@ mod tests {
             let event = buffer.get(i);
             assert_eq!(event.value, expected_value);
         }
-    }
-
-    #[test]
-    #[cfg(feature = "shared-ring-buffer")]
-    fn test_shared_ring_buffer_capacity_methods() {
-        let factory = DefaultEventFactory::<TestEvent>::new();
-        let shared_buffer = SharedRingBuffer::new(8, factory).unwrap();
-
-        // Test has_available_capacity
-        assert!(shared_buffer.has_available_capacity(4, 8));
-        assert!(!shared_buffer.has_available_capacity(10, 8));
-
-        // Test remaining_capacity
-        let remaining = shared_buffer.remaining_capacity(0, 4);
-        assert_eq!(remaining, 4);
-    }
-
-    #[test]
-    #[cfg(feature = "shared-ring-buffer")]
-    fn test_shared_ring_buffer_invalid_size() {
-        let factory = DefaultEventFactory::<TestEvent>::new();
-        let result = SharedRingBuffer::new(7, factory); // Not a power of 2
-        assert!(result.is_err());
     }
 
     #[test]

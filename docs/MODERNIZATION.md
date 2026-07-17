@@ -19,7 +19,7 @@ Public product docs remain in root `README.md` / `DESIGN.md`. See also
 | Phase | Scope | Status |
 |-------|--------|--------|
 | 0 | Trust: honest docs/CI, Miri job, latest stable MSRV | done (MSRV 1.97 / v0.2.0; honest CI + Miri job) |
-| 1 | API convergence, WaitStrategy merge, module split, quarantine SharedRingBuffer | done (`lmax-dsl` / `extras` features; preferred Builder+Poller; SharedRingBuffer honesty) |
+| 1 | API convergence, WaitStrategy merge, module split; remove SharedRingBuffer | done (`lmax-dsl` / `extras`; preferred Builder+Poller; **SharedRingBuffer removed**) |
 | 2 | Monomorphize hot path (`W`/`Barrier`/`Handler`), remove hot-path `dyn` | done |
 | 3 | LMAX WorkerPool / CAS work-sequence for same-stage parallel consumers (no slot Mutex) | done |
 | 4 | Slot padding Align128; unify with Sequence 128B padding model | done |
@@ -61,10 +61,16 @@ Two **explicit** modes (never mixed on one stage):
 1. **WorkerPool (scheme A)** — `handle_events_with` × N (mutable): CAS claim on shared work cursor; one handler per sequence. No slot `Mutex`.
 2. **Read-only fan-out** — `fan_out_events_with` × N: each consumer runs a sequential loop observing `&E` for every sequence (broadcast).
 
-### AD-4: SharedRingBuffer
+### AD-4: SharedRingBuffer — **removed**
 
-- Feature-gated, **not** part of the lock-free core story.
-- Documented as convenience / non-lock-free; candidate for removal or redesign (e.g. true shared-memory later).
+- Former `SharedRingBuffer` (`RwLock` over the whole ring) was the wrong abstraction:
+  it bypassed sequence claim/publish and was never lock-free.
+- **Deleted** (including the `shared-ring-buffer` feature). Cross-thread sharing uses
+  the protocol path only:
+  - multi-producer: `CloneableProducer` / `create_producer`
+  - multi-consumer: Builder `handle_events_with` / `fan_out_events_with`
+  - user-owned threads: `EventPoller`
+- True IPC shared-memory Disruptor (if ever needed) is a separate design, not a mutex wrapper.
 
 ### AD-5: Padding
 
