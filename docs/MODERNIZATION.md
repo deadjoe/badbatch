@@ -1,6 +1,9 @@
 # BadBatch Modernization Plan (active)
 
-Internal alignment doc for agent/developer work. Reflects **current intent**, not marketing.
+Engineering alignment map for agent/developer work (tracked under `docs/`).
+Reflects **current intent** and phase status — not end-user marketing.
+Public product docs remain in root `README.md` / `DESIGN.md`. See also
+[`docs/README.md`](README.md) and root [`CHANGELOG.md`](../CHANGELOG.md).
 
 ## Goals (priority order)
 

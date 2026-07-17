@@ -12,10 +12,10 @@ review_report.md
 CLAUDE.md
 
 # Cargo
-# Keep Cargo.lock for applications, ignore for libraries
-# Since BadBatch is an application, we keep Cargo.lock tracked
-# For libraries, uncomment the next line:
-# Cargo.lock
+# BadBatch is a library crate, but we intentionally track Cargo.lock so CI
+# (`cargo test --locked`, audit/deny) is reproducible. Downstream crates do not
+# inherit this lockfile when they depend on badbatch from crates.io/git.
+# Do not add Cargo.lock to this ignore list.
 
 # Cargo build cache
 .cargo/*
@@ -155,8 +155,10 @@ coverage/
 coverage-report/
 *.profdata
 
-# Documentation Internal
-docs/
+# Working notes / local review drafts (not published with the repo)
+docs/private/
+# Optional large curriculum tree — publish only with an intentional commit
+docs/training/
 
 # ***REMOVED*** memory and debug files
 ***REMOVED***.md
@@ -184,10 +186,12 @@ secrets.toml
 .#*
 #*#
 
-# Lock files (except Cargo.lock for applications)
+# Node lockfiles (this repo is Rust-only; never commit npm/yarn/pnpm locks)
 package-lock.json
+package.json
 yarn.lock
 pnpm-lock.yaml
+node_modules/
 
 # Database files
 *.db
