@@ -5,9 +5,10 @@
 //! sequence barriers to ensure proper ordering and dependencies.
 
 use crate::disruptor::{
-    DisruptorError, EventHandler, ExceptionHandler, Result, RingBuffer, Sequence, SequenceBarrier,
+    DisruptorError, EventHandler, ExceptionHandler, ProcessingSequenceBarrier, Result, RingBuffer,
+    Sequence, SequenceBarrier, WaitStrategy,
 };
-use parking_lot::Mutex;
+use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -100,23 +101,28 @@ pub trait DataProvider<T>: Send + Sync {
 /// for optimal performance. It follows the exact design from the original LMAX
 /// Disruptor BatchEventProcessor.
 ///
-/// The processor stores a concrete `Arc<RingBuffer<T>>` rather than a trait object
-/// so that per-event slot access stays monomorphized and vtable-free on the hot
-/// path.
+/// The processor stores a concrete `Arc<RingBuffer<T>>`, monomorphized
+/// `ProcessingSequenceBarrier<W>`, and owned handler `H` so the hot loop has no
+/// dyn vtable or Mutex lock per event/batch.
 ///
 /// # Type Parameters
 /// * `T` - The event type being processed
+/// * `H` - The event handler type (owned, monomorphized)
+/// * `W` - The wait strategy type (monomorphized through the barrier)
 #[repr(align(64))] // Cache line alignment for performance
-pub struct BatchEventProcessor<T>
+pub struct BatchEventProcessor<T, H, W>
 where
     T: Send + Sync,
+    H: EventHandler<T>,
+    W: WaitStrategy + 'static,
 {
     /// The ring buffer that stores and serves events
     data_provider: Arc<RingBuffer<T>>,
-    /// The sequence barrier for coordination
-    sequence_barrier: Arc<dyn SequenceBarrier>,
-    /// The event handler for processing events (Mutex ensures sound interior mutability)
-    event_handler: Mutex<Box<dyn EventHandler<T>>>,
+    /// The sequence barrier for coordination (monomorphized wait strategy)
+    sequence_barrier: Arc<ProcessingSequenceBarrier<W>>,
+    /// Owned event handler. Mutated only from the single processor thread;
+    /// `UnsafeCell` avoids a Mutex on the hot path.
+    event_handler: UnsafeCell<H>,
     /// The exception handler for error handling
     exception_handler: Box<dyn ExceptionHandler<T>>,
     /// The current sequence being processed
@@ -125,38 +131,54 @@ where
     running: AtomicBool,
 }
 
-// Send + Sync are auto-derived: all fields are Send + Sync.
-// - Mutex<Box<dyn EventHandler<T>>> is Send + Sync when EventHandler<T>: Send
-// - EventHandler requires Send (trait bound), so this is satisfied.
+// SAFETY: BatchEventProcessor methods that mutate the handler are only invoked
+// from the dedicated processor thread (or before/after run under external sync).
+// `H: Send` is required so the processor can be moved to that thread.
+unsafe impl<T, H, W> Sync for BatchEventProcessor<T, H, W>
+where
+    T: Send + Sync,
+    H: EventHandler<T>,
+    W: WaitStrategy + 'static,
+{
+}
 
-impl<T> BatchEventProcessor<T>
+impl<T, H, W> BatchEventProcessor<T, H, W>
 where
     T: Send + Sync + 'static,
+    H: EventHandler<T> + 'static,
+    W: WaitStrategy + 'static,
 {
     /// Create a new batch event processor
     ///
     /// # Arguments
     /// * `data_provider` - The ring buffer serving events to this processor
-    /// * `sequence_barrier` - The sequence barrier for coordination
-    /// * `event_handler` - The event handler for processing events
+    /// * `sequence_barrier` - The monomorphized sequence barrier for coordination
+    /// * `event_handler` - The event handler for processing events (owned)
     /// * `exception_handler` - The exception handler for error handling
     ///
     /// # Returns
     /// A new BatchEventProcessor instance
     pub fn new(
         data_provider: Arc<RingBuffer<T>>,
-        sequence_barrier: Arc<dyn SequenceBarrier>,
-        event_handler: Box<dyn EventHandler<T>>,
+        sequence_barrier: Arc<ProcessingSequenceBarrier<W>>,
+        event_handler: H,
         exception_handler: Box<dyn ExceptionHandler<T>>,
     ) -> Self {
         Self {
             data_provider,
             sequence_barrier,
-            event_handler: Mutex::new(event_handler),
+            event_handler: UnsafeCell::new(event_handler),
             exception_handler,
             sequence: Arc::new(Sequence::new_with_initial_value()),
             running: AtomicBool::new(false),
         }
+    }
+
+    /// SAFETY: caller must ensure exclusive access to the handler (processor thread).
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn handler_mut(&self) -> &mut H {
+        &mut *self.event_handler.get()
     }
 
     /// Process events in a batch
@@ -178,9 +200,8 @@ where
 
                     let batch_span = available_sequence - next_sequence + 1;
 
-                    // Lock the handler once for the entire batch — uncontended in practice
-                    // since each processor runs on a single dedicated thread.
-                    let mut handler = self.event_handler.lock();
+                    // SAFETY: single processor thread owns handler mutations.
+                    let handler = unsafe { self.handler_mut() };
 
                     let queue_depth = available_sequence - self.sequence.get();
                     let _ = handler.on_batch_start(batch_span, queue_depth);
@@ -201,8 +222,6 @@ where
 
                         next_sequence += 1;
                     }
-
-                    drop(handler);
 
                     // Publish consumer progress once per completed batch, matching the
                     // LMAX BatchEventProcessor release-store semantics.
@@ -226,9 +245,11 @@ where
     }
 }
 
-impl<T> EventProcessor for BatchEventProcessor<T>
+impl<T, H, W> EventProcessor for BatchEventProcessor<T, H, W>
 where
     T: Send + Sync + 'static,
+    H: EventHandler<T> + 'static,
+    W: WaitStrategy + 'static,
 {
     fn get_sequence(&self) -> Arc<Sequence> {
         self.sequence.clone()
@@ -299,9 +320,8 @@ where
         let mut current_sequence = next_sequence;
         let batch_span = available_sequence - next_sequence + 1;
 
-        // Lock the handler once for the entire batch — uncontended in practice
-        // since each processor runs on a single dedicated thread.
-        let mut handler = self.event_handler.lock();
+        // SAFETY: single processor thread owns handler mutations.
+        let handler = unsafe { self.handler_mut() };
 
         // Notify batch start with batch size and queue depth
         let queue_depth = available_sequence - self.sequence.get();
@@ -322,9 +342,6 @@ where
             current_sequence += 1;
         }
 
-        // Drop the lock before the atomic store
-        drop(handler);
-
         // Update our sequence to indicate we've processed up to this point.
         // Release ordering ensures all prior event reads/writes are visible
         // before the sequence advance. Producers read this with Acquire,
@@ -336,7 +353,8 @@ where
     }
 
     fn notify_timeout(&self, sequence: i64) {
-        let mut handler = self.event_handler.lock();
+        // SAFETY: single processor thread owns handler mutations.
+        let handler = unsafe { self.handler_mut() };
         let _ = handler.on_timeout(sequence);
     }
 
@@ -344,7 +362,8 @@ where
         // Clear any previous alerts triggered during shutdown/halt cycles
         self.sequence_barrier.clear_alert();
         self.running.store(true, Ordering::Release);
-        let mut handler = self.event_handler.lock();
+        // SAFETY: single processor thread owns handler mutations.
+        let handler = unsafe { self.handler_mut() };
         if let Err(e) = handler.on_start() {
             self.exception_handler.handle_on_start_exception(e);
         }
@@ -352,7 +371,8 @@ where
 
     fn on_shutdown(&self) {
         {
-            let mut handler = self.event_handler.lock();
+            // SAFETY: single processor thread owns handler mutations.
+            let handler = unsafe { self.handler_mut() };
             if let Err(e) = handler.on_shutdown() {
                 self.exception_handler.handle_on_shutdown_exception(e);
             }
@@ -361,9 +381,11 @@ where
     }
 }
 
-impl<T> std::fmt::Debug for BatchEventProcessor<T>
+impl<T, H, W> std::fmt::Debug for BatchEventProcessor<T, H, W>
 where
     T: Send + Sync,
+    H: EventHandler<T>,
+    W: WaitStrategy + 'static,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BatchEventProcessor")
@@ -373,18 +395,17 @@ where
     }
 }
 
-impl<T> BatchEventProcessor<T>
+impl<T, H, W> BatchEventProcessor<T, H, W>
 where
-    T: Send + Sync,
+    T: Send + Sync + 'static,
+    H: EventHandler<T> + 'static,
+    W: WaitStrategy + 'static,
 {
     /// Spawn this processor in a new thread
     ///
     /// # Returns
     /// A join handle for the spawned thread
-    pub fn spawn(self) -> JoinHandle<Result<()>>
-    where
-        T: 'static,
-    {
+    pub fn spawn(self) -> JoinHandle<Result<()>> {
         thread::spawn(move || self.run())
     }
 }
@@ -407,7 +428,7 @@ mod tests {
     fn create_test_sequence_barrier(
         cursor: Arc<Sequence>,
         wait_strategy: Arc<BlockingWaitStrategy>,
-    ) -> Arc<ProcessingSequenceBarrier> {
+    ) -> Arc<ProcessingSequenceBarrier<BlockingWaitStrategy>> {
         let sequencer = crate::disruptor::sequencer::SequencerEnum::Single(Arc::new(
             SingleProducerSequencer::new(16, wait_strategy.clone()),
         ));
@@ -500,7 +521,7 @@ mod tests {
             vec![],
             sequencer,
         ));
-        let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
+        let event_handler = NoOpEventHandler::<TestEvent>::new();
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
         let processor = BatchEventProcessor::new(
@@ -520,7 +541,7 @@ mod tests {
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
-        let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
+        let event_handler = NoOpEventHandler::<TestEvent>::new();
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
         let processor = BatchEventProcessor::new(
@@ -541,7 +562,7 @@ mod tests {
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
-        let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
+        let event_handler = NoOpEventHandler::<TestEvent>::new();
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
         let processor = BatchEventProcessor::new(
@@ -565,7 +586,7 @@ mod tests {
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
-        let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
+        let event_handler = NoOpEventHandler::<TestEvent>::new();
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
         let processor = BatchEventProcessor::new(
@@ -594,7 +615,7 @@ mod tests {
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
-        let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
+        let event_handler = NoOpEventHandler::<TestEvent>::new();
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
         let processor = BatchEventProcessor::new(
@@ -644,7 +665,7 @@ mod tests {
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
-        let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
+        let event_handler = NoOpEventHandler::<TestEvent>::new();
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
         let processor = BatchEventProcessor::new(
@@ -824,7 +845,7 @@ mod tests {
         let processor = BatchEventProcessor::new(
             ring_buffer.clone(),
             barrier,
-            Box::new(TrackingEventHandler::new(handler_state.clone())),
+            TrackingEventHandler::new(handler_state.clone()),
             Box::new(RecordingExceptionHandler::new(exception_state.clone())),
         );
 
@@ -877,10 +898,7 @@ mod tests {
         let processor = BatchEventProcessor::new(
             ring_buffer.clone(),
             barrier,
-            Box::new(TrackingEventHandler::failing_on_sequence(
-                handler_state.clone(),
-                0,
-            )),
+            TrackingEventHandler::failing_on_sequence(handler_state.clone(), 0),
             Box::new(RecordingExceptionHandler::new(exception_state.clone())),
         );
 
@@ -926,7 +944,7 @@ mod tests {
         let processor = Arc::new(BatchEventProcessor::new(
             ring_buffer.clone(),
             barrier,
-            Box::new(TrackingEventHandler::new(handler_state.clone())),
+            TrackingEventHandler::new(handler_state.clone()),
             Box::new(DefaultExceptionHandler::<TestEvent>::new()),
         ));
 
@@ -975,7 +993,7 @@ mod tests {
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
-        let event_handler = Box::new(NoOpEventHandler::<TestEvent>::new());
+        let event_handler = NoOpEventHandler::<TestEvent>::new();
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
         let processor = BatchEventProcessor::new(
@@ -1002,7 +1020,7 @@ mod tests {
         let processor = BatchEventProcessor::new(
             data_provider,
             sequence_barrier,
-            Box::new(TrackingEventHandler::new(handler_state.clone())),
+            TrackingEventHandler::new(handler_state.clone()),
             Box::new(DefaultExceptionHandler::<TestEvent>::new()),
         );
 
@@ -1024,11 +1042,7 @@ mod tests {
         let processor = BatchEventProcessor::new(
             data_provider,
             sequence_barrier,
-            Box::new(TrackingEventHandler::failing_lifecycle(
-                handler_state.clone(),
-                true,
-                true,
-            )),
+            TrackingEventHandler::failing_lifecycle(handler_state.clone(), true, true),
             Box::new(RecordingExceptionHandler::new(exception_state.clone())),
         );
 
@@ -1043,8 +1057,10 @@ mod tests {
 
     #[test]
     fn test_processor_spawn_method_exists() {
-        let spawn_fn: fn(BatchEventProcessor<TestEvent>) -> JoinHandle<Result<()>> =
-            BatchEventProcessor::spawn;
+        #[allow(clippy::type_complexity)]
+        let spawn_fn: fn(
+            BatchEventProcessor<TestEvent, NoOpEventHandler<TestEvent>, BlockingWaitStrategy>,
+        ) -> JoinHandle<Result<()>> = BatchEventProcessor::spawn;
         let _ = spawn_fn;
     }
 }

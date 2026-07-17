@@ -813,6 +813,64 @@ impl WaitStrategy for SleepingWaitStrategy {
     }
 }
 
+/// Allow dynamic wait-strategy selection at the DSL boundary.
+///
+/// Prefer concrete monomorphized `W: WaitStrategy` on the hot path. This impl
+/// exists for benches and call sites that choose a strategy by name at runtime.
+impl WaitStrategy for Box<dyn WaitStrategy> {
+    fn wait_for_with_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        alerted: &AtomicBool,
+    ) -> Result<i64> {
+        (**self).wait_for_with_alert(sequence, cursor, dependent_sequences, alerted)
+    }
+
+    fn wait_for_with_timeout_and_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        timeout: Duration,
+        alerted: &AtomicBool,
+    ) -> Result<i64> {
+        (**self).wait_for_with_timeout_and_alert(
+            sequence,
+            cursor,
+            dependent_sequences,
+            timeout,
+            alerted,
+        )
+    }
+
+    fn wait_for_with_shutdown_and_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        shutdown_flag: &AtomicBool,
+        alerted: &AtomicBool,
+    ) -> Result<i64> {
+        (**self).wait_for_with_shutdown_and_alert(
+            sequence,
+            cursor,
+            dependent_sequences,
+            shutdown_flag,
+            alerted,
+        )
+    }
+
+    fn signal_all_when_blocking(&self) {
+        (**self).signal_all_when_blocking();
+    }
+
+    fn needs_signal(&self) -> bool {
+        (**self).needs_signal()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

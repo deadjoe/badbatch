@@ -35,15 +35,33 @@ pub enum SlotPadding {
     None,
     /// Force each slot to start on its own 64-byte cache line.
     CacheLine64,
+    /// Force each slot to start on a 128-byte boundary.
+    ///
+    /// Matches modern false-sharing granularity on x86_64/aarch64 (adjacent-line
+    /// prefetch / dual-line occupancy), consistent with `crossbeam_utils::CachePadded`
+    /// alignment used by `Sequence`.
+    CacheLine128,
 }
 
 #[derive(Debug)]
 #[repr(C, align(64))]
-struct CacheLinePaddedSlot<T> {
+struct CacheLinePaddedSlot64<T> {
     value: T,
 }
 
-impl<T> CacheLinePaddedSlot<T> {
+impl<T> CacheLinePaddedSlot64<T> {
+    fn new(value: T) -> Self {
+        Self { value }
+    }
+}
+
+#[derive(Debug)]
+#[repr(C, align(128))]
+struct CacheLinePaddedSlot128<T> {
+    value: T,
+}
+
+impl<T> CacheLinePaddedSlot128<T> {
     fn new(value: T) -> Self {
         Self { value }
     }
@@ -52,7 +70,8 @@ impl<T> CacheLinePaddedSlot<T> {
 #[derive(Debug)]
 enum SlotStorage<T> {
     Inline(Box<[UnsafeCell<T>]>),
-    CacheLine64(Box<[UnsafeCell<CacheLinePaddedSlot<T>>]>),
+    CacheLine64(Box<[UnsafeCell<CacheLinePaddedSlot64<T>>]>),
+    CacheLine128(Box<[UnsafeCell<CacheLinePaddedSlot128<T>>]>),
 }
 
 impl<T> SlotStorage<T> {
@@ -60,6 +79,7 @@ impl<T> SlotStorage<T> {
         match self {
             Self::Inline(slots) => slots.len(),
             Self::CacheLine64(slots) => slots.len(),
+            Self::CacheLine128(slots) => slots.len(),
         }
     }
 
@@ -67,13 +87,15 @@ impl<T> SlotStorage<T> {
         match self {
             Self::Inline(_) => SlotPadding::None,
             Self::CacheLine64(_) => SlotPadding::CacheLine64,
+            Self::CacheLine128(_) => SlotPadding::CacheLine128,
         }
     }
 
     fn slot_stride_bytes(&self) -> usize {
         match self {
             Self::Inline(_) => mem::size_of::<T>(),
-            Self::CacheLine64(_) => mem::size_of::<CacheLinePaddedSlot<T>>(),
+            Self::CacheLine64(_) => mem::size_of::<CacheLinePaddedSlot64<T>>(),
+            Self::CacheLine128(_) => mem::size_of::<CacheLinePaddedSlot128<T>>(),
         }
     }
 
@@ -87,6 +109,10 @@ impl<T> SlotStorage<T> {
                 let slot = slots.get_unchecked(index);
                 &(*slot.get()).value
             }
+            Self::CacheLine128(slots) => {
+                let slot = slots.get_unchecked(index);
+                &(*slot.get()).value
+            }
         }
     }
 
@@ -94,6 +120,10 @@ impl<T> SlotStorage<T> {
         match self {
             Self::Inline(slots) => slots.get_unchecked(index).get(),
             Self::CacheLine64(slots) => {
+                let slot = slots.get_unchecked(index);
+                ptr::addr_of_mut!((*slot.get()).value)
+            }
+            Self::CacheLine128(slots) => {
                 let slot = slots.get_unchecked(index);
                 ptr::addr_of_mut!((*slot.get()).value)
             }
@@ -177,7 +207,16 @@ where
             ),
             SlotPadding::CacheLine64 => SlotStorage::CacheLine64(
                 (0..buffer_size)
-                    .map(|_| UnsafeCell::new(CacheLinePaddedSlot::new(factory_ref.new_instance())))
+                    .map(|_| {
+                        UnsafeCell::new(CacheLinePaddedSlot64::new(factory_ref.new_instance()))
+                    })
+                    .collect(),
+            ),
+            SlotPadding::CacheLine128 => SlotStorage::CacheLine128(
+                (0..buffer_size)
+                    .map(|_| {
+                        UnsafeCell::new(CacheLinePaddedSlot128::new(factory_ref.new_instance()))
+                    })
                     .collect(),
             ),
         };
@@ -284,6 +323,7 @@ where
     /// Get the ring slot index for a given sequence.
     #[inline]
     #[must_use]
+    #[allow(dead_code)] // retained for diagnostics / future parallel-stage tooling
     pub(crate) fn sequence_to_index(&self, sequence: i64) -> usize {
         self.slot_index(sequence)
     }
@@ -455,11 +495,15 @@ where
 /// A thread-safe wrapper around the ring buffer
 ///
 /// This provides shared access to the ring buffer across multiple threads
-/// using Arc and appropriate synchronization primitives.
+/// using `Arc` and `parking_lot::RwLock` synchronization primitives.
 ///
-/// **Warning**: This implementation uses locks and violates the lock-free
-/// principle of the Disruptor pattern. It's provided for compatibility
-/// but should be avoided in performance-critical scenarios.
+/// # Not part of the lock-free core
+///
+/// **This type is intentionally non-lock-free.** It is feature-gated behind
+/// `shared-ring-buffer` and is **not** part of the core Disruptor protocol
+/// path (`RingBuffer` + sequencers + barriers). Use it only for convenience
+/// or experimental shared-access scenarios; high-performance code should use
+/// the lock-free `RingBuffer` coordinated by sequencers.
 #[cfg(feature = "shared-ring-buffer")]
 #[derive(Debug)]
 pub struct SharedRingBuffer<T>
@@ -627,6 +671,24 @@ mod tests {
             assert_eq!(ptr0 % 64, 0);
             assert_eq!(ptr1 % 64, 0);
             assert_eq!(ptr1 - ptr0, 64);
+        }
+    }
+
+    #[test]
+    fn test_ring_buffer_creation_with_cache_line_128_padding() {
+        let factory = DefaultEventFactory::<SmallEvent>::new();
+        let buffer = RingBuffer::new_with_padding(8, factory, SlotPadding::CacheLine128).unwrap();
+
+        assert_eq!(buffer.buffer_size(), 8);
+        assert_eq!(buffer.slot_padding(), SlotPadding::CacheLine128);
+        assert_eq!(buffer.slot_stride_bytes(), 128);
+
+        unsafe {
+            let ptr0 = buffer.get_mut_unchecked(0) as usize;
+            let ptr1 = buffer.get_mut_unchecked(1) as usize;
+            assert_eq!(ptr0 % 128, 0);
+            assert_eq!(ptr1 % 128, 0);
+            assert_eq!(ptr1 - ptr0, 128);
         }
     }
 

@@ -1,7 +1,11 @@
 //! Elegant consumer handling inspired by disruptor-rs
 //!
-//! This module provides simplified, elegant consumer handling with automatic
-//! batch processing detection, state management, and clean shutdown.
+//! Lightweight helper for demos/experiments with automatic batch detection and
+//! clean shutdown. Prefer the monomorphized Builder (`build_*`) or
+//! [`crate::disruptor::EventPoller`] for production-shaped topologies.
+//!
+//! Uses [`SimpleWaitStrategy`] (`backoff`); those ZSTs also implement full
+//! [`crate::disruptor::WaitStrategy`] for Builder use without adapters.
 
 use crate::disruptor::{
     simple_wait_strategy::SimpleWaitStrategy,
@@ -314,7 +318,7 @@ where
             Some(sequence)
         } else {
             // Wait using the strategy
-            wait_strategy.wait_for(sequence);
+            wait_strategy.backoff();
 
             // Check shutdown again
             if shutdown.load(Ordering::Acquire) {

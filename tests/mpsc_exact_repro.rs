@@ -68,7 +68,7 @@ impl ReproProducer {
     fn new(
         producer_id: usize,
         burst_size: u64,
-        disruptor: Arc<Disruptor<ReproEvent>>,
+        disruptor: Arc<Disruptor<ReproEvent, BusySpinWaitStrategy>>,
         start_barrier: Arc<Barrier>,
         stop_flag: Arc<AtomicBool>,
     ) -> Self {
@@ -149,7 +149,7 @@ fn test_mpsc_exact_repro() {
         factory,
         BUFFER_SIZE, // This triggers bitmap path!
         ProducerType::Multi,
-        Box::new(BusySpinWaitStrategy::new()),
+        BusySpinWaitStrategy::new(),
     )
     .unwrap()
     .handle_events_with(handler)

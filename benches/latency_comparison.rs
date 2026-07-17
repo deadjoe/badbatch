@@ -182,7 +182,7 @@ fn benchmark_disruptor_latency(group: &mut BenchmarkGroup<WallTime>) {
         factory,
         BUFFER_SIZE,
         ProducerType::Single,
-        Box::new(BusySpinWaitStrategy::new()),
+        BusySpinWaitStrategy::new(),
     )
     .unwrap()
     .handle_events_with(handler)

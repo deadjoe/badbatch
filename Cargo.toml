@@ -1,9 +1,9 @@
 [package]
 name = "badbatch"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-rust-version = "1.84"
-authors = ["BadBatch Team"]
+rust-version = "1.97"
+authors = ["Joe <smartjoe@gmail.com>"]
 description = "High-Performance Disruptor Engine - A complete Rust implementation of the LMAX Disruptor pattern"
 license = "AGPL-3.0"
 repository = "https://github.com/deadjoe/badbatch"
@@ -32,6 +32,8 @@ proptest = "1.10"  # Property-based testing
 
 [features]
 default = []
+# Non-lock-free convenience wrapper (`SharedRingBuffer` uses RwLock).
+# NOT part of the core lock-free Disruptor path — opt-in only.
 shared-ring-buffer = []
 full-benchmarks = []
 

@@ -879,9 +879,9 @@ fn summarize_runs(runs: &[RoundRecord]) -> PhaseSummary {
 
     let mut sorted = measured.clone();
     sorted.sort_by(f64::total_cmp);
-    let median = if sorted.len() % 2 == 0 {
+    let median = if sorted.len().is_multiple_of(2) {
         let upper = sorted.len() / 2;
-        (sorted[upper - 1] + sorted[upper]) / 2.0
+        f64::midpoint(sorted[upper - 1], sorted[upper])
     } else {
         sorted[sorted.len() / 2]
     };

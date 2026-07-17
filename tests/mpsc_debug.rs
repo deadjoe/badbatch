@@ -84,7 +84,7 @@ fn test_mpsc_simple_case() {
         factory,
         32, // Small buffer
         ProducerType::Multi,
-        Box::new(BusySpinWaitStrategy::new()),
+        BusySpinWaitStrategy::new(),
     )
     .unwrap()
     .handle_events_with(handler)
@@ -151,7 +151,7 @@ fn test_mpsc_concurrent_producers() {
         factory,
         32, // Small buffer
         ProducerType::Multi,
-        Box::new(BusySpinWaitStrategy::new()),
+        BusySpinWaitStrategy::new(),
     )
     .unwrap()
     .handle_events_with(handler)

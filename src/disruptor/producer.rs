@@ -7,8 +7,9 @@
 //! component, following the LMAX Disruptor design principles.
 
 use crate::disruptor::sequencer::SequencerEnum;
-use crate::disruptor::{ring_buffer::BatchIterMut, RingBuffer, Sequencer};
+use crate::disruptor::{ring_buffer::BatchIterMut, RingBuffer, Sequencer, WaitStrategy};
 use std::convert::TryFrom;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// Error indicating that the ring buffer is full
@@ -165,18 +166,54 @@ where
 ///
 /// This producer works with any Sequencer implementation (single or multi-producer)
 /// and correctly follows the LMAX Disruptor pattern for sequence allocation and publishing.
-#[derive(Debug, Clone)]
-pub struct SimpleProducer<T>
+///
+/// # Threading model
+///
+/// `SimpleProducer` is **`Send` but not `Sync`**: one publishing thread owns each handle.
+/// - **Single-producer**: never share the handle across threads.
+/// - **Multi-producer**: `Clone` a handle per publishing thread (handles share the sequencer).
+///
+/// This encodes LMAX's exclusive-publisher discipline in the type system instead of comments.
+#[derive(Debug)]
+pub struct SimpleProducer<T, W>
 where
     T: Send + Sync,
+    W: WaitStrategy + 'static,
 {
     ring_buffer: Arc<RingBuffer<T>>,
-    sequencer: SequencerEnum,
+    sequencer: SequencerEnum<W>,
+    /// Marks this type `!Sync` so handles cannot be shared across threads by accident.
+    _not_sync: PhantomData<*const ()>,
 }
 
-impl<T> SimpleProducer<T>
+// SAFETY: SimpleProducer contains only Send fields (Arcs). The `*const ()` phantom
+// makes the type !Sync without affecting Send. Each handle is intended for a single
+// publishing thread; multi-producer clones are independent handles on the same sequencer.
+unsafe impl<T, W> Send for SimpleProducer<T, W>
 where
     T: Send + Sync,
+    W: WaitStrategy + 'static,
+{
+}
+
+impl<T, W> Clone for SimpleProducer<T, W>
+where
+    T: Send + Sync,
+    W: WaitStrategy + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            ring_buffer: Arc::clone(&self.ring_buffer),
+            sequencer: self.sequencer.clone(),
+            _not_sync: PhantomData,
+        }
+    }
+}
+
+impl<T, W> SimpleProducer<T, W>
+where
+    T: Send + Sync,
+    W: WaitStrategy + 'static,
 {
     /// Create a new simple producer
     ///
@@ -186,10 +223,11 @@ where
     ///
     /// # Returns
     /// A new SimpleProducer instance
-    pub fn new(ring_buffer: Arc<RingBuffer<T>>, sequencer: SequencerEnum) -> Self {
+    pub fn new(ring_buffer: Arc<RingBuffer<T>>, sequencer: SequencerEnum<W>) -> Self {
         Self {
             ring_buffer,
             sequencer,
+            _not_sync: PhantomData,
         }
     }
 
@@ -201,9 +239,10 @@ where
     // Note: wait_for_capacity is no longer needed as we use sequencer.next() which blocks
 }
 
-impl<T> Producer<T> for SimpleProducer<T>
+impl<T, W> Producer<T> for SimpleProducer<T, W>
 where
     T: Send + Sync,
+    W: WaitStrategy + 'static,
 {
     fn try_publish<F>(&mut self, update: F) -> std::result::Result<i64, RingBufferFull>
     where
@@ -331,7 +370,7 @@ mod tests {
         }
     }
 
-    fn create_test_producer() -> SimpleProducer<TestEvent> {
+    fn create_test_producer() -> SimpleProducer<TestEvent, BusySpinWaitStrategy> {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let ring_buffer =
             Arc::new(RingBuffer::new(8, factory).expect("Failed to create ring buffer"));
@@ -342,7 +381,7 @@ mod tests {
         SimpleProducer::new(ring_buffer, sequencer)
     }
 
-    fn create_multi_producer_test_producer() -> SimpleProducer<TestEvent> {
+    fn create_multi_producer_test_producer() -> SimpleProducer<TestEvent, BusySpinWaitStrategy> {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let ring_buffer =
             Arc::new(RingBuffer::new(16, factory).expect("Failed to create ring buffer"));

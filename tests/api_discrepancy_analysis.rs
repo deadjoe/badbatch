@@ -118,7 +118,7 @@ mod api_discrepancy_tests {
             factory,
             1024, // Buffer size (must be power of 2)
             ProducerType::Single,
-            Box::new(BlockingWaitStrategy::new()),
+            BlockingWaitStrategy::new(),
         )
         .unwrap()
         .handle_events_with(MyEventHandler)
@@ -166,7 +166,7 @@ mod api_discrepancy_tests {
         };
 
         // All imports should be available
-        let _: Option<Disruptor<i32>> = None;
+        let _: Option<Disruptor<i32, BlockingWaitStrategy>> = None;
         let _: Option<ProducerType> = None;
         let _: Option<BlockingWaitStrategy> = None;
         let _: Option<DefaultEventFactory<i32>> = None;
@@ -244,14 +244,10 @@ mod api_discrepancy_tests {
         }
 
         let factory = DefaultEventFactory::<MyEvent>::new();
-        let _disruptor_result = Disruptor::new(
-            factory,
-            1024,
-            ProducerType::Single,
-            Box::new(BusySpinWaitStrategy),
-        )
-        .unwrap()
-        .handle_events_with(MyHandler);
+        let _disruptor_result =
+            Disruptor::new(factory, 1024, ProducerType::Single, BusySpinWaitStrategy)
+                .unwrap()
+                .handle_events_with(MyHandler);
     }
 }
 

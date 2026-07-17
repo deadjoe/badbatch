@@ -45,7 +45,7 @@
 //!     factory,
 //!     1024, // Buffer size (must be power of 2)
 //!     ProducerType::Single,
-//!     Box::new(BlockingWaitStrategy::new()),
+//!     BlockingWaitStrategy::new(),
 //! ).unwrap()
 //! .handle_events_with(MyEventHandler)
 //! .build();
@@ -87,13 +87,13 @@
 //! ## Event Sizing and Cache-Line Padding
 //!
 //! BadBatch stores events inline in a contiguous ring buffer (`Box<[UnsafeCell<T>]>`).
-//! When event structs are smaller than a CPU cache line (64 bytes on most platforms),
-//! multiple adjacent slots share the same cache line. In high-throughput unicast
-//! scenarios, this causes **false sharing**: the producer writing slot N and the
-//! consumer reading slot N-1 trigger cross-core cache invalidation traffic,
-//! severely degrading throughput (up to ~4x on Apple Silicon with 32-byte events).
+//! On modern x86_64/aarch64 the false-sharing granularity is typically **128 bytes**
+//! (Sequence values already use `CachePadded` at 128B). Small events packed back-to-back
+//! can still share a line: the producer writing slot N and the consumer reading slot N-1
+//! may thrash coherency traffic (up to ~4x regression observed on Apple Silicon with
+//! 32-byte events).
 //!
-//! For Builder API users, the easiest opt-in mitigation is:
+//! For Builder API users, the easiest opt-in mitigation is 128-byte slot padding:
 //!
 //! ```rust
 //! use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
@@ -105,27 +105,24 @@
 //! }
 //!
 //! let mut disruptor = build_single_producer(1024, MyEvent::default, BusySpinWaitStrategy)
-//!     .with_cache_line_padding(true)
+//!     .with_cache_line_padding(true) // → SlotPadding::CacheLine128
 //!     .handle_events_with(|_event, _sequence, _end_of_batch| {})
 //!     .build();
 //! # disruptor.shutdown();
 //! ```
 //!
-//! If your event struct is smaller than 64 bytes and you need maximum unicast
-//! throughput outside the Builder API, add explicit cache-line alignment:
+//! Or align the event type itself:
 //!
 //! ```rust
-//! #[repr(C, align(64))]
+//! #[repr(C, align(128))]
 //! #[derive(Debug, Default)]
 //! struct MyEvent {
 //!     value: i64,
 //!     payload: i64,
-//!     // Rust pads to 64 bytes automatically due to align(64)
 //! }
 //! ```
 //!
-//! This ensures each slot occupies its own cache line, eliminating false sharing.
-//! Events that are already >= 64 bytes do not need this annotation.
+//! Default remains no slot padding (`SlotPadding::None`); measure before enabling.
 
 #![allow(
     clippy::doc_markdown,

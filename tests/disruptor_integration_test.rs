@@ -45,7 +45,7 @@ fn test_single_producer_basic_functionality() {
         factory,
         1024,
         ProducerType::Single,
-        Box::new(BlockingWaitStrategy::new()),
+        BlockingWaitStrategy::new(),
     )
     .unwrap();
 
@@ -72,7 +72,7 @@ fn test_multi_producer_coordination() {
             factory,
             1024,
             ProducerType::Multi,
-            Box::new(BlockingWaitStrategy::new()),
+            BlockingWaitStrategy::new(),
         )
         .unwrap(),
     );
@@ -143,7 +143,7 @@ fn test_disruptor_restart_clears_alerts() {
         factory,
         32,
         ProducerType::Single,
-        Box::new(BlockingWaitStrategy::new()),
+        BlockingWaitStrategy::new(),
     )
     .unwrap()
     .handle_events_with(handler)
@@ -208,7 +208,7 @@ fn test_wait_strategy_blocking() {
             factory,
             16, // Small buffer to test blocking
             ProducerType::Single,
-            Box::new(BlockingWaitStrategy::new()),
+            BlockingWaitStrategy::new(),
         )
         .unwrap(),
     );
@@ -240,13 +240,8 @@ fn test_wait_strategy_blocking() {
 #[test]
 fn test_available_buffer_tracking() {
     let factory = DefaultEventFactory::<TestEvent>::new();
-    let disruptor = Disruptor::new(
-        factory,
-        8,
-        ProducerType::Multi,
-        Box::new(BlockingWaitStrategy::new()),
-    )
-    .unwrap();
+    let disruptor =
+        Disruptor::new(factory, 8, ProducerType::Multi, BlockingWaitStrategy::new()).unwrap();
 
     // Publish some events
     for i in 0..5 {
@@ -269,7 +264,7 @@ fn test_event_translator_integration() {
         factory,
         64,
         ProducerType::Single,
-        Box::new(BlockingWaitStrategy::new()),
+        BlockingWaitStrategy::new(),
     )
     .unwrap();
 

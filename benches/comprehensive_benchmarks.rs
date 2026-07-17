@@ -89,7 +89,7 @@ mod fixed_benchmarks {
             factory,
             1024,
             ProducerType::Single,
-            Box::new(BusySpinWaitStrategy::new()),
+            BusySpinWaitStrategy::new(),
         ) {
             Ok(d) => d.handle_events_with(handler).build(),
             Err(e) => {
@@ -159,7 +159,7 @@ mod fixed_benchmarks {
                     factory,
                     *buffer_size,
                     ProducerType::Single,
-                    Box::new(BusySpinWaitStrategy::new()),
+                    BusySpinWaitStrategy::new(),
                 ) {
                     Ok(d) => d.handle_events_with(handler).build(),
                     Err(_) => return, // Skip this test if creation fails
@@ -213,7 +213,7 @@ mod fixed_benchmarks {
             factory,
             512,
             ProducerType::Single,
-            Box::new(BusySpinWaitStrategy::new()),
+            BusySpinWaitStrategy::new(),
         ) {
             Ok(d) => d.handle_events_with(handler).build(),
             Err(_) => return,

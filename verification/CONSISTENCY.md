@@ -52,6 +52,16 @@ The following optimizations were verified against the TLA+ models:
 
 All 5 TLA+ models re-verified successfully after these changes.
 
+## Round-3 Modernization Consistency (2026-07-17)
+
+1. **Monomorphized wait strategy / barrier** (`Arc<W>`, `ProcessingSequenceBarrier<W>`):
+   - Implementation change only; publish/contiguity/backpressure protocol unchanged.
+2. **WorkerPool scheme A** (same-stage parallel consumers, CAS claim on shared work sequence):
+   - Not modeled in current TLA specs (they model exclusive sequential consumers / pipeline stages).
+   - Safety argument in code: exclusive CAS claim ⇒ single mutator per sequence; gating uses min(worker sequences).
+   - Optional model enhancement: add a WorkProcessor claim counter with mutual exclusion on claimed sequences.
+3. **Slot padding CacheLine128**: layout-only; no protocol impact.
+
 ## Suggested Model Enhancements (Optional)
 
 - Add a simple safety property asserting per-reader monotonic consumption (prefix strictly increasing), though it’s already implied by the state machine and `Liveness`.

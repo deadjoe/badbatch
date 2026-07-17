@@ -53,7 +53,7 @@ fn corrected_traditional_lmax_example() {
         factory,
         1024, // Buffer size (must be power of 2)
         ProducerType::Single,
-        Box::new(BlockingWaitStrategy::new()),
+        BlockingWaitStrategy::new(),
     )
     .unwrap()
     .handle_events_with(MyEventHandler)

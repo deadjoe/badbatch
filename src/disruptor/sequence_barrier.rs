@@ -5,7 +5,7 @@
 //! consumers don't process events until their dependencies have been satisfied.
 
 use crate::disruptor::sequencer::{Sequencer, SequencerEnum};
-use crate::disruptor::{DisruptorError, Result, Sequence};
+use crate::disruptor::{DisruptorError, Result, Sequence, WaitStrategy};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -111,18 +111,21 @@ pub trait SequenceBarrier: Send + Sync {
 /// and a set of dependent sequences (typically from other event processors).
 /// It ensures that events are not processed until all dependencies are satisfied.
 #[derive(Debug)]
-pub struct ProcessingSequenceBarrier {
+pub struct ProcessingSequenceBarrier<W>
+where
+    W: WaitStrategy + 'static,
+{
     /// The main cursor sequence to track
     cursor: Arc<Sequence>,
-    /// The wait strategy to use when waiting for sequences
-    wait_strategy: Arc<dyn crate::disruptor::WaitStrategy>,
+    /// The wait strategy to use when waiting for sequences (monomorphized; no vtable)
+    wait_strategy: Arc<W>,
     /// Sequences that this barrier depends on
     dependent_sequences: Vec<Arc<Sequence>>,
     /// Alert flag for interrupting waiting threads
     alerted: AtomicBool,
     /// Reference to the sequencer for getting highest published sequence.
     /// Uses enum dispatch instead of vtable indirection for performance.
-    sequencer: SequencerEnum,
+    sequencer: SequencerEnum<W>,
     /// Whether consumers must converge on a contiguous published range.
     ///
     /// Only multi-producer sequencers publish out of order, so only they
@@ -133,7 +136,10 @@ pub struct ProcessingSequenceBarrier {
     needs_contiguity_check: bool,
 }
 
-impl ProcessingSequenceBarrier {
+impl<W> ProcessingSequenceBarrier<W>
+where
+    W: WaitStrategy + 'static,
+{
     /// Create a new processing sequence barrier
     ///
     /// # Arguments
@@ -146,9 +152,9 @@ impl ProcessingSequenceBarrier {
     /// A new ProcessingSequenceBarrier instance
     pub fn new(
         cursor: Arc<Sequence>,
-        wait_strategy: Arc<dyn crate::disruptor::WaitStrategy>,
+        wait_strategy: Arc<W>,
         dependent_sequences: Vec<Arc<Sequence>>,
-        sequencer: SequencerEnum,
+        sequencer: SequencerEnum<W>,
     ) -> Self {
         let needs_contiguity_check = matches!(sequencer, SequencerEnum::Multi(_));
         Self {
@@ -178,7 +184,10 @@ impl ProcessingSequenceBarrier {
     }
 }
 
-impl SequenceBarrier for ProcessingSequenceBarrier {
+impl<W> SequenceBarrier for ProcessingSequenceBarrier<W>
+where
+    W: WaitStrategy + 'static,
+{
     fn wait_for(&self, sequence: i64) -> Result<i64> {
         // Check if we've been alerted before starting to wait
         self.check_alert()?;
@@ -286,7 +295,7 @@ mod tests {
     fn create_simple_barrier(
         cursor: Arc<Sequence>,
         wait_strategy: Arc<BlockingWaitStrategy>,
-    ) -> ProcessingSequenceBarrier {
+    ) -> ProcessingSequenceBarrier<BlockingWaitStrategy> {
         use crate::disruptor::SingleProducerSequencer;
         let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
             16,

@@ -90,51 +90,90 @@ fn benchmark_disruptor_throughput(
     wait_strategy: &str,
     producer_type: ProducerType,
 ) {
-    let counter = Arc::new(AtomicI64::new(0));
-    let mut disruptor = match (producer_type, wait_strategy) {
-        (ProducerType::Single, "BusySpin") => build_single_producer(
-            buffer_size,
-            ThroughputEvent::default,
-            BusySpinWaitStrategy::new(),
-        )
-        .handle_events_with(counting_handler(&counter))
-        .build(),
-        (ProducerType::Single, "Yielding") => build_single_producer(
-            buffer_size,
-            ThroughputEvent::default,
-            YieldingWaitStrategy::new(),
-        )
-        .handle_events_with(counting_handler(&counter))
-        .build(),
-        (ProducerType::Single, "Blocking") => build_single_producer(
-            buffer_size,
-            ThroughputEvent::default,
-            BlockingWaitStrategy::new(),
-        )
-        .handle_events_with(counting_handler(&counter))
-        .build(),
-        (ProducerType::Multi, "BusySpin") => build_multi_producer(
-            buffer_size,
-            ThroughputEvent::default,
-            BusySpinWaitStrategy::new(),
-        )
-        .handle_events_with(counting_handler(&counter))
-        .build(),
-        (ProducerType::Multi, "Yielding") => build_multi_producer(
-            buffer_size,
-            ThroughputEvent::default,
-            YieldingWaitStrategy::new(),
-        )
-        .handle_events_with(counting_handler(&counter))
-        .build(),
-        (ProducerType::Multi, "Blocking") => build_multi_producer(
-            buffer_size,
-            ThroughputEvent::default,
-            BlockingWaitStrategy::new(),
-        )
-        .handle_events_with(counting_handler(&counter))
-        .build(),
+    match (producer_type, wait_strategy) {
+        (ProducerType::Single, "BusySpin") => {
+            run_builder_throughput(
+                group,
+                buffer_size,
+                wait_strategy,
+                producer_type,
+                true,
+                BusySpinWaitStrategy::new(),
+            );
+        }
+        (ProducerType::Single, "Yielding") => {
+            run_builder_throughput(
+                group,
+                buffer_size,
+                wait_strategy,
+                producer_type,
+                true,
+                YieldingWaitStrategy::new(),
+            );
+        }
+        (ProducerType::Single, "Blocking") => {
+            run_builder_throughput(
+                group,
+                buffer_size,
+                wait_strategy,
+                producer_type,
+                true,
+                BlockingWaitStrategy::new(),
+            );
+        }
+        (ProducerType::Multi, "BusySpin") => {
+            run_builder_throughput(
+                group,
+                buffer_size,
+                wait_strategy,
+                producer_type,
+                false,
+                BusySpinWaitStrategy::new(),
+            );
+        }
+        (ProducerType::Multi, "Yielding") => {
+            run_builder_throughput(
+                group,
+                buffer_size,
+                wait_strategy,
+                producer_type,
+                false,
+                YieldingWaitStrategy::new(),
+            );
+        }
+        (ProducerType::Multi, "Blocking") => {
+            run_builder_throughput(
+                group,
+                buffer_size,
+                wait_strategy,
+                producer_type,
+                false,
+                BlockingWaitStrategy::new(),
+            );
+        }
         _ => unreachable!("unsupported producer/wait-strategy combination"),
+    }
+}
+
+fn run_builder_throughput<W>(
+    group: &mut BenchmarkGroup<WallTime>,
+    buffer_size: usize,
+    wait_strategy: &str,
+    producer_type: ProducerType,
+    single_producer: bool,
+    strategy: W,
+) where
+    W: badbatch::disruptor::WaitStrategy + Clone + 'static,
+{
+    let counter = Arc::new(AtomicI64::new(0));
+    let mut disruptor = if single_producer {
+        build_single_producer(buffer_size, ThroughputEvent::default, strategy)
+            .handle_events_with(counting_handler(&counter))
+            .build()
+    } else {
+        build_multi_producer(buffer_size, ThroughputEvent::default, strategy)
+            .handle_events_with(counting_handler(&counter))
+            .build()
     };
 
     let producer_str = match producer_type {
@@ -283,7 +322,7 @@ fn benchmark_try_publish_throughput(group: &mut BenchmarkGroup<WallTime>, buffer
         factory,
         buffer_size,
         ProducerType::Single,
-        Box::new(BusySpinWaitStrategy::new()),
+        BusySpinWaitStrategy::new(),
     )
     .unwrap()
     .handle_events_with(handler)

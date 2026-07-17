@@ -407,9 +407,12 @@ impl TryFrom<CliConfig> for ResolvedConfig {
     }
 }
 
-struct DirectConsumerRuntime {
+struct DirectConsumerRuntime<W>
+where
+    W: WaitStrategy + 'static,
+{
     ring_buffer: Arc<RingBuffer<MicroEvent>>,
-    sequencer: Arc<SingleProducerSequencer>,
+    sequencer: Arc<SingleProducerSequencer<W>>,
     barrier: Arc<dyn SequenceBarrier>,
     consumer_sequence: Arc<Sequence>,
     shutdown_flag: Arc<AtomicBool>,
@@ -419,9 +422,12 @@ struct DirectConsumerRuntime {
     consumer_handle: thread::JoinHandle<Result<(), String>>,
 }
 
-struct DirectComparisonRuntime {
+struct DirectComparisonRuntime<W>
+where
+    W: WaitStrategy + 'static,
+{
     ring_buffer: Arc<RingBuffer<ComparisonPayloadEvent>>,
-    sequencer: Arc<SingleProducerSequencer>,
+    sequencer: Arc<SingleProducerSequencer<W>>,
     barrier: Arc<dyn SequenceBarrier>,
     consumer_sequence: Arc<Sequence>,
     shutdown_flag: Arc<AtomicBool>,
@@ -431,9 +437,12 @@ struct DirectComparisonRuntime {
     consumer_handle: thread::JoinHandle<Result<(), String>>,
 }
 
-struct DirectPaddedComparisonRuntime {
+struct DirectPaddedComparisonRuntime<W>
+where
+    W: WaitStrategy + 'static,
+{
     ring_buffer: Arc<RingBuffer<ComparisonPadded64Event>>,
-    sequencer: Arc<SingleProducerSequencer>,
+    sequencer: Arc<SingleProducerSequencer<W>>,
     barrier: Arc<dyn SequenceBarrier>,
     consumer_sequence: Arc<Sequence>,
     shutdown_flag: Arc<AtomicBool>,
@@ -443,9 +452,12 @@ struct DirectPaddedComparisonRuntime {
     consumer_handle: thread::JoinHandle<Result<(), String>>,
 }
 
-struct DirectPadded128ComparisonRuntime {
+struct DirectPadded128ComparisonRuntime<W>
+where
+    W: WaitStrategy + 'static,
+{
     ring_buffer: Arc<RingBuffer<ComparisonPadded128Event>>,
-    sequencer: Arc<SingleProducerSequencer>,
+    sequencer: Arc<SingleProducerSequencer<W>>,
     barrier: Arc<dyn SequenceBarrier>,
     consumer_sequence: Arc<Sequence>,
     shutdown_flag: Arc<AtomicBool>,
@@ -455,16 +467,16 @@ struct DirectPadded128ComparisonRuntime {
     consumer_handle: thread::JoinHandle<Result<(), String>>,
 }
 
-impl DirectConsumerRuntime {
-    fn new<W>(buffer_size: usize, wait_strategy: W) -> Result<Self, String>
-    where
-        W: WaitStrategy + Send + Sync + Clone + 'static,
-    {
+impl<W> DirectConsumerRuntime<W>
+where
+    W: WaitStrategy + 'static,
+{
+    fn new(buffer_size: usize, wait_strategy: W) -> Result<Self, String> {
         let ring_buffer = Arc::new(
             RingBuffer::new(buffer_size, DefaultEventFactory::<MicroEvent>::new())
                 .map_err(|error| format!("failed to create ring buffer: {error:?}"))?,
         );
-        let wait_strategy_arc: Arc<dyn WaitStrategy> = Arc::new(wait_strategy);
+        let wait_strategy_arc = Arc::new(wait_strategy);
         let sequencer = Arc::new(SingleProducerSequencer::new(
             buffer_size,
             Arc::clone(&wait_strategy_arc),
@@ -517,11 +529,11 @@ impl DirectConsumerRuntime {
     }
 }
 
-impl DirectComparisonRuntime {
-    fn new<W>(buffer_size: usize, wait_strategy: W) -> Result<Self, String>
-    where
-        W: WaitStrategy + Send + Sync + Clone + 'static,
-    {
+impl<W> DirectComparisonRuntime<W>
+where
+    W: WaitStrategy + 'static,
+{
+    fn new(buffer_size: usize, wait_strategy: W) -> Result<Self, String> {
         let ring_buffer = Arc::new(
             RingBuffer::new(
                 buffer_size,
@@ -529,7 +541,7 @@ impl DirectComparisonRuntime {
             )
             .map_err(|error| format!("failed to create comparison ring buffer: {error:?}"))?,
         );
-        let wait_strategy_arc: Arc<dyn WaitStrategy> = Arc::new(wait_strategy);
+        let wait_strategy_arc = Arc::new(wait_strategy);
         let sequencer = Arc::new(SingleProducerSequencer::new(
             buffer_size,
             Arc::clone(&wait_strategy_arc),
@@ -582,11 +594,11 @@ impl DirectComparisonRuntime {
     }
 }
 
-impl DirectPaddedComparisonRuntime {
-    fn new<W>(buffer_size: usize, wait_strategy: W) -> Result<Self, String>
-    where
-        W: WaitStrategy + Send + Sync + Clone + 'static,
-    {
+impl<W> DirectPaddedComparisonRuntime<W>
+where
+    W: WaitStrategy + 'static,
+{
+    fn new(buffer_size: usize, wait_strategy: W) -> Result<Self, String> {
         let ring_buffer = Arc::new(
             RingBuffer::new(
                 buffer_size,
@@ -596,7 +608,7 @@ impl DirectPaddedComparisonRuntime {
                 format!("failed to create padded comparison ring buffer: {error:?}")
             })?,
         );
-        let wait_strategy_arc: Arc<dyn WaitStrategy> = Arc::new(wait_strategy);
+        let wait_strategy_arc = Arc::new(wait_strategy);
         let sequencer = Arc::new(SingleProducerSequencer::new(
             buffer_size,
             Arc::clone(&wait_strategy_arc),
@@ -649,11 +661,11 @@ impl DirectPaddedComparisonRuntime {
     }
 }
 
-impl DirectPadded128ComparisonRuntime {
-    fn new<W>(buffer_size: usize, wait_strategy: W) -> Result<Self, String>
-    where
-        W: WaitStrategy + Send + Sync + Clone + 'static,
-    {
+impl<W> DirectPadded128ComparisonRuntime<W>
+where
+    W: WaitStrategy + 'static,
+{
+    fn new(buffer_size: usize, wait_strategy: W) -> Result<Self, String> {
         let ring_buffer = Arc::new(
             RingBuffer::new(
                 buffer_size,
@@ -663,7 +675,7 @@ impl DirectPadded128ComparisonRuntime {
                 format!("failed to create padded-128 comparison ring buffer: {error:?}")
             })?,
         );
-        let wait_strategy_arc: Arc<dyn WaitStrategy> = Arc::new(wait_strategy);
+        let wait_strategy_arc = Arc::new(wait_strategy);
         let sequencer = Arc::new(SingleProducerSequencer::new(
             buffer_size,
             Arc::clone(&wait_strategy_arc),
@@ -1101,10 +1113,7 @@ fn run_claim_only<W>(
 where
     W: WaitStrategy + Send + Sync + Clone + 'static,
 {
-    let sequencer = SingleProducerSequencer::new(
-        config.buffer_size,
-        Arc::new(wait_strategy) as Arc<dyn WaitStrategy>,
-    );
+    let sequencer = SingleProducerSequencer::new(config.buffer_size, Arc::new(wait_strategy));
 
     let start = Instant::now();
     let mut last_sequence = -1_i64;
@@ -1145,10 +1154,7 @@ where
         RingBuffer::new(config.buffer_size, DefaultEventFactory::<MicroEvent>::new())
             .map_err(|error| format!("claim-write ring buffer failed: {error:?}"))?,
     );
-    let sequencer = SingleProducerSequencer::new(
-        config.buffer_size,
-        Arc::new(wait_strategy) as Arc<dyn WaitStrategy>,
-    );
+    let sequencer = SingleProducerSequencer::new(config.buffer_size, Arc::new(wait_strategy));
 
     let start = Instant::now();
     for value in 0..config.events_total {
@@ -1191,10 +1197,7 @@ where
         RingBuffer::new(config.buffer_size, DefaultEventFactory::<MicroEvent>::new())
             .map_err(|error| format!("claim-write-publish ring buffer failed: {error:?}"))?,
     );
-    let sequencer = SingleProducerSequencer::new(
-        config.buffer_size,
-        Arc::new(wait_strategy) as Arc<dyn WaitStrategy>,
-    );
+    let sequencer = SingleProducerSequencer::new(config.buffer_size, Arc::new(wait_strategy));
 
     let start = Instant::now();
     for value in 0..config.events_total {
@@ -1530,7 +1533,7 @@ fn summarize(runs: &[RoundRecord]) -> PhaseSummary {
     } else if len % 2 == 1 {
         measured[len / 2]
     } else {
-        (measured[len / 2 - 1] + measured[len / 2]) / 2.0
+        f64::midpoint(measured[len / 2 - 1], measured[len / 2])
     };
     let mean = if len == 0 {
         0.0

@@ -17,7 +17,7 @@
 use badbatch::disruptor::event_translator::ClosureEventTranslator;
 use badbatch::disruptor::{
     BlockingWaitStrategy, DefaultEventFactory, Disruptor, EventHandler, EventProcessor,
-    ProducerType, Result, Sequencer,
+    ProducerType, Result, SequenceBarrier, Sequencer,
 };
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -132,7 +132,7 @@ fn test_real_event_processing_single_consumer() {
         factory,
         64, // Small buffer for testing
         ProducerType::Single,
-        Box::new(BlockingWaitStrategy::new()),
+        BlockingWaitStrategy::new(),
     )
     .unwrap()
     .handle_events_with(handler)
@@ -191,7 +191,7 @@ fn test_real_event_processing_multiple_consumers() {
         factory,
         64,
         ProducerType::Single,
-        Box::new(BlockingWaitStrategy::new()),
+        BlockingWaitStrategy::new(),
     )
     .unwrap()
     .handle_events_with(handler1)
@@ -248,7 +248,7 @@ fn test_exception_handling_continues_processing() {
         factory,
         32,
         ProducerType::Single,
-        Box::new(BlockingWaitStrategy::new()),
+        BlockingWaitStrategy::new(),
     )
     .unwrap()
     .handle_events_with(handler)
@@ -321,7 +321,7 @@ fn test_try_run_once_functionality() {
     let processor = BatchEventProcessor::new(
         ring_buffer.clone(),
         barrier,
-        Box::new(handler),
+        handler,
         Box::new(DefaultExceptionHandler::new()),
     );
 
