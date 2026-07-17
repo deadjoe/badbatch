@@ -10,13 +10,12 @@ import com.lmax.disruptor.WaitStrategy;
 import com.lmax.disruptor.YieldingWaitStrategy;
 import com.lmax.disruptor.util.DaemonThreadFactory;
 
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Comparator;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
@@ -25,11 +24,19 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Collectors;
 
+/**
+ * LMAX Disruptor side of the BadBatch head-to-head harness.
+ *
+ * <p>Contract must stay aligned with {@code src/bin/h2h_rust.rs}:
+ * same scenarios, event payload, checksums, batching, warmup/measured rounds,
+ * and JSON summary fields ({@code median_ops_per_sec}, etc.).
+ *
+ * <p>Java API under test: idiomatic LMAX {@link RingBuffer} + {@link BatchEventProcessor}.
+ */
 public final class HeadToHead
 {
-    private static final int MPSC_PRODUCER_COUNT = 3;
+    private static final int MPSC_PRODUCERS = 3;
     private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(300);
 
     private HeadToHead()
@@ -38,337 +45,288 @@ public final class HeadToHead
 
     public static void main(final String[] args) throws Exception
     {
-        final CliConfig cliConfig = CliConfig.fromArgs(args);
-        final ResolvedConfig config = cliConfig.resolve();
-        final HarnessResult result = runScenario(config);
-        final String json = result.toJson();
+        final Config config = Config.parse(args);
+        final List<Round> rounds = runScenario(config);
+        final Summary summary = Summary.from(rounds, config.warmupRounds);
+        final String json = Json.emit(config, rounds, summary);
 
         if (config.outputPath != null)
         {
-            writeOutput(config.outputPath, json);
+            final Path path = Path.of(config.outputPath);
+            if (path.getParent() != null)
+            {
+                Files.createDirectories(path.getParent());
+            }
+            Files.writeString(path, json, StandardCharsets.UTF_8);
         }
+        System.out.print(json);
 
-        System.out.println(json);
-
-        if (!result.summary.checksumValidAll)
+        if (!summary.checksumValidAll)
         {
             System.exit(2);
         }
     }
 
-    private static HarnessResult runScenario(final ResolvedConfig config) throws Exception
+    private static List<Round> runScenario(final Config config) throws Exception
     {
-        switch (config.scenario)
+        return switch (config.scenario)
         {
-            case UNICAST:
-                return runUnicast(config);
-            case UNICAST_BATCH:
-                return runUnicastBatch(config);
-            case MPSC_BATCH:
-                return runMpscBatch(config);
-            case PIPELINE:
-                return runPipeline(config);
-            default:
-                throw new IllegalStateException("Unsupported scenario: " + config.scenario);
-        }
+            case UNICAST -> runUnicast(config, false);
+            case UNICAST_BATCH -> runUnicast(config, true);
+            case MPSC_BATCH -> runMpscBatch(config);
+            case PIPELINE -> runPipeline(config);
+        };
     }
 
-    private static HarnessResult runUnicast(final ResolvedConfig config) throws Exception
+    private static List<Round> runUnicast(final Config config, final boolean batch) throws Exception
     {
-        final long expectedChecksum = arithmeticChecksum(config.eventsTotal);
-        final List<RoundRecord> runs = new ArrayList<>(config.totalRounds());
+        final long expected = arithmeticChecksum(config.eventsTotal);
+        final int totalRounds = config.warmupRounds + config.measuredRounds;
+        final List<Round> rounds = new ArrayList<>(totalRounds);
 
-        for (int round = 0; round < config.totalRounds(); round++)
+        for (int i = 0; i < totalRounds; i++)
         {
-            final AtomicInteger readyCount = new AtomicInteger();
+            final AtomicInteger ready = new AtomicInteger();
             final AtomicLong processed = new AtomicLong();
             final AtomicLong checksum = new AtomicLong();
-            final SummingHandler handler = new SummingHandler(processed, checksum, readyCount);
+            final SummingHandler handler = new SummingHandler(processed, checksum, ready);
 
-            final RingBuffer<ComparisonEvent> ringBuffer =
+            final RingBuffer<ComparisonEvent> ring =
                     RingBuffer.createSingleProducer(
-                            ComparisonEvent::new,
-                            config.bufferSize,
-                            createWaitStrategy(config.waitStrategy));
-            final SequenceBarrier barrier = ringBuffer.newBarrier();
+                            ComparisonEvent::new, config.bufferSize, waitStrategy(config.wait));
+            final SequenceBarrier barrier = ring.newBarrier();
             final BatchEventProcessor<ComparisonEvent> processor =
-                    new BatchEventProcessorBuilder().build(ringBuffer, barrier, handler);
-            ringBuffer.addGatingSequences(processor.getSequence());
+                    new BatchEventProcessorBuilder().build(ring, barrier, handler);
+            ring.addGatingSequences(processor.getSequence());
 
-            final ExecutorService executor = Executors.newSingleThreadExecutor(DaemonThreadFactory.INSTANCE);
+            final ExecutorService executor =
+                    Executors.newSingleThreadExecutor(DaemonThreadFactory.INSTANCE);
             executor.submit(processor);
-            waitForCount(readyCount, 1, "unicast consumer");
+            waitForCount(ready, 1, "unicast consumer ready");
 
             final long start = System.nanoTime();
-            for (long value = 0; value < config.eventsTotal; value++)
+            if (batch)
             {
-                final long sequence = ringBuffer.next();
-                final ComparisonEvent event = ringBuffer.get(sequence);
-                event.value = value;
-                event.stage1Value = 0L;
-                event.stage2Value = 0L;
-                event.stage3Value = 0L;
-                ringBuffer.publish(sequence);
+                long published = 0L;
+                while (published < config.eventsTotal)
+                {
+                    final int chunk = (int) Math.min(config.batchSize, config.eventsTotal - published);
+                    final long hi = ring.next(chunk);
+                    final long lo = hi - (chunk - 1L);
+                    for (int j = 0; j < chunk; j++)
+                    {
+                        final ComparisonEvent event = ring.get(lo + j);
+                        event.value = published + j;
+                        event.stage1Value = 0L;
+                        event.stage2Value = 0L;
+                        event.stage3Value = 0L;
+                    }
+                    ring.publish(lo, hi);
+                    published += chunk;
+                }
+            }
+            else
+            {
+                for (long v = 0; v < config.eventsTotal; v++)
+                {
+                    final long sequence = ring.next();
+                    final ComparisonEvent event = ring.get(sequence);
+                    event.value = v;
+                    event.stage1Value = 0L;
+                    event.stage2Value = 0L;
+                    event.stage3Value = 0L;
+                    ring.publish(sequence);
+                }
             }
             waitForCount(processed, config.eventsTotal, "unicast completion");
             final long elapsed = System.nanoTime() - start;
 
-            runs.add(RoundRecord.from(
-                    round + 1,
-                    phaseForRound(round, config.warmupRounds),
+            rounds.add(Round.of(
+                    i + 1,
+                    i < config.warmupRounds ? "warmup" : "measured",
                     elapsed,
                     config.eventsTotal,
-                    processed.get(),
-                    expectedChecksum,
-                    checksum.get()));
+                    checksum.get() == expected));
 
-            haltProcessor(processor, executor);
+            processor.halt();
+            shutdown(executor);
         }
-
-        return HarnessResult.from(config, runs);
+        return rounds;
     }
 
-    private static HarnessResult runUnicastBatch(final ResolvedConfig config) throws Exception
+    private static List<Round> runMpscBatch(final Config config) throws Exception
     {
-        final long expectedChecksum = arithmeticChecksum(config.eventsTotal);
-        final List<RoundRecord> runs = new ArrayList<>(config.totalRounds());
+        final long expected = arithmeticChecksum(config.eventsTotal);
+        final long perProducer = config.eventsTotal / MPSC_PRODUCERS;
+        final int totalRounds = config.warmupRounds + config.measuredRounds;
+        final List<Round> rounds = new ArrayList<>(totalRounds);
 
-        for (int round = 0; round < config.totalRounds(); round++)
+        for (int i = 0; i < totalRounds; i++)
         {
-            final AtomicInteger readyCount = new AtomicInteger();
+            final AtomicInteger ready = new AtomicInteger();
             final AtomicLong processed = new AtomicLong();
             final AtomicLong checksum = new AtomicLong();
-            final SummingHandler handler = new SummingHandler(processed, checksum, readyCount);
+            final SummingHandler handler = new SummingHandler(processed, checksum, ready);
 
-            final RingBuffer<ComparisonEvent> ringBuffer =
-                    RingBuffer.createSingleProducer(
-                            ComparisonEvent::new,
-                            config.bufferSize,
-                            createWaitStrategy(config.waitStrategy));
-            final SequenceBarrier barrier = ringBuffer.newBarrier();
-            final BatchEventProcessor<ComparisonEvent> processor =
-                    new BatchEventProcessorBuilder().build(ringBuffer, barrier, handler);
-            ringBuffer.addGatingSequences(processor.getSequence());
-
-            final ExecutorService executor = Executors.newSingleThreadExecutor(DaemonThreadFactory.INSTANCE);
-            executor.submit(processor);
-            waitForCount(readyCount, 1, "unicast batch consumer");
-
-            final long start = System.nanoTime();
-            long published = 0L;
-            while (published < config.eventsTotal)
-            {
-                final int chunk = (int) Math.min(config.batchSize, config.eventsTotal - published);
-                final long hi = ringBuffer.next(chunk);
-                final long lo = hi - (chunk - 1L);
-                for (int index = 0; index < chunk; index++)
-                {
-                    final long value = published + index;
-                    final ComparisonEvent event = ringBuffer.get(lo + index);
-                    event.value = value;
-                    event.stage1Value = 0L;
-                    event.stage2Value = 0L;
-                    event.stage3Value = 0L;
-                }
-                ringBuffer.publish(lo, hi);
-                published += chunk;
-            }
-            waitForCount(processed, config.eventsTotal, "unicast batch completion");
-            final long elapsed = System.nanoTime() - start;
-
-            runs.add(RoundRecord.from(
-                    round + 1,
-                    phaseForRound(round, config.warmupRounds),
-                    elapsed,
-                    config.eventsTotal,
-                    processed.get(),
-                    expectedChecksum,
-                    checksum.get()));
-
-            haltProcessor(processor, executor);
-        }
-
-        return HarnessResult.from(config, runs);
-    }
-
-    private static HarnessResult runMpscBatch(final ResolvedConfig config) throws Exception
-    {
-        final long expectedChecksum = arithmeticChecksum(config.eventsTotal);
-        final long eventsPerProducer = config.eventsTotal / MPSC_PRODUCER_COUNT;
-        final List<RoundRecord> runs = new ArrayList<>(config.totalRounds());
-
-        for (int round = 0; round < config.totalRounds(); round++)
-        {
-            final AtomicInteger readyCount = new AtomicInteger();
-            final AtomicLong processed = new AtomicLong();
-            final AtomicLong checksum = new AtomicLong();
-            final SummingHandler handler = new SummingHandler(processed, checksum, readyCount);
-
-            final RingBuffer<ComparisonEvent> ringBuffer =
+            final RingBuffer<ComparisonEvent> ring =
                     RingBuffer.createMultiProducer(
-                            ComparisonEvent::new,
-                            config.bufferSize,
-                            createWaitStrategy(config.waitStrategy));
-            final SequenceBarrier barrier = ringBuffer.newBarrier();
+                            ComparisonEvent::new, config.bufferSize, waitStrategy(config.wait));
+            final SequenceBarrier barrier = ring.newBarrier();
             final BatchEventProcessor<ComparisonEvent> processor =
-                    new BatchEventProcessorBuilder().build(ringBuffer, barrier, handler);
-            ringBuffer.addGatingSequences(processor.getSequence());
+                    new BatchEventProcessorBuilder().build(ring, barrier, handler);
+            ring.addGatingSequences(processor.getSequence());
 
-            final ExecutorService executor = Executors.newSingleThreadExecutor(DaemonThreadFactory.INSTANCE);
+            final ExecutorService executor =
+                    Executors.newSingleThreadExecutor(DaemonThreadFactory.INSTANCE);
             executor.submit(processor);
-            waitForCount(readyCount, 1, "mpsc consumer");
+            waitForCount(ready, 1, "mpsc consumer ready");
 
-            final CountDownLatch producersReady = new CountDownLatch(MPSC_PRODUCER_COUNT);
+            final CountDownLatch producersReady = new CountDownLatch(MPSC_PRODUCERS);
             final CountDownLatch startSignal = new CountDownLatch(1);
-            final Thread[] producers = new Thread[MPSC_PRODUCER_COUNT];
+            final Thread[] producers = new Thread[MPSC_PRODUCERS];
 
-            for (int producerId = 0; producerId < MPSC_PRODUCER_COUNT; producerId++)
+            for (int id = 0; id < MPSC_PRODUCERS; id++)
             {
-                final int index = producerId;
-                producers[producerId] = new Thread(() -> {
+                final int index = id;
+                producers[id] = new Thread(() -> {
                     producersReady.countDown();
                     await(startSignal);
-
-                    final long producerStart = eventsPerProducer * index;
-                    final long producerEnd = producerStart + eventsPerProducer;
-                    long published = producerStart;
-
-                    while (published < producerEnd)
+                    final long rangeStart = perProducer * index;
+                    final long rangeEnd = rangeStart + perProducer;
+                    long published = rangeStart;
+                    while (published < rangeEnd)
                     {
-                        final int chunk = (int) Math.min(config.batchSize, producerEnd - published);
-                        final long hi = ringBuffer.next(chunk);
+                        final int chunk = (int) Math.min(config.batchSize, rangeEnd - published);
+                        final long hi = ring.next(chunk);
                         final long lo = hi - (chunk - 1L);
-                        for (int offset = 0; offset < chunk; offset++)
+                        for (int j = 0; j < chunk; j++)
                         {
-                            final long value = published + offset;
-                            final ComparisonEvent event = ringBuffer.get(lo + offset);
-                            event.value = value;
+                            final ComparisonEvent event = ring.get(lo + j);
+                            event.value = published + j;
                             event.stage1Value = 0L;
                             event.stage2Value = 0L;
                             event.stage3Value = 0L;
                         }
-                        ringBuffer.publish(lo, hi);
+                        ring.publish(lo, hi);
                         published += chunk;
                     }
-                }, "head-to-head-mpsc-producer-" + producerId);
-                producers[producerId].start();
+                }, "h2h-mpsc-" + id);
+                producers[id].start();
             }
 
             producersReady.await();
-
             final long start = System.nanoTime();
             startSignal.countDown();
-            for (Thread producer : producers)
+            for (final Thread producer : producers)
             {
                 producer.join();
             }
             waitForCount(processed, config.eventsTotal, "mpsc completion");
             final long elapsed = System.nanoTime() - start;
 
-            runs.add(RoundRecord.from(
-                    round + 1,
-                    phaseForRound(round, config.warmupRounds),
+            rounds.add(Round.of(
+                    i + 1,
+                    i < config.warmupRounds ? "warmup" : "measured",
                     elapsed,
                     config.eventsTotal,
-                    processed.get(),
-                    expectedChecksum,
-                    checksum.get()));
+                    checksum.get() == expected));
 
-            haltProcessor(processor, executor);
+            processor.halt();
+            shutdown(executor);
         }
-
-        return HarnessResult.from(config, runs);
+        return rounds;
     }
 
-    private static HarnessResult runPipeline(final ResolvedConfig config) throws Exception
+    private static List<Round> runPipeline(final Config config) throws Exception
     {
-        final long expectedChecksum = pipelineChecksum(config.eventsTotal);
-        final List<RoundRecord> runs = new ArrayList<>(config.totalRounds());
+        final long expected = pipelineChecksum(config.eventsTotal);
+        final int totalRounds = config.warmupRounds + config.measuredRounds;
+        final List<Round> rounds = new ArrayList<>(totalRounds);
 
-        for (int round = 0; round < config.totalRounds(); round++)
+        for (int i = 0; i < totalRounds; i++)
         {
-            final AtomicInteger readyCount = new AtomicInteger();
+            final AtomicInteger ready = new AtomicInteger();
             final AtomicLong processed = new AtomicLong();
             final AtomicLong checksum = new AtomicLong();
 
-            final RingBuffer<ComparisonEvent> ringBuffer =
+            final RingBuffer<ComparisonEvent> ring =
                     RingBuffer.createSingleProducer(
-                            ComparisonEvent::new,
-                            config.bufferSize,
-                            createWaitStrategy(config.waitStrategy));
+                            ComparisonEvent::new, config.bufferSize, waitStrategy(config.wait));
 
-            final Stage1Handler stage1Handler = new Stage1Handler(readyCount);
-            final SequenceBarrier stage1Barrier = ringBuffer.newBarrier();
-            final BatchEventProcessor<ComparisonEvent> stage1Processor =
-                    new BatchEventProcessorBuilder().build(ringBuffer, stage1Barrier, stage1Handler);
+            final Stage1Handler stage1 = new Stage1Handler(ready);
+            final BatchEventProcessor<ComparisonEvent> p1 =
+                    new BatchEventProcessorBuilder().build(ring, ring.newBarrier(), stage1);
 
-            final Stage2Handler stage2Handler = new Stage2Handler(readyCount);
-            final SequenceBarrier stage2Barrier = ringBuffer.newBarrier(stage1Processor.getSequence());
-            final BatchEventProcessor<ComparisonEvent> stage2Processor =
-                    new BatchEventProcessorBuilder().build(ringBuffer, stage2Barrier, stage2Handler);
+            final Stage2Handler stage2 = new Stage2Handler(ready);
+            final BatchEventProcessor<ComparisonEvent> p2 =
+                    new BatchEventProcessorBuilder()
+                            .build(ring, ring.newBarrier(p1.getSequence()), stage2);
 
-            final Stage3Handler stage3Handler = new Stage3Handler(processed, checksum, readyCount);
-            final SequenceBarrier stage3Barrier = ringBuffer.newBarrier(stage2Processor.getSequence());
-            final BatchEventProcessor<ComparisonEvent> stage3Processor =
-                    new BatchEventProcessorBuilder().build(ringBuffer, stage3Barrier, stage3Handler);
+            final Stage3Handler stage3 = new Stage3Handler(processed, checksum, ready);
+            final BatchEventProcessor<ComparisonEvent> p3 =
+                    new BatchEventProcessorBuilder()
+                            .build(ring, ring.newBarrier(p2.getSequence()), stage3);
 
-            ringBuffer.addGatingSequences(stage3Processor.getSequence());
+            ring.addGatingSequences(p3.getSequence());
 
-            final ExecutorService executor = Executors.newFixedThreadPool(3, DaemonThreadFactory.INSTANCE);
-            executor.submit(stage1Processor);
-            executor.submit(stage2Processor);
-            executor.submit(stage3Processor);
-
-            waitForCount(readyCount, 3, "pipeline stages");
+            final ExecutorService executor =
+                    Executors.newFixedThreadPool(3, DaemonThreadFactory.INSTANCE);
+            executor.submit(p1);
+            executor.submit(p2);
+            executor.submit(p3);
+            waitForCount(ready, 3, "pipeline stages ready");
 
             final long start = System.nanoTime();
-            for (long value = 0; value < config.eventsTotal; value++)
+            for (long v = 0; v < config.eventsTotal; v++)
             {
-                final long sequence = ringBuffer.next();
-                final ComparisonEvent event = ringBuffer.get(sequence);
-                event.value = value;
+                final long sequence = ring.next();
+                final ComparisonEvent event = ring.get(sequence);
+                event.value = v;
                 event.stage1Value = 0L;
                 event.stage2Value = 0L;
                 event.stage3Value = 0L;
-                ringBuffer.publish(sequence);
+                ring.publish(sequence);
             }
             waitForCount(processed, config.eventsTotal, "pipeline completion");
             final long elapsed = System.nanoTime() - start;
 
-            runs.add(RoundRecord.from(
-                    round + 1,
-                    phaseForRound(round, config.warmupRounds),
+            rounds.add(Round.of(
+                    i + 1,
+                    i < config.warmupRounds ? "warmup" : "measured",
                     elapsed,
                     config.eventsTotal,
-                    processed.get(),
-                    expectedChecksum,
-                    checksum.get()));
+                    checksum.get() == expected));
 
-            stage1Processor.halt();
-            stage2Processor.halt();
-            stage3Processor.halt();
-            haltExecutor(executor);
+            p1.halt();
+            p2.halt();
+            p3.halt();
+            shutdown(executor);
         }
-
-        return HarnessResult.from(config, runs);
+        return rounds;
     }
 
-    private static void haltProcessor(final BatchEventProcessor<ComparisonEvent> processor, final ExecutorService executor)
-            throws InterruptedException
+    private static WaitStrategy waitStrategy(final WaitKind kind)
     {
-        processor.halt();
-        haltExecutor(executor);
+        return switch (kind)
+        {
+            case BUSY_SPIN -> new BusySpinWaitStrategy();
+            case YIELDING -> new YieldingWaitStrategy();
+        };
     }
 
-    private static void haltExecutor(final ExecutorService executor) throws InterruptedException
+    private static long arithmeticChecksum(final long eventsTotal)
     {
-        executor.shutdownNow();
-        executor.awaitTermination(5, TimeUnit.SECONDS);
+        return eventsTotal * (eventsTotal - 1L) / 2L;
     }
 
-    private static RoundPhase phaseForRound(final int roundIndex, final int warmupRounds)
+    private static long pipelineChecksum(final long eventsTotal)
     {
-        return roundIndex < warmupRounds ? RoundPhase.WARMUP : RoundPhase.MEASURED;
+        long sum = 0L;
+        for (long v = 0; v < eventsTotal; v++)
+        {
+            sum += v + 11L; // +1 +3 +7
+        }
+        return sum;
     }
 
     private static void waitForCount(final AtomicInteger counter, final int expected, final String label)
@@ -380,7 +338,7 @@ public final class HeadToHead
             if (System.nanoTime() >= deadline)
             {
                 throw new IllegalStateException(
-                        "Timed out waiting for " + label + ": expected >= " + expected + ", got " + counter.get());
+                        "timeout " + label + ": expected>=" + expected + " got=" + counter.get());
             }
             Thread.onSpinWait();
         }
@@ -395,7 +353,7 @@ public final class HeadToHead
             if (System.nanoTime() >= deadline)
             {
                 throw new IllegalStateException(
-                        "Timed out waiting for " + label + ": expected >= " + expected + ", got " + counter.get());
+                        "timeout " + label + ": expected>=" + expected + " got=" + counter.get());
             }
             Thread.onSpinWait();
         }
@@ -407,300 +365,20 @@ public final class HeadToHead
         {
             latch.await();
         }
-        catch (InterruptedException e)
+        catch (final InterruptedException e)
         {
             Thread.currentThread().interrupt();
-            throw new RuntimeException(e);
+            throw new IllegalStateException(e);
         }
     }
 
-    private static WaitStrategy createWaitStrategy(final WaitStrategyKind kind)
+    private static void shutdown(final ExecutorService executor) throws InterruptedException
     {
-        switch (kind)
-        {
-            case BUSY_SPIN:
-                return new BusySpinWaitStrategy();
-            case YIELDING:
-                return new YieldingWaitStrategy();
-            default:
-                throw new IllegalStateException("Unsupported wait strategy: " + kind);
-        }
+        executor.shutdownNow();
+        executor.awaitTermination(5, TimeUnit.SECONDS);
     }
 
-    private static long arithmeticChecksum(final long count)
-    {
-        return (count * (count - 1L)) / 2L;
-    }
-
-    private static long pipelineChecksum(final long count)
-    {
-        return arithmeticChecksum(count) + (11L * count);
-    }
-
-    private static double opsPerSecond(final long eventsTotal, final long elapsedNs)
-    {
-        if (elapsedNs == 0L)
-        {
-            return 0.0;
-        }
-        return eventsTotal / (elapsedNs / 1_000_000_000.0);
-    }
-
-    private static void writeOutput(final Path outputPath, final String json) throws IOException
-    {
-        final Path parent = outputPath.getParent();
-        if (parent != null)
-        {
-            Files.createDirectories(parent);
-        }
-        Files.writeString(outputPath, json, StandardCharsets.UTF_8);
-    }
-
-    enum Scenario
-    {
-        UNICAST("unicast", WaitStrategyKind.YIELDING, 65_536, 100_000_000L, 1, 1, 1, 1),
-        UNICAST_BATCH("unicast_batch", WaitStrategyKind.YIELDING, 65_536, 100_000_000L, 10, 1, 1, 1),
-        MPSC_BATCH("mpsc_batch", WaitStrategyKind.BUSY_SPIN, 65_536, 60_000_000L, 10, MPSC_PRODUCER_COUNT, 1, 1),
-        PIPELINE("pipeline", WaitStrategyKind.YIELDING, 8_192, 100_000_000L, 1, 1, 3, 3);
-
-        final String id;
-        final WaitStrategyKind defaultWaitStrategy;
-        final int defaultBufferSize;
-        final long defaultEventsTotal;
-        final int defaultBatchSize;
-        final int producerCount;
-        final int consumerCount;
-        final int pipelineStages;
-
-        Scenario(
-                final String id,
-                final WaitStrategyKind defaultWaitStrategy,
-                final int defaultBufferSize,
-                final long defaultEventsTotal,
-                final int defaultBatchSize,
-                final int producerCount,
-                final int consumerCount,
-                final int pipelineStages)
-        {
-            this.id = id;
-            this.defaultWaitStrategy = defaultWaitStrategy;
-            this.defaultBufferSize = defaultBufferSize;
-            this.defaultEventsTotal = defaultEventsTotal;
-            this.defaultBatchSize = defaultBatchSize;
-            this.producerCount = producerCount;
-            this.consumerCount = consumerCount;
-            this.pipelineStages = pipelineStages;
-        }
-
-        static Scenario parse(final String value)
-        {
-            for (Scenario scenario : values())
-            {
-                if (scenario.id.equals(value))
-                {
-                    return scenario;
-                }
-            }
-            throw new IllegalArgumentException("Unsupported scenario: " + value);
-        }
-    }
-
-    enum WaitStrategyKind
-    {
-        BUSY_SPIN("busy-spin"),
-        YIELDING("yielding");
-
-        final String id;
-
-        WaitStrategyKind(final String id)
-        {
-            this.id = id;
-        }
-
-        static WaitStrategyKind parse(final String value)
-        {
-            for (WaitStrategyKind kind : values())
-            {
-                if (kind.id.equals(value))
-                {
-                    return kind;
-                }
-            }
-            throw new IllegalArgumentException("Unsupported wait strategy: " + value);
-        }
-    }
-
-    enum RoundPhase
-    {
-        WARMUP("warmup"),
-        MEASURED("measured");
-
-        final String id;
-
-        RoundPhase(final String id)
-        {
-            this.id = id;
-        }
-    }
-
-    static final class CliConfig
-    {
-        private Scenario scenario;
-        private WaitStrategyKind waitStrategy;
-        private Integer bufferSize;
-        private Long eventsTotal;
-        private Integer batchSize;
-        private int warmupRounds = 3;
-        private int measuredRounds = 7;
-        private String runOrder = "standalone";
-        private Path outputPath;
-
-        static CliConfig fromArgs(final String[] args)
-        {
-            final CliConfig config = new CliConfig();
-            for (int index = 0; index < args.length; index++)
-            {
-                final String arg = args[index];
-                switch (arg)
-                {
-                    case "--scenario":
-                        config.scenario = Scenario.parse(nextArg(args, ++index, arg));
-                        break;
-                    case "--wait-strategy":
-                        config.waitStrategy = WaitStrategyKind.parse(nextArg(args, ++index, arg));
-                        break;
-                    case "--buffer-size":
-                        config.bufferSize = Integer.parseInt(nextArg(args, ++index, arg));
-                        break;
-                    case "--events-total":
-                        config.eventsTotal = Long.parseLong(nextArg(args, ++index, arg));
-                        break;
-                    case "--batch-size":
-                        config.batchSize = Integer.parseInt(nextArg(args, ++index, arg));
-                        break;
-                    case "--warmup-rounds":
-                        config.warmupRounds = Integer.parseInt(nextArg(args, ++index, arg));
-                        break;
-                    case "--measured-rounds":
-                        config.measuredRounds = Integer.parseInt(nextArg(args, ++index, arg));
-                        break;
-                    case "--run-order":
-                        config.runOrder = nextArg(args, ++index, arg);
-                        break;
-                    case "--output":
-                        config.outputPath = Path.of(nextArg(args, ++index, arg));
-                        break;
-                    case "--help":
-                    case "-h":
-                        printHelpAndExit();
-                        break;
-                    default:
-                        throw new IllegalArgumentException("Unsupported argument: " + arg);
-                }
-            }
-
-            if (config.scenario == null)
-            {
-                throw new IllegalArgumentException("Missing required argument --scenario");
-            }
-            return config;
-        }
-
-        ResolvedConfig resolve()
-        {
-            final Scenario resolvedScenario = scenario;
-            final WaitStrategyKind resolvedWaitStrategy =
-                    waitStrategy == null ? resolvedScenario.defaultWaitStrategy : waitStrategy;
-            final int resolvedBufferSize =
-                    bufferSize == null ? resolvedScenario.defaultBufferSize : bufferSize;
-            final long resolvedEventsTotal =
-                    eventsTotal == null ? resolvedScenario.defaultEventsTotal : eventsTotal;
-            final int resolvedBatchSize =
-                    batchSize == null ? resolvedScenario.defaultBatchSize : batchSize;
-
-            if (resolvedBufferSize <= 0 || (resolvedBufferSize & (resolvedBufferSize - 1)) != 0)
-            {
-                throw new IllegalArgumentException("buffer size must be a power of two");
-            }
-            if (resolvedBatchSize <= 0)
-            {
-                throw new IllegalArgumentException("batch size must be > 0");
-            }
-            if (resolvedEventsTotal <= 0L)
-            {
-                throw new IllegalArgumentException("events total must be > 0");
-            }
-            if (measuredRounds <= 0)
-            {
-                throw new IllegalArgumentException("measured rounds must be > 0");
-            }
-            if (resolvedScenario == Scenario.MPSC_BATCH && resolvedEventsTotal % MPSC_PRODUCER_COUNT != 0L)
-            {
-                throw new IllegalArgumentException(
-                        "mpsc_batch requires events_total divisible by " + MPSC_PRODUCER_COUNT);
-            }
-
-            return new ResolvedConfig(
-                    resolvedScenario,
-                    resolvedWaitStrategy,
-                    resolvedBufferSize,
-                    resolvedEventsTotal,
-                    resolvedBatchSize,
-                    warmupRounds,
-                    measuredRounds,
-                    runOrder,
-                    outputPath);
-        }
-
-        private static String nextArg(final String[] args, final int index, final String flag)
-        {
-            if (index >= args.length)
-            {
-                throw new IllegalArgumentException("Missing value for " + flag);
-            }
-            return args[index];
-        }
-    }
-
-    static final class ResolvedConfig
-    {
-        final Scenario scenario;
-        final WaitStrategyKind waitStrategy;
-        final int bufferSize;
-        final long eventsTotal;
-        final int batchSize;
-        final int warmupRounds;
-        final int measuredRounds;
-        final String runOrder;
-        final Path outputPath;
-
-        ResolvedConfig(
-                final Scenario scenario,
-                final WaitStrategyKind waitStrategy,
-                final int bufferSize,
-                final long eventsTotal,
-                final int batchSize,
-                final int warmupRounds,
-                final int measuredRounds,
-                final String runOrder,
-                final Path outputPath)
-        {
-            this.scenario = scenario;
-            this.waitStrategy = waitStrategy;
-            this.bufferSize = bufferSize;
-            this.eventsTotal = eventsTotal;
-            this.batchSize = batchSize;
-            this.warmupRounds = warmupRounds;
-            this.measuredRounds = measuredRounds;
-            this.runOrder = runOrder;
-            this.outputPath = outputPath;
-        }
-
-        int totalRounds()
-        {
-            return warmupRounds + measuredRounds;
-        }
-    }
+    // --- handlers ------------------------------------------------------------------
 
     static final class ComparisonEvent
     {
@@ -710,17 +388,23 @@ public final class HeadToHead
         long stage3Value;
     }
 
-    static final class SummingHandler implements EventHandler<ComparisonEvent>
+    private static final class SummingHandler implements EventHandler<ComparisonEvent>
     {
         private final AtomicLong processed;
         private final AtomicLong checksum;
-        private final AtomicInteger readyCount;
+        private final AtomicInteger ready;
 
-        SummingHandler(final AtomicLong processed, final AtomicLong checksum, final AtomicInteger readyCount)
+        SummingHandler(final AtomicLong processed, final AtomicLong checksum, final AtomicInteger ready)
         {
             this.processed = processed;
             this.checksum = checksum;
-            this.readyCount = readyCount;
+            this.ready = ready;
+        }
+
+        @Override
+        public void onStart()
+        {
+            ready.incrementAndGet();
         }
 
         @Override
@@ -729,21 +413,21 @@ public final class HeadToHead
             checksum.addAndGet(event.value);
             processed.incrementAndGet();
         }
+    }
+
+    private static final class Stage1Handler implements EventHandler<ComparisonEvent>
+    {
+        private final AtomicInteger ready;
+
+        Stage1Handler(final AtomicInteger ready)
+        {
+            this.ready = ready;
+        }
 
         @Override
         public void onStart()
         {
-            readyCount.incrementAndGet();
-        }
-    }
-
-    static final class Stage1Handler implements EventHandler<ComparisonEvent>
-    {
-        private final AtomicInteger readyCount;
-
-        Stage1Handler(final AtomicInteger readyCount)
-        {
-            this.readyCount = readyCount;
+            ready.incrementAndGet();
         }
 
         @Override
@@ -751,21 +435,21 @@ public final class HeadToHead
         {
             event.stage1Value = event.value + 1L;
         }
+    }
+
+    private static final class Stage2Handler implements EventHandler<ComparisonEvent>
+    {
+        private final AtomicInteger ready;
+
+        Stage2Handler(final AtomicInteger ready)
+        {
+            this.ready = ready;
+        }
 
         @Override
         public void onStart()
         {
-            readyCount.incrementAndGet();
-        }
-    }
-
-    static final class Stage2Handler implements EventHandler<ComparisonEvent>
-    {
-        private final AtomicInteger readyCount;
-
-        Stage2Handler(final AtomicInteger readyCount)
-        {
-            this.readyCount = readyCount;
+            ready.incrementAndGet();
         }
 
         @Override
@@ -773,25 +457,25 @@ public final class HeadToHead
         {
             event.stage2Value = event.stage1Value + 3L;
         }
+    }
+
+    private static final class Stage3Handler implements EventHandler<ComparisonEvent>
+    {
+        private final AtomicLong processed;
+        private final AtomicLong checksum;
+        private final AtomicInteger ready;
+
+        Stage3Handler(final AtomicLong processed, final AtomicLong checksum, final AtomicInteger ready)
+        {
+            this.processed = processed;
+            this.checksum = checksum;
+            this.ready = ready;
+        }
 
         @Override
         public void onStart()
         {
-            readyCount.incrementAndGet();
-        }
-    }
-
-    static final class Stage3Handler implements EventHandler<ComparisonEvent>
-    {
-        private final AtomicLong processed;
-        private final AtomicLong checksum;
-        private final AtomicInteger readyCount;
-
-        Stage3Handler(final AtomicLong processed, final AtomicLong checksum, final AtomicInteger readyCount)
-        {
-            this.processed = processed;
-            this.checksum = checksum;
-            this.readyCount = readyCount;
+            ready.incrementAndGet();
         }
 
         @Override
@@ -801,71 +485,188 @@ public final class HeadToHead
             checksum.addAndGet(event.stage3Value);
             processed.incrementAndGet();
         }
+    }
 
-        @Override
-        public void onStart()
+    // --- config / results ----------------------------------------------------------
+
+    enum Scenario
+    {
+        UNICAST,
+        UNICAST_BATCH,
+        MPSC_BATCH,
+        PIPELINE;
+
+        static Scenario parse(final String s)
         {
-            readyCount.incrementAndGet();
+            return switch (s)
+            {
+                case "unicast" -> UNICAST;
+                case "unicast_batch" -> UNICAST_BATCH;
+                case "mpsc_batch" -> MPSC_BATCH;
+                case "pipeline" -> PIPELINE;
+                default -> throw new IllegalArgumentException("unsupported scenario: " + s);
+            };
+        }
+
+        String wire()
+        {
+            return name().toLowerCase(Locale.ROOT);
         }
     }
 
-    static final class RoundRecord
+    enum WaitKind
     {
-        final int roundIndex;
-        final RoundPhase phase;
+        BUSY_SPIN,
+        YIELDING;
+
+        static WaitKind parse(final String s)
+        {
+            return switch (s)
+            {
+                case "busy-spin" -> BUSY_SPIN;
+                case "yielding" -> YIELDING;
+                default -> throw new IllegalArgumentException("unsupported wait-strategy: " + s);
+            };
+        }
+
+        String wire()
+        {
+            return this == BUSY_SPIN ? "busy-spin" : "yielding";
+        }
+    }
+
+    static final class Config
+    {
+        Scenario scenario;
+        WaitKind wait;
+        int bufferSize;
+        long eventsTotal;
+        int batchSize;
+        int warmupRounds = 3;
+        int measuredRounds = 7;
+        String runOrder = "standalone";
+        String implLabel = "lmax-bep";
+        String outputPath;
+        boolean quick;
+
+        static Config parse(final String[] args)
+        {
+            final Config c = new Config();
+            for (int i = 0; i < args.length; i++)
+            {
+                switch (args[i])
+                {
+                    case "--scenario" -> c.scenario = Scenario.parse(args[++i]);
+                    case "--wait-strategy" -> c.wait = WaitKind.parse(args[++i]);
+                    case "--event-padding" ->
+                    {
+                        final String p = args[++i];
+                        if (!"none".equals(p))
+                        {
+                            // Java object layout is not slot-padded like BadBatch; only "none" is comparable.
+                            if (!"128".equals(p) && !"64".equals(p))
+                            {
+                                throw new IllegalArgumentException("unsupported event-padding: " + p);
+                            }
+                            // accept but ignore padding on Java side (documented asymmetry)
+                        }
+                    }
+                    case "--buffer-size" -> c.bufferSize = Integer.parseInt(args[++i]);
+                    case "--events-total" -> c.eventsTotal = Long.parseLong(args[++i].replace("_", ""));
+                    case "--batch-size" -> c.batchSize = Integer.parseInt(args[++i]);
+                    case "--warmup-rounds" -> c.warmupRounds = Integer.parseInt(args[++i]);
+                    case "--measured-rounds" -> c.measuredRounds = Integer.parseInt(args[++i]);
+                    case "--run-order" -> c.runOrder = args[++i];
+                    case "--impl-label" -> c.implLabel = args[++i];
+                    case "--output" -> c.outputPath = args[++i];
+                    case "--quick" -> c.quick = true;
+                    case "--help", "-h" ->
+                    {
+                        System.out.println("Usage: HeadToHead --scenario <...> [options] (mirrors h2h_rust)");
+                        System.exit(0);
+                    }
+                    default -> throw new IllegalArgumentException("unknown argument: " + args[i]);
+                }
+            }
+            if (c.scenario == null)
+            {
+                throw new IllegalArgumentException("required: --scenario");
+            }
+            if (c.wait == null)
+            {
+                c.wait = c.scenario == Scenario.MPSC_BATCH ? WaitKind.BUSY_SPIN : WaitKind.YIELDING;
+            }
+            if (c.bufferSize == 0)
+            {
+                c.bufferSize = c.scenario == Scenario.PIPELINE ? 8192 : 65536;
+            }
+            if (c.eventsTotal == 0)
+            {
+                if (c.quick)
+                {
+                    c.eventsTotal = c.scenario == Scenario.MPSC_BATCH ? 3_000_000L : 1_000_000L;
+                }
+                else
+                {
+                    c.eventsTotal = c.scenario == Scenario.MPSC_BATCH ? 60_000_000L : 100_000_000L;
+                }
+            }
+            if (c.batchSize == 0)
+            {
+                c.batchSize =
+                        (c.scenario == Scenario.UNICAST || c.scenario == Scenario.PIPELINE) ? 1 : 10;
+            }
+            if (c.quick)
+            {
+                c.warmupRounds = Math.min(c.warmupRounds, 1);
+                c.measuredRounds = Math.min(c.measuredRounds, 2);
+            }
+            if (c.scenario == Scenario.MPSC_BATCH && c.eventsTotal % MPSC_PRODUCERS != 0)
+            {
+                throw new IllegalArgumentException("mpsc events must be divisible by " + MPSC_PRODUCERS);
+            }
+            return c;
+        }
+    }
+
+    static final class Round
+    {
+        final int index;
+        final String phase;
         final long elapsedNs;
+        final long events;
         final double opsPerSec;
-        final long eventsExpected;
-        final long eventsProcessed;
-        final long checksumExpected;
-        final long checksumObserved;
         final boolean checksumValid;
 
-        private RoundRecord(
-                final int roundIndex,
-                final RoundPhase phase,
+        private Round(
+                final int index,
+                final String phase,
                 final long elapsedNs,
+                final long events,
                 final double opsPerSec,
-                final long eventsExpected,
-                final long eventsProcessed,
-                final long checksumExpected,
-                final long checksumObserved,
                 final boolean checksumValid)
         {
-            this.roundIndex = roundIndex;
+            this.index = index;
             this.phase = phase;
             this.elapsedNs = elapsedNs;
+            this.events = events;
             this.opsPerSec = opsPerSec;
-            this.eventsExpected = eventsExpected;
-            this.eventsProcessed = eventsProcessed;
-            this.checksumExpected = checksumExpected;
-            this.checksumObserved = checksumObserved;
             this.checksumValid = checksumValid;
         }
 
-        static RoundRecord from(
-                final int roundIndex,
-                final RoundPhase phase,
+        static Round of(
+                final int index,
+                final String phase,
                 final long elapsedNs,
-                final long eventsExpected,
-                final long eventsProcessed,
-                final long checksumExpected,
-                final long checksumObserved)
+                final long events,
+                final boolean checksumValid)
         {
-            return new RoundRecord(
-                    roundIndex,
-                    phase,
-                    elapsedNs,
-                    opsPerSecond(eventsExpected, elapsedNs),
-                    eventsExpected,
-                    eventsProcessed,
-                    checksumExpected,
-                    checksumObserved,
-                    eventsExpected == eventsProcessed && checksumExpected == checksumObserved);
+            final double ops = events / (elapsedNs / 1_000_000_000.0);
+            return new Round(index, phase, elapsedNs, events, ops, checksumValid);
         }
     }
 
-    static final class SummaryStats
+    static final class Summary
     {
         final boolean checksumValidAll;
         final double medianOpsPerSec;
@@ -875,7 +676,7 @@ public final class HeadToHead
         final double stddevOpsPerSec;
         final double cv;
 
-        private SummaryStats(
+        Summary(
                 final boolean checksumValidAll,
                 final double medianOpsPerSec,
                 final double meanOpsPerSec,
@@ -893,288 +694,158 @@ public final class HeadToHead
             this.cv = cv;
         }
 
-        static SummaryStats fromRuns(final List<RoundRecord> runs)
+        static Summary from(final List<Round> rounds, final int warmupRounds)
         {
-            final boolean checksumValidAll = runs.stream().allMatch(run -> run.checksumValid);
-            final List<Double> measured = runs.stream()
-                    .filter(run -> run.phase == RoundPhase.MEASURED)
-                    .map(run -> run.opsPerSec)
-                    .sorted(Comparator.naturalOrder())
-                    .collect(Collectors.toList());
-
-            if (measured.isEmpty())
+            final boolean allOk = rounds.stream().allMatch(r -> r.checksumValid);
+            final double[] measured =
+                    rounds.stream()
+                            .skip(warmupRounds)
+                            .mapToDouble(r -> r.opsPerSec)
+                            .toArray();
+            if (measured.length == 0)
             {
-                return new SummaryStats(checksumValidAll, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+                return new Summary(allOk, 0, 0, 0, 0, 0, 0);
             }
+            Arrays.sort(measured);
+            final double median =
+                    measured.length % 2 == 1
+                            ? measured[measured.length / 2]
+                            : (measured[measured.length / 2 - 1] + measured[measured.length / 2]) / 2.0;
+            final double mean = Arrays.stream(measured).average().orElse(0);
+            final double min = measured[0];
+            final double max = measured[measured.length - 1];
+            final double var =
+                    Arrays.stream(measured).map(x -> {
+                        final double d = x - mean;
+                        return d * d;
+                    }).average().orElse(0);
+            final double stddev = Math.sqrt(var);
+            final double cv = mean > 0 ? stddev / mean : 0;
+            return new Summary(allOk, median, mean, min, max, stddev, cv);
+        }
+    }
 
-            final double mean = measured.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
-            final double median = measured.size() % 2 == 0
-                    ? (measured.get(measured.size() / 2 - 1) + measured.get(measured.size() / 2)) / 2.0
-                    : measured.get(measured.size() / 2);
-            final double min = measured.get(0);
-            final double max = measured.get(measured.size() - 1);
-            double variance = 0.0;
-            for (double value : measured)
+    static final class Json
+    {
+        private Json()
+        {
+        }
+
+        static String emit(final Config config, final List<Round> rounds, final Summary summary)
+        {
+            final StringBuilder sb = new StringBuilder();
+            sb.append("{\n");
+            field(sb, "impl", config.implLabel, true);
+            field(sb, "language", "java", true);
+            field(sb, "scenario", config.scenario.wire(), true);
+            field(sb, "wait_strategy", config.wait.wire(), true);
+            field(sb, "event_padding", "none", true);
+            field(sb, "api_path", "lmax-bep", true);
+            num(sb, "buffer_size", config.bufferSize, true);
+            num(sb, "events_total", config.eventsTotal, true);
+            num(sb, "batch_size", config.batchSize, true);
+            num(sb, "warmup_rounds", config.warmupRounds, true);
+            num(sb, "measured_rounds", config.measuredRounds, true);
+            field(sb, "run_order", config.runOrder, true);
+            field(sb, "git_rev", "n/a", true);
+            sb.append("  \"rounds\": [\n");
+            for (int i = 0; i < rounds.size(); i++)
             {
-                final double delta = value - mean;
-                variance += delta * delta;
+                final Round r = rounds.get(i);
+                sb.append("    {\n");
+                num(sb, "index", r.index, true, 6);
+                field(sb, "phase", r.phase, true, 6);
+                num(sb, "elapsed_ns", r.elapsedNs, true, 6);
+                num(sb, "events", r.events, true, 6);
+                fnum(sb, "ops_per_sec", r.opsPerSec, true, 6);
+                bool(sb, "checksum_valid", r.checksumValid, false, 6);
+                sb.append(i + 1 == rounds.size() ? "    }\n" : "    },\n");
             }
-            variance /= measured.size();
-            final double stddev = Math.sqrt(variance);
-            final double cv = mean == 0.0 ? 0.0 : stddev / mean;
-
-            return new SummaryStats(checksumValidAll, median, mean, min, max, stddev, cv);
+            sb.append("  ],\n");
+            sb.append("  \"summary\": {\n");
+            bool(sb, "checksum_valid_all", summary.checksumValidAll, true, 4);
+            fnum(sb, "median_ops_per_sec", summary.medianOpsPerSec, true, 4);
+            fnum(sb, "mean_ops_per_sec", summary.meanOpsPerSec, true, 4);
+            fnum(sb, "min_ops_per_sec", summary.minOpsPerSec, true, 4);
+            fnum(sb, "max_ops_per_sec", summary.maxOpsPerSec, true, 4);
+            fnum(sb, "stddev_ops_per_sec", summary.stddevOpsPerSec, true, 4);
+            fnum(sb, "cv", summary.cv, false, 4);
+            sb.append("  }\n");
+            sb.append("}\n");
+            return sb.toString();
         }
-    }
 
-    static final class EnvInfo
-    {
-        final String os;
-        final String arch;
-        final String runtime;
-        final String runtimeVersion;
-
-        EnvInfo(final String os, final String arch, final String runtime, final String runtimeVersion)
+        private static void field(
+                final StringBuilder sb, final String k, final String v, final boolean comma)
         {
-            this.os = os;
-            this.arch = arch;
-            this.runtime = runtime;
-            this.runtimeVersion = runtimeVersion;
+            field(sb, k, v, comma, 2);
         }
-    }
 
-    static final class HarnessResult
-    {
-        final String implName;
-        final Scenario scenario;
-        final String measurementKind;
-        final int bufferSize;
-        final WaitStrategyKind waitStrategy;
-        final int producerCount;
-        final int consumerCount;
-        final int pipelineStages;
-        final int batchSize;
-        final long eventsTotal;
-        final int warmupRounds;
-        final int measuredRounds;
-        final String runOrder;
-        final EnvInfo env;
-        final List<RoundRecord> runs;
-        final SummaryStats summary;
-
-        private HarnessResult(
-                final String implName,
-                final Scenario scenario,
-                final String measurementKind,
-                final int bufferSize,
-                final WaitStrategyKind waitStrategy,
-                final int producerCount,
-                final int consumerCount,
-                final int pipelineStages,
-                final int batchSize,
-                final long eventsTotal,
-                final int warmupRounds,
-                final int measuredRounds,
-                final String runOrder,
-                final EnvInfo env,
-                final List<RoundRecord> runs,
-                final SummaryStats summary)
+        private static void field(
+                final StringBuilder sb,
+                final String k,
+                final String v,
+                final boolean comma,
+                final int indent)
         {
-            this.implName = implName;
-            this.scenario = scenario;
-            this.measurementKind = measurementKind;
-            this.bufferSize = bufferSize;
-            this.waitStrategy = waitStrategy;
-            this.producerCount = producerCount;
-            this.consumerCount = consumerCount;
-            this.pipelineStages = pipelineStages;
-            this.batchSize = batchSize;
-            this.eventsTotal = eventsTotal;
-            this.warmupRounds = warmupRounds;
-            this.measuredRounds = measuredRounds;
-            this.runOrder = runOrder;
-            this.env = env;
-            this.runs = runs;
-            this.summary = summary;
+            sb.append(" ".repeat(indent))
+                    .append('"')
+                    .append(k)
+                    .append("\": \"")
+                    .append(v)
+                    .append('"')
+                    .append(comma ? ",\n" : "\n");
         }
 
-        static HarnessResult from(final ResolvedConfig config, final List<RoundRecord> runs)
+        private static void num(
+                final StringBuilder sb, final String k, final long v, final boolean comma)
         {
-            return new HarnessResult(
-                    "lmax-disruptor",
-                    config.scenario,
-                    "throughput",
-                    config.bufferSize,
-                    config.waitStrategy,
-                    config.scenario.producerCount,
-                    config.scenario.consumerCount,
-                    config.scenario.pipelineStages,
-                    config.batchSize,
-                    config.eventsTotal,
-                    config.warmupRounds,
-                    config.measuredRounds,
-                    config.runOrder,
-                    new EnvInfo(
-                            System.getProperty("os.name", "unknown"),
-                            System.getProperty("os.arch", "unknown"),
-                            "java",
-                            System.getProperty("java.runtime.version", System.getProperty("java.version", "unknown"))),
-                    runs,
-                    SummaryStats.fromRuns(runs));
+            num(sb, k, v, comma, 2);
         }
 
-        String toJson()
+        private static void num(
+                final StringBuilder sb,
+                final String k,
+                final long v,
+                final boolean comma,
+                final int indent)
         {
-            final StringBuilder builder = new StringBuilder();
-            builder.append("{\n");
-            appendStringField(builder, 2, "impl_name", implName, true);
-            appendStringField(builder, 2, "scenario", scenario.id, true);
-            appendStringField(builder, 2, "measurement_kind", measurementKind, true);
-            appendNumberField(builder, 2, "buffer_size", bufferSize, true);
-            appendStringField(builder, 2, "wait_strategy", waitStrategy.id, true);
-            appendNumberField(builder, 2, "producer_count", producerCount, true);
-            appendNumberField(builder, 2, "consumer_count", consumerCount, true);
-            appendNumberField(builder, 2, "pipeline_stages", pipelineStages, true);
-            appendNumberField(builder, 2, "batch_size", batchSize, true);
-            appendNumberField(builder, 2, "events_total", eventsTotal, true);
-            appendNumberField(builder, 2, "warmup_rounds", warmupRounds, true);
-            appendNumberField(builder, 2, "measured_rounds", measuredRounds, true);
-            appendStringField(builder, 2, "run_order", runOrder, true);
-
-            builder.append("  \"env\": {\n");
-            appendStringField(builder, 4, "os", env.os, true);
-            appendStringField(builder, 4, "arch", env.arch, true);
-            appendStringField(builder, 4, "runtime", env.runtime, true);
-            appendStringField(builder, 4, "runtime_version", env.runtimeVersion, false);
-            builder.append("  },\n");
-
-            builder.append("  \"runs\": [\n");
-            for (int index = 0; index < runs.size(); index++)
-            {
-                final RoundRecord run = runs.get(index);
-                builder.append("    {\n");
-                appendNumberField(builder, 6, "round_index", run.roundIndex, true);
-                appendStringField(builder, 6, "phase", run.phase.id, true);
-                appendNumberField(builder, 6, "elapsed_ns", run.elapsedNs, true);
-                appendFloatField(builder, 6, "ops_per_sec", run.opsPerSec, true);
-                appendNumberField(builder, 6, "events_expected", run.eventsExpected, true);
-                appendNumberField(builder, 6, "events_processed", run.eventsProcessed, true);
-                appendNumberField(builder, 6, "checksum_expected", run.checksumExpected, true);
-                appendNumberField(builder, 6, "checksum_observed", run.checksumObserved, true);
-                appendBooleanField(builder, 6, "checksum_valid", run.checksumValid, false);
-                if (index + 1 == runs.size())
-                {
-                    builder.append("    }\n");
-                }
-                else
-                {
-                    builder.append("    },\n");
-                }
-            }
-            builder.append("  ],\n");
-
-            builder.append("  \"summary\": {\n");
-            appendBooleanField(builder, 4, "checksum_valid_all", summary.checksumValidAll, true);
-            appendFloatField(builder, 4, "median_ops_per_sec", summary.medianOpsPerSec, true);
-            appendFloatField(builder, 4, "mean_ops_per_sec", summary.meanOpsPerSec, true);
-            appendFloatField(builder, 4, "min_ops_per_sec", summary.minOpsPerSec, true);
-            appendFloatField(builder, 4, "max_ops_per_sec", summary.maxOpsPerSec, true);
-            appendFloatField(builder, 4, "stddev_ops_per_sec", summary.stddevOpsPerSec, true);
-            appendFloatField(builder, 4, "cv", summary.cv, false);
-            builder.append("  }\n");
-            builder.append("}\n");
-            return builder.toString();
+            sb.append(" ".repeat(indent))
+                    .append('"')
+                    .append(k)
+                    .append("\": ")
+                    .append(v)
+                    .append(comma ? ",\n" : "\n");
         }
-    }
 
-    private static void appendStringField(
-            final StringBuilder builder,
-            final int indent,
-            final String key,
-            final String value,
-            final boolean trailing)
-    {
-        builder.append(" ".repeat(indent))
-                .append('"').append(key).append("\": \"")
-                .append(escapeJson(value))
-                .append('"');
-        if (trailing)
+        private static void fnum(
+                final StringBuilder sb,
+                final String k,
+                final double v,
+                final boolean comma,
+                final int indent)
         {
-            builder.append(',');
+            sb.append(" ".repeat(indent))
+                    .append('"')
+                    .append(k)
+                    .append("\": ")
+                    .append(String.format(Locale.US, "%.6f", v))
+                    .append(comma ? ",\n" : "\n");
         }
-        builder.append('\n');
-    }
 
-    private static void appendNumberField(
-            final StringBuilder builder,
-            final int indent,
-            final String key,
-            final long value,
-            final boolean trailing)
-    {
-        builder.append(" ".repeat(indent))
-                .append('"').append(key).append("\": ")
-                .append(value);
-        if (trailing)
+        private static void bool(
+                final StringBuilder sb,
+                final String k,
+                final boolean v,
+                final boolean comma,
+                final int indent)
         {
-            builder.append(',');
+            sb.append(" ".repeat(indent))
+                    .append('"')
+                    .append(k)
+                    .append("\": ")
+                    .append(v)
+                    .append(comma ? ",\n" : "\n");
         }
-        builder.append('\n');
-    }
-
-    private static void appendFloatField(
-            final StringBuilder builder,
-            final int indent,
-            final String key,
-            final double value,
-            final boolean trailing)
-    {
-        builder.append(" ".repeat(indent))
-                .append('"').append(key).append("\": ")
-                .append(String.format(Locale.ROOT, "%.6f", value));
-        if (trailing)
-        {
-            builder.append(',');
-        }
-        builder.append('\n');
-    }
-
-    private static void appendBooleanField(
-            final StringBuilder builder,
-            final int indent,
-            final String key,
-            final boolean value,
-            final boolean trailing)
-    {
-        builder.append(" ".repeat(indent))
-                .append('"').append(key).append("\": ")
-                .append(value ? "true" : "false");
-        if (trailing)
-        {
-            builder.append(',');
-        }
-        builder.append('\n');
-    }
-
-    private static String escapeJson(final String value)
-    {
-        return value.replace("\\", "\\\\").replace("\"", "\\\"");
-    }
-
-    private static void printHelpAndExit()
-    {
-        System.out.println("Usage: java ... HeadToHead --scenario <SCENARIO> [options]");
-        System.out.println();
-        System.out.println("Options:");
-        System.out.println("  --scenario <unicast|unicast_batch|mpsc_batch|pipeline>");
-        System.out.println("  --wait-strategy <yielding|busy-spin>");
-        System.out.println("  --buffer-size <N>");
-        System.out.println("  --events-total <N>");
-        System.out.println("  --batch-size <N>");
-        System.out.println("  --warmup-rounds <N>");
-        System.out.println("  --measured-rounds <N>");
-        System.out.println("  --run-order <rust-then-java|java-then-rust|standalone>");
-        System.out.println("  --output <PATH>");
-        System.exit(0);
     }
 }
