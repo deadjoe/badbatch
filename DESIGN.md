@@ -445,9 +445,16 @@ Based on internal benchmarks and design characteristics:
 - **Batch Processing**: ~5-20ns per event (amortized)
 
 ### Throughput Capabilities
-- **Single Producer**: 20-100M events/second
-- **Multi Producer**: 5-50M events/second (depending on contention)
-- **Memory Usage**: O(buffer_size) with zero runtime allocation
+
+Indicative ranges (methodology-dependent). Post-modernization **median** wall-clock numbers on Apple Silicon (T6000), `BusySpin`, buffer=1024, ~2M events — see `benches/results/BASELINE.md`:
+
+- **SPSC single-event (pad=none)**: ~**160 Melem/s** median
+- **SPSC batch publish**: ~**350–450 Melem/s** median
+- **MPSC (2–4 producers)**: ~**7–15 Melem/s** (contention-limited for trivial handlers)
+- **WorkerPool (2–4 workers)**: ~**6–11 Melem/s** (CAS work-cursor contention for trivial handlers)
+- **Pipeline 2-stage**: ~**100–130 Melem/s** median
+
+Older DESIGN band “SP 20–100M / MP 5–50M” remains a coarse planning range; prefer the checked-in baseline table for regressions.
 
 ### Scalability Characteristics
 - **CPU Cores**: Linear scaling up to memory bandwidth limits

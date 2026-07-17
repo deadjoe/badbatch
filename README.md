@@ -246,6 +246,12 @@ fn main() {
 
 Core-only build: `cargo test --no-default-features`. Same-stage parallel handlers use **WorkerPool work-sharing** (CAS claim). See `docs/MODERNIZATION.md`.
 
+**Performance baseline (macOS):** checked-in medians in `benches/results/BASELINE.md`. Reproduce:
+
+```bash
+RUSTFLAGS="-C target-cpu=native" ./scripts/run_baseline.sh --full
+```
+
 ## 🔧 Development
 
 ### Prerequisites

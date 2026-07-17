@@ -56,6 +56,8 @@ pub fn run_sequential_batch_loop<E, H, W>(
     );
 }
 
+// `thread_name` is used only on the debug error path inside the with_exceptions variant.
+
 /// Sequential loop with optional LMAX-style exception handler (BatchEventProcessor path).
 pub fn run_sequential_batch_loop_with_exceptions<E, H, W>(
     ring_buffer: &RingBuffer<E>,
@@ -94,11 +96,15 @@ pub fn run_sequential_batch_loop_with_exceptions<E, H, W>(
                             eh.handle_event_exception(e, next_sequence, event);
                         } else {
                             #[cfg(debug_assertions)]
-                            eprintln!(
-                                "Event processing error in '{thread_name}' at sequence {next_sequence}: {e:?}"
-                            );
+                            {
+                                eprintln!(
+                                    "Event processing error in '{thread_name}' at sequence {next_sequence}: {e:?}"
+                                );
+                            }
                             #[cfg(not(debug_assertions))]
-                            let _ = e;
+                            {
+                                let _ = (e, thread_name);
+                            }
                         }
                     }
 
@@ -168,9 +174,13 @@ pub fn run_work_processor_loop<E, H, W>(
 
         if let Err(e) = event_handler.on_event(event, claimed, end_of_batch) {
             #[cfg(debug_assertions)]
-            eprintln!("Event processing error in '{thread_name}' at sequence {claimed}: {e:?}");
+            {
+                eprintln!("Event processing error in '{thread_name}' at sequence {claimed}: {e:?}");
+            }
             #[cfg(not(debug_assertions))]
-            let _ = e;
+            {
+                let _ = (e, thread_name);
+            }
         }
 
         consumer_sequence.set(claimed);
