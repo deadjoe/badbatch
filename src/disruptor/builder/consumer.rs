@@ -228,6 +228,8 @@ where
     pub(crate) cpu_affinity: Option<usize>,
     /// Logical stage index within the processing graph.
     pub(crate) stage_index: usize,
+    /// `true` = read-only fan-out (`&E`); `false` = mutable handler / WorkerPool.
+    pub(crate) readonly: bool,
 }
 
 pub(crate) fn consumer_info_from_handler<E, H, W>(
@@ -250,5 +252,113 @@ where
         thread_name,
         cpu_affinity,
         stage_index,
+        readonly: false,
+    }
+}
+
+/// Start a read-only fan-out consumer (each sees every sequence via `&E`).
+pub(crate) fn start_readonly_consumer_thread<E, F, W>(
+    ring_buffer: Arc<RingBuffer<E>>,
+    sequence_barrier: Arc<ProcessingSequenceBarrier<W>>,
+    mut on_event: F,
+    config: ConsumerThreadConfig,
+) -> (Arc<Sequence>, Consumer)
+where
+    E: Send + Sync + 'static,
+    F: FnMut(&E, i64, bool) -> crate::disruptor::Result<()> + Send + 'static,
+    W: WaitStrategy + 'static,
+{
+    let consumer_sequence = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
+    let consumer_sequence_clone = consumer_sequence.clone();
+
+    let ConsumerThreadConfig {
+        thread_name,
+        cpu_affinity,
+        shutdown_flag,
+        work_sequence,
+    } = config;
+
+    debug_assert!(
+        work_sequence.is_none(),
+        "readonly fan-out must not use WorkerPool work sequence"
+    );
+
+    let thread_name = thread_name.unwrap_or_else(|| "disruptor-fanout".to_string());
+    let thread_name_clone = thread_name.clone();
+
+    let join_handle = thread::Builder::new()
+        .name(thread_name.clone())
+        .spawn(move || {
+            if let Some(core_id) = cpu_affinity {
+                if let Err(e) = set_thread_affinity(core_id) {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "Warning: Failed to set CPU affinity for fan-out '{thread_name}' to core {core_id}: {e}"
+                    );
+                    #[cfg(not(debug_assertions))]
+                    let _ = e;
+                }
+            }
+
+            let control = LoopControl {
+                shutdown: &shutdown_flag,
+                running: None,
+            };
+
+            consumer_engine::run_sequential_readonly_loop(
+                &ring_buffer,
+                &sequence_barrier,
+                &mut on_event,
+                &consumer_sequence_clone,
+                control,
+                &thread_name,
+            );
+        })
+        .expect("Failed to spawn fan-out consumer thread");
+
+    (
+        consumer_sequence,
+        Consumer::new(join_handle, thread_name_clone),
+    )
+}
+
+pub(crate) fn consumer_info_from_readonly<E, F, W>(
+    on_event: F,
+    thread_name: Option<String>,
+    cpu_affinity: Option<usize>,
+    stage_index: usize,
+) -> ConsumerInfo<E, W>
+where
+    E: Send + Sync + 'static,
+    F: FnMut(&E, i64, bool) -> crate::disruptor::Result<()> + Send + 'static,
+    W: WaitStrategy + 'static,
+{
+    let starter: ConsumerStarter<E, W> = Box::new(move |ring_buffer, sequence_barrier, config| {
+        start_readonly_consumer_thread(ring_buffer, sequence_barrier, on_event, config)
+    });
+
+    ConsumerInfo {
+        starter,
+        thread_name,
+        cpu_affinity,
+        stage_index,
+        readonly: true,
+    }
+}
+
+/// Reject mixing mutable WorkerPool handlers with read-only fan-out on one stage.
+pub(crate) fn assert_stage_mode_compatible<E, W>(
+    consumers: &[ConsumerInfo<E, W>],
+    stage_index: usize,
+    readonly: bool,
+) where
+    E: Send + Sync + 'static,
+    W: WaitStrategy + 'static,
+{
+    for c in consumers {
+        assert!(
+            !(c.stage_index == stage_index && c.readonly != readonly),
+            "cannot mix mutable handlers (WorkerPool / &mut E) with read-only fan-out (&E) on the same stage (stage {stage_index})"
+        );
     }
 }

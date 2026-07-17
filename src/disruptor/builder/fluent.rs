@@ -1,6 +1,9 @@
 //! Type-state fluent builders (single / multi / dependent stages).
 
-use super::consumer::{consumer_info_from_handler, ConsumerInfo, HasConsumers, NoConsumers};
+use super::consumer::{
+    assert_stage_mode_compatible, consumer_info_from_handler, consumer_info_from_readonly,
+    ConsumerInfo, HasConsumers, NoConsumers,
+};
 use super::core::create_disruptor_core;
 use super::handle::DisruptorHandle;
 use crate::disruptor::{
@@ -332,6 +335,37 @@ where
             _phantom: PhantomData,
         }
     }
+
+    /// Start a **read-only fan-out** stage (`&E`): every fan-out consumer sees every event.
+    ///
+    /// Add more fan-out consumers with [`SingleProducerBuilder<HasConsumers, _, _, _>::fan_out_events_with`].
+    /// Do not mix with mutable [`Self::handle_events_with`] on the same stage.
+    #[must_use]
+    pub fn fan_out_events_with<H>(
+        mut self,
+        mut handler: H,
+    ) -> SingleProducerBuilder<HasConsumers, E, F, W>
+    where
+        H: FnMut(&E, i64, bool) + Send + 'static,
+    {
+        let consumer_info = consumer_info_from_readonly(
+            move |e, seq, eob| {
+                handler(e, seq, eob);
+                Ok(())
+            },
+            self.shared.current_thread_name.take(),
+            self.shared.current_cpu_affinity.take(),
+            self.shared.current_stage_index,
+        );
+        self.shared.consumers.push(consumer_info);
+        self.shared.current_stage_width = 1;
+
+        SingleProducerBuilder {
+            event_factory: self.event_factory,
+            shared: self.shared,
+            _phantom: PhantomData,
+        }
+    }
 }
 
 impl<E, F, W> SingleProducerBuilder<HasConsumers, E, F, W>
@@ -354,12 +388,17 @@ where
         self
     }
 
-    /// Add another event handler to process events in parallel (closure-based)
+    /// Add another **mutable** event handler on this stage (WorkerPool work-sharing when width > 1).
     #[must_use]
     pub fn handle_events_with<H>(mut self, handler: H) -> Self
     where
         H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
     {
+        assert_stage_mode_compatible(
+            &self.shared.consumers,
+            self.shared.current_stage_index,
+            false,
+        );
         let consumer_info = consumer_info_from_handler(
             ClosureEventHandler::new(handler),
             self.shared.current_thread_name.take(),
@@ -371,14 +410,48 @@ where
         self
     }
 
-    /// Add another stateful event handler to process events in parallel
+    /// Add another stateful mutable handler (WorkerPool when width > 1).
     #[must_use]
     pub fn handle_events_with_handler<H>(mut self, handler: H) -> Self
     where
         H: EventHandler<E> + Send + Sync + 'static,
     {
+        assert_stage_mode_compatible(
+            &self.shared.consumers,
+            self.shared.current_stage_index,
+            false,
+        );
         let consumer_info = consumer_info_from_handler(
             handler,
+            self.shared.current_thread_name.take(),
+            self.shared.current_cpu_affinity.take(),
+            self.shared.current_stage_index,
+        );
+        self.shared.consumers.push(consumer_info);
+        self.shared.current_stage_width += 1;
+        self
+    }
+
+    /// Add a **read-only fan-out** consumer on this stage (`&E`).
+    ///
+    /// Every fan-out consumer observes **every** sequence (broadcast), unlike
+    /// [`Self::handle_events_with`] which work-shares via WorkerPool CAS claim.
+    /// Cannot be mixed with mutable handlers on the same stage.
+    #[must_use]
+    pub fn fan_out_events_with<H>(mut self, mut handler: H) -> Self
+    where
+        H: FnMut(&E, i64, bool) + Send + 'static,
+    {
+        assert_stage_mode_compatible(
+            &self.shared.consumers,
+            self.shared.current_stage_index,
+            true,
+        );
+        let consumer_info = consumer_info_from_readonly(
+            move |e, seq, eob| {
+                handler(e, seq, eob);
+                Ok(())
+            },
             self.shared.current_thread_name.take(),
             self.shared.current_cpu_affinity.take(),
             self.shared.current_stage_index,
@@ -559,12 +632,17 @@ where
         self
     }
 
-    /// Add another event handler to process events in parallel
+    /// Add another mutable handler (WorkerPool work-sharing when width > 1).
     #[must_use]
     pub fn handle_events_with<H>(mut self, handler: H) -> Self
     where
         H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
     {
+        assert_stage_mode_compatible(
+            &self.shared.consumers,
+            self.shared.current_stage_index,
+            false,
+        );
         let consumer_info = consumer_info_from_handler(
             ClosureEventHandler::new(handler),
             self.shared.current_thread_name.take(),
@@ -576,14 +654,44 @@ where
         self
     }
 
-    /// Add another stateful event handler to process events in parallel
+    /// Add another stateful mutable handler (WorkerPool when width > 1).
     #[must_use]
     pub fn handle_events_with_handler<H>(mut self, handler: H) -> Self
     where
         H: EventHandler<E> + Send + Sync + 'static,
     {
+        assert_stage_mode_compatible(
+            &self.shared.consumers,
+            self.shared.current_stage_index,
+            false,
+        );
         let consumer_info = consumer_info_from_handler(
             handler,
+            self.shared.current_thread_name.take(),
+            self.shared.current_cpu_affinity.take(),
+            self.shared.current_stage_index,
+        );
+        self.shared.consumers.push(consumer_info);
+        self.shared.current_stage_width += 1;
+        self
+    }
+
+    /// Read-only fan-out (`&E`): every consumer on this stage sees every sequence.
+    #[must_use]
+    pub fn fan_out_events_with<H>(mut self, mut handler: H) -> Self
+    where
+        H: FnMut(&E, i64, bool) + Send + 'static,
+    {
+        assert_stage_mode_compatible(
+            &self.shared.consumers,
+            self.shared.current_stage_index,
+            true,
+        );
+        let consumer_info = consumer_info_from_readonly(
+            move |e, seq, eob| {
+                handler(e, seq, eob);
+                Ok(())
+            },
             self.shared.current_thread_name.take(),
             self.shared.current_cpu_affinity.take(),
             self.shared.current_stage_index,

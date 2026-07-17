@@ -28,6 +28,7 @@ Internal alignment doc for agent/developer work. Reflects **current intent**, no
 | P0 | Performance evidence closed loop | done (3-run medians on Apple Silicon; padding/batch/contention conclusions) |
 | P1 | builder split + feature/docs tighten | done (`builder/{core,consumer,handle,fluent,entry}`; core-only CI job) |
 | P2 | Loom claim models + MPSC exactly-once stress | done (`tests/loom_work_claim.rs`, `mpsc_exactly_once_stress.rs`, CI loom job) |
+| P3 | Read-only fan-out (`fan_out_events_with`) vs WorkerPool | done (engine + builder; mix rejected; stress tests) |
 
 ## Architecture decisions
 
@@ -42,11 +43,12 @@ Internal alignment doc for agent/developer work. Reflects **current intent**, no
 - LMAX-style `Disruptor` DSL remains as a compatibility/learning surface until folded under a feature or thin wrapper.
 - `ElegantConsumer` / dual wait-strategy story must converge so users are not misled.
 
-### AD-3: Parallel same-stage consumers = WorkerPool (scheme A)
+### AD-3: Parallel same-stage consumers
 
-- **Not** per-slot `Mutex`.
-- Workers CAS-claim sequences from a shared work cursor; processing follows LMAX WorkProcessor spirit.
-- Mutable fan-out is only sound if claim grants exclusive sequence ownership (one worker per sequence).
+Two **explicit** modes (never mixed on one stage):
+
+1. **WorkerPool (scheme A)** — `handle_events_with` × N (mutable): CAS claim on shared work cursor; one handler per sequence. No slot `Mutex`.
+2. **Read-only fan-out** — `fan_out_events_with` × N: each consumer runs a sequential loop observing `&E` for every sequence (broadcast).
 
 ### AD-4: SharedRingBuffer
 

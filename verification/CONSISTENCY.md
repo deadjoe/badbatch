@@ -74,6 +74,12 @@ All 5 TLA+ models re-verified successfully after these changes.
 2. **Stress** (`worker_pool_claim_stress`, `mpsc_exactly_once_stress`): large-N unique claims; MPSC 4-producer exactly-once contiguous consume; SPSC pipeline stage-order belt check.
 3. Re-run: `./scripts/loom-smoke.sh` and `cargo test --test mpsc_exactly_once_stress --release`.
 
+## Round-6 Read-only fan-out (2026-07-17)
+
+1. **Fan-out** (`fan_out_events_with`): independent consumer sequences, sequential readonly loop, gating = min(sequences). Equivalent to multiple LMAX consumers each reading the full stream without mutation.
+2. **WorkerPool** remains claim-based for mutable same-stage handlers only.
+3. Mixing modes on one stage panics at build time (topology error, not a silent protocol bug).
+
 ## Suggested Model Enhancements (Optional)
 
 - Add a simple safety property asserting per-reader monotonic consumption (prefix strictly increasing), though it’s already implied by the state machine and `Liveness`.
