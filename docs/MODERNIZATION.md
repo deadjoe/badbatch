@@ -35,6 +35,7 @@ Internal alignment doc for agent/developer work. Reflects **current intent**, no
 | R4 | `StopFlag` / `LoopControl` (no dual-flag / static stop) | done |
 | R5 | Split `builder/tests` by topic | done |
 | R6 | Feature/docs honesty (defaults stay for continuity; core-only CI) | done |
+| R7 | Dead stage_width/`first` removed; fluent macros; StopFlag-only; honest non-Clone; Multi `and_then` | done |
 
 ## Architecture decisions
 

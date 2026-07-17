@@ -1,7 +1,14 @@
 //! Type-state fluent builders (single / multi / dependent stages).
 //!
-//! Adding consumers is centralized on [`SharedBuilderState`]; builder wrappers
-//! only flip type-state and expose a thin API.
+//! Consumer registration is centralized on [`SharedBuilderState`]. Builder
+//! wrappers only flip type-state and expose a thin API. Shared method bodies are
+//! generated once via macros so SP/MP/dependent surfaces stay in sync.
+//!
+//! # Pipeline stages
+//!
+//! Both single- and multi-producer builders support [`and_then`](SingleProducerBuilder::and_then)
+//! for dependent stages. Same-stage parallel consumers use WorkerPool (mutable) or
+//! fan-out (readonly); mixing access kinds on one stage panics.
 
 use super::consumer::{
     assert_access_compatible, consumer_info_mutable, consumer_info_readonly, ConsumerAccess,
@@ -32,7 +39,6 @@ where
     pub(crate) current_thread_name: Option<String>,
     pub(crate) current_cpu_affinity: Option<usize>,
     pub(crate) current_stage_index: usize,
-    pub(crate) current_stage_width: usize,
 }
 
 impl<E, W> SharedBuilderState<E, W>
@@ -49,7 +55,6 @@ where
             current_thread_name: None,
             current_cpu_affinity: None,
             current_stage_index: 0,
-            current_stage_width: 0,
         }
     }
 
@@ -60,35 +65,12 @@ where
         )
     }
 
-    fn push_mutable(&mut self, info: ConsumerInfo<E, W>, first_on_builder: bool) {
-        assert_access_compatible(
-            &self.consumers,
-            self.current_stage_index,
-            ConsumerAccess::Mutable,
-        );
+    fn push(&mut self, info: ConsumerInfo<E, W>, access: ConsumerAccess) {
+        assert_access_compatible(&self.consumers, self.current_stage_index, access);
         self.consumers.push(info);
-        if first_on_builder {
-            self.current_stage_width = 1;
-        } else {
-            self.current_stage_width += 1;
-        }
     }
 
-    fn push_readonly(&mut self, info: ConsumerInfo<E, W>, first_on_builder: bool) {
-        assert_access_compatible(
-            &self.consumers,
-            self.current_stage_index,
-            ConsumerAccess::Readonly,
-        );
-        self.consumers.push(info);
-        if first_on_builder {
-            self.current_stage_width = 1;
-        } else {
-            self.current_stage_width += 1;
-        }
-    }
-
-    fn add_mut_closure<H>(&mut self, mut handler: H, first: bool)
+    fn add_mut_closure<H>(&mut self, mut handler: H)
     where
         H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
     {
@@ -103,19 +85,22 @@ where
             cpu,
             stage,
         );
-        self.push_mutable(info, first);
+        self.push(info, ConsumerAccess::Mutable);
     }
 
-    fn add_mut_handler<H>(&mut self, handler: H, first: bool)
+    fn add_mut_handler<H>(&mut self, handler: H)
     where
         H: EventHandler<E> + Send + Sync + 'static,
     {
         let (name, cpu) = self.take_thread_meta();
         let stage = self.current_stage_index;
-        self.push_mutable(consumer_info_mutable(handler, name, cpu, stage), first);
+        self.push(
+            consumer_info_mutable(handler, name, cpu, stage),
+            ConsumerAccess::Mutable,
+        );
     }
 
-    fn add_fanout<H>(&mut self, mut handler: H, first: bool)
+    fn add_fanout<H>(&mut self, mut handler: H)
     where
         H: FnMut(&E, i64, bool) + Send + 'static,
     {
@@ -130,13 +115,169 @@ where
             cpu,
             stage,
         );
-        self.push_readonly(info, first);
+        self.push(info, ConsumerAccess::Readonly);
     }
 
     fn advance_stage(&mut self) {
         self.current_stage_index += 1;
-        self.current_stage_width = 0;
     }
+}
+
+// --- Shared method macros ------------------------------------------------------------
+
+/// Config methods that only mutate `shared` and return `Self`.
+macro_rules! impl_builder_config {
+    ($builder:ident, $state:ty, $($wait_bound:tt)*) => {
+        impl<E, F, W> $builder<$state, E, F, W>
+        where
+            E: Send + Sync + 'static,
+            F: Fn() -> E + Send + Sync + 'static,
+            W: WaitStrategy $($wait_bound)* + 'static,
+        {
+            /// Pin the next consumer thread to a CPU core (best-effort).
+            #[must_use]
+            pub fn pin_at_core(mut self, core_id: usize) -> Self {
+                self.shared.current_cpu_affinity = Some(core_id);
+                self
+            }
+
+            /// Set the OS thread name for the next consumer.
+            #[must_use]
+            pub fn thread_name<S: Into<String>>(mut self, name: S) -> Self {
+                self.shared.current_thread_name = Some(name.into());
+                self
+            }
+
+            /// Configure ring-buffer slot padding strategy.
+            #[must_use]
+            pub fn with_slot_padding(mut self, slot_padding: SlotPadding) -> Self {
+                self.shared.slot_padding = slot_padding;
+                self
+            }
+
+            /// Enable 128-byte cache-line slot padding when `enabled` is true.
+            #[must_use]
+            pub fn with_cache_line_padding(self, enabled: bool) -> Self {
+                self.with_slot_padding(if enabled {
+                    SlotPadding::CacheLine128
+                } else {
+                    SlotPadding::None
+                })
+            }
+        }
+    };
+}
+
+/// First consumer methods: `NoConsumers` → `HasConsumers` type-state jump.
+macro_rules! impl_first_handlers {
+    ($builder:ident, $($wait_bound:tt)*) => {
+        impl<E, F, W> $builder<NoConsumers, E, F, W>
+        where
+            E: Send + Sync + 'static,
+            F: Fn() -> E + Send + Sync + 'static,
+            W: WaitStrategy $($wait_bound)* + 'static,
+        {
+            /// Register a mutable closure handler (`&mut E`) on the current stage.
+            #[must_use]
+            pub fn handle_events_with<H>(
+                mut self,
+                handler: H,
+            ) -> $builder<HasConsumers, E, F, W>
+            where
+                H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
+            {
+                self.shared.add_mut_closure(handler);
+                $builder {
+                    event_factory: self.event_factory,
+                    shared: self.shared,
+                    _phantom: PhantomData,
+                }
+            }
+
+            /// Register a mutable [`EventHandler`] on the current stage.
+            #[must_use]
+            pub fn handle_events_with_handler<H>(
+                mut self,
+                handler: H,
+            ) -> $builder<HasConsumers, E, F, W>
+            where
+                H: EventHandler<E> + Send + Sync + 'static,
+            {
+                self.shared.add_mut_handler(handler);
+                $builder {
+                    event_factory: self.event_factory,
+                    shared: self.shared,
+                    _phantom: PhantomData,
+                }
+            }
+
+            /// Register a read-only fan-out handler (`&E`) that observes every sequence.
+            #[must_use]
+            pub fn fan_out_events_with<H>(
+                mut self,
+                handler: H,
+            ) -> $builder<HasConsumers, E, F, W>
+            where
+                H: FnMut(&E, i64, bool) + Send + 'static,
+            {
+                self.shared.add_fanout(handler);
+                $builder {
+                    event_factory: self.event_factory,
+                    shared: self.shared,
+                    _phantom: PhantomData,
+                }
+            }
+        }
+    };
+}
+
+/// Additional same-stage consumers (already `HasConsumers`).
+macro_rules! impl_more_handlers {
+    ($builder:ident, $($wait_bound:tt)*) => {
+        impl<E, F, W> $builder<HasConsumers, E, F, W>
+        where
+            E: Send + Sync + 'static,
+            F: Fn() -> E + Send + Sync + 'static,
+            W: WaitStrategy $($wait_bound)* + 'static,
+        {
+            /// Register a mutable closure handler (`&mut E`) on the current stage.
+            #[must_use]
+            pub fn handle_events_with<H>(mut self, handler: H) -> Self
+            where
+                H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
+            {
+                self.shared.add_mut_closure(handler);
+                self
+            }
+
+            /// Register a mutable [`EventHandler`] on the current stage.
+            #[must_use]
+            pub fn handle_events_with_handler<H>(mut self, handler: H) -> Self
+            where
+                H: EventHandler<E> + Send + Sync + 'static,
+            {
+                self.shared.add_mut_handler(handler);
+                self
+            }
+
+            /// Register a read-only fan-out handler (`&E`) that observes every sequence.
+            #[must_use]
+            pub fn fan_out_events_with<H>(mut self, handler: H) -> Self
+            where
+                H: FnMut(&E, i64, bool) + Send + 'static,
+            {
+                self.shared.add_fanout(handler);
+                self
+            }
+
+            /// Start a dependent pipeline stage that waits for the previous stage.
+            #[must_use]
+            pub fn and_then(mut self) -> DependentBuilder<Self> {
+                self.shared.advance_stage();
+                DependentBuilder { inner: self }
+            }
+        }
+    };
 }
 
 // --- Single producer -----------------------------------------------------------------
@@ -156,96 +297,6 @@ where
     _phantom: PhantomData<(State, E)>,
 }
 
-/// Builder stage created by [`SingleProducerBuilder::and_then`].
-///
-/// Consumers registered here form a new pipeline stage that waits for the
-/// previous stage's sequences before processing.
-pub struct DependentConsumerBuilder<E, F, W>
-where
-    E: Send + Sync + 'static,
-    F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Clone + 'static,
-{
-    builder: SingleProducerBuilder<HasConsumers, E, F, W>,
-}
-
-impl<E, F, W> DependentConsumerBuilder<E, F, W>
-where
-    E: Send + Sync + 'static,
-    F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Clone + 'static,
-{
-    #[must_use]
-    /// Pin the next consumer thread to a CPU core (best-effort).
-    pub fn pin_at_core(mut self, core_id: usize) -> Self {
-        self.builder.shared.current_cpu_affinity = Some(core_id);
-        self
-    }
-
-    #[must_use]
-    /// Set the OS thread name for the next consumer.
-    pub fn thread_name<S: Into<String>>(mut self, name: S) -> Self {
-        self.builder.shared.current_thread_name = Some(name.into());
-        self
-    }
-
-    #[must_use]
-    /// Configure ring-buffer slot padding strategy.
-    pub fn with_slot_padding(mut self, slot_padding: SlotPadding) -> Self {
-        self.builder.shared.slot_padding = slot_padding;
-        self
-    }
-
-    #[must_use]
-    /// Enable 128-byte cache-line slot padding when `enabled` is true.
-    pub fn with_cache_line_padding(self, enabled: bool) -> Self {
-        self.with_slot_padding(if enabled {
-            SlotPadding::CacheLine128
-        } else {
-            SlotPadding::None
-        })
-    }
-
-    #[must_use]
-    /// Register a mutable closure handler (`&mut E`) on the current stage.
-    pub fn handle_events_with<H>(
-        mut self,
-        handler: H,
-    ) -> SingleProducerBuilder<HasConsumers, E, F, W>
-    where
-        H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
-    {
-        self.builder.shared.add_mut_closure(handler, true);
-        self.builder
-    }
-
-    #[must_use]
-    /// Register a mutable [`EventHandler`] on the current stage.
-    pub fn handle_events_with_handler<H>(
-        mut self,
-        handler: H,
-    ) -> SingleProducerBuilder<HasConsumers, E, F, W>
-    where
-        H: EventHandler<E> + Send + Sync + 'static,
-    {
-        self.builder.shared.add_mut_handler(handler, true);
-        self.builder
-    }
-
-    #[must_use]
-    /// Register a read-only fan-out handler (`&E`) that observes every sequence.
-    pub fn fan_out_events_with<H>(
-        mut self,
-        handler: H,
-    ) -> SingleProducerBuilder<HasConsumers, E, F, W>
-    where
-        H: FnMut(&E, i64, bool) + Send + 'static,
-    {
-        self.builder.shared.add_fanout(handler, true);
-        self.builder
-    }
-}
-
 impl<E, F, W> SingleProducerBuilder<NoConsumers, E, F, W>
 where
     E: Send + Sync + 'static,
@@ -259,89 +310,12 @@ where
             _phantom: PhantomData,
         }
     }
-
-    #[must_use]
-    /// Configure ring-buffer slot padding strategy.
-    pub fn with_slot_padding(mut self, slot_padding: SlotPadding) -> Self {
-        self.shared.slot_padding = slot_padding;
-        self
-    }
-
-    #[must_use]
-    /// Enable 128-byte cache-line slot padding when `enabled` is true.
-    pub fn with_cache_line_padding(self, enabled: bool) -> Self {
-        self.with_slot_padding(if enabled {
-            SlotPadding::CacheLine128
-        } else {
-            SlotPadding::None
-        })
-    }
-
-    #[must_use]
-    /// Pin the next consumer thread to a CPU core (best-effort).
-    pub fn pin_at_core(mut self, core_id: usize) -> Self {
-        self.shared.current_cpu_affinity = Some(core_id);
-        self
-    }
-
-    #[must_use]
-    /// Set the OS thread name for the next consumer.
-    pub fn thread_name<S: Into<String>>(mut self, name: S) -> Self {
-        self.shared.current_thread_name = Some(name.into());
-        self
-    }
-
-    #[must_use]
-    /// Register a mutable closure handler (`&mut E`) on the current stage.
-    pub fn handle_events_with<H>(
-        mut self,
-        handler: H,
-    ) -> SingleProducerBuilder<HasConsumers, E, F, W>
-    where
-        H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
-    {
-        self.shared.add_mut_closure(handler, true);
-        SingleProducerBuilder {
-            event_factory: self.event_factory,
-            shared: self.shared,
-            _phantom: PhantomData,
-        }
-    }
-
-    #[must_use]
-    /// Register a mutable [`EventHandler`] on the current stage.
-    pub fn handle_events_with_handler<H>(
-        mut self,
-        handler: H,
-    ) -> SingleProducerBuilder<HasConsumers, E, F, W>
-    where
-        H: EventHandler<E> + Send + Sync + 'static,
-    {
-        self.shared.add_mut_handler(handler, true);
-        SingleProducerBuilder {
-            event_factory: self.event_factory,
-            shared: self.shared,
-            _phantom: PhantomData,
-        }
-    }
-
-    #[must_use]
-    /// Register a read-only fan-out handler (`&E`) that observes every sequence.
-    pub fn fan_out_events_with<H>(
-        mut self,
-        handler: H,
-    ) -> SingleProducerBuilder<HasConsumers, E, F, W>
-    where
-        H: FnMut(&E, i64, bool) + Send + 'static,
-    {
-        self.shared.add_fanout(handler, true);
-        SingleProducerBuilder {
-            event_factory: self.event_factory,
-            shared: self.shared,
-            _phantom: PhantomData,
-        }
-    }
 }
+
+impl_builder_config!(SingleProducerBuilder, NoConsumers,);
+impl_builder_config!(SingleProducerBuilder, HasConsumers, + Clone);
+impl_first_handlers!(SingleProducerBuilder,);
+impl_more_handlers!(SingleProducerBuilder, + Clone);
 
 impl<E, F, W> SingleProducerBuilder<HasConsumers, E, F, W>
 where
@@ -349,74 +323,6 @@ where
     F: Fn() -> E + Send + Sync + 'static,
     W: WaitStrategy + Clone + 'static,
 {
-    #[must_use]
-    /// Pin the next consumer thread to a CPU core (best-effort).
-    pub fn pin_at_core(mut self, core_id: usize) -> Self {
-        self.shared.current_cpu_affinity = Some(core_id);
-        self
-    }
-
-    #[must_use]
-    /// Set the OS thread name for the next consumer.
-    pub fn thread_name<S: Into<String>>(mut self, name: S) -> Self {
-        self.shared.current_thread_name = Some(name.into());
-        self
-    }
-
-    #[must_use]
-    /// Configure ring-buffer slot padding strategy.
-    pub fn with_slot_padding(mut self, slot_padding: SlotPadding) -> Self {
-        self.shared.slot_padding = slot_padding;
-        self
-    }
-
-    #[must_use]
-    /// Enable 128-byte cache-line slot padding when `enabled` is true.
-    pub fn with_cache_line_padding(self, enabled: bool) -> Self {
-        self.with_slot_padding(if enabled {
-            SlotPadding::CacheLine128
-        } else {
-            SlotPadding::None
-        })
-    }
-
-    #[must_use]
-    /// Register a mutable closure handler (`&mut E`) on the current stage.
-    pub fn handle_events_with<H>(mut self, handler: H) -> Self
-    where
-        H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
-    {
-        self.shared.add_mut_closure(handler, false);
-        self
-    }
-
-    #[must_use]
-    /// Register a mutable [`EventHandler`] on the current stage.
-    pub fn handle_events_with_handler<H>(mut self, handler: H) -> Self
-    where
-        H: EventHandler<E> + Send + Sync + 'static,
-    {
-        self.shared.add_mut_handler(handler, false);
-        self
-    }
-
-    #[must_use]
-    /// Register a read-only fan-out handler (`&E`) that observes every sequence.
-    pub fn fan_out_events_with<H>(mut self, handler: H) -> Self
-    where
-        H: FnMut(&E, i64, bool) + Send + 'static,
-    {
-        self.shared.add_fanout(handler, false);
-        self
-    }
-
-    #[must_use]
-    /// Start a dependent pipeline stage that waits for the previous stage.
-    pub fn and_then(mut self) -> DependentConsumerBuilder<E, F, W> {
-        self.shared.advance_stage();
-        DependentConsumerBuilder { builder: self }
-    }
-
     /// Assemble the disruptor, start consumers, and return a handle.
     pub fn build(self) -> DisruptorHandle<E, W> {
         let core = create_disruptor_core(
@@ -436,7 +342,8 @@ where
 /// Type-state builder for a multi-producer Disruptor.
 ///
 /// Start with [`crate::disruptor::build_multi_producer`], add consumers, then
-/// [`Self::build`]. Producers are coordinated through a shared multi-producer sequencer.
+/// [`Self::build`]. Supports the same `and_then` pipeline stages as the single-producer
+/// builder. Producers are coordinated through a shared multi-producer sequencer.
 pub struct MultiProducerBuilder<State, E, F, W>
 where
     E: Send + Sync + 'static,
@@ -461,89 +368,12 @@ where
             _phantom: PhantomData,
         }
     }
-
-    #[must_use]
-    /// Pin the next consumer thread to a CPU core (best-effort).
-    pub fn pin_at_core(mut self, core_id: usize) -> Self {
-        self.shared.current_cpu_affinity = Some(core_id);
-        self
-    }
-
-    #[must_use]
-    /// Set the OS thread name for the next consumer.
-    pub fn thread_name<S: Into<String>>(mut self, name: S) -> Self {
-        self.shared.current_thread_name = Some(name.into());
-        self
-    }
-
-    #[must_use]
-    /// Configure ring-buffer slot padding strategy.
-    pub fn with_slot_padding(mut self, slot_padding: SlotPadding) -> Self {
-        self.shared.slot_padding = slot_padding;
-        self
-    }
-
-    #[must_use]
-    /// Enable 128-byte cache-line slot padding when `enabled` is true.
-    pub fn with_cache_line_padding(self, enabled: bool) -> Self {
-        self.with_slot_padding(if enabled {
-            SlotPadding::CacheLine128
-        } else {
-            SlotPadding::None
-        })
-    }
-
-    #[must_use]
-    /// Register a mutable closure handler (`&mut E`) on the current stage.
-    pub fn handle_events_with<H>(
-        mut self,
-        handler: H,
-    ) -> MultiProducerBuilder<HasConsumers, E, F, W>
-    where
-        H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
-    {
-        self.shared.add_mut_closure(handler, true);
-        MultiProducerBuilder {
-            event_factory: self.event_factory,
-            shared: self.shared,
-            _phantom: PhantomData,
-        }
-    }
-
-    #[must_use]
-    /// Register a mutable [`EventHandler`] on the current stage.
-    pub fn handle_events_with_handler<H>(
-        mut self,
-        handler: H,
-    ) -> MultiProducerBuilder<HasConsumers, E, F, W>
-    where
-        H: EventHandler<E> + Send + Sync + 'static,
-    {
-        self.shared.add_mut_handler(handler, true);
-        MultiProducerBuilder {
-            event_factory: self.event_factory,
-            shared: self.shared,
-            _phantom: PhantomData,
-        }
-    }
-
-    #[must_use]
-    /// Register a read-only fan-out handler (`&E`) that observes every sequence.
-    pub fn fan_out_events_with<H>(
-        mut self,
-        handler: H,
-    ) -> MultiProducerBuilder<HasConsumers, E, F, W>
-    where
-        H: FnMut(&E, i64, bool) + Send + 'static,
-    {
-        self.shared.add_fanout(handler, true);
-        MultiProducerBuilder {
-            event_factory: self.event_factory,
-            shared: self.shared,
-            _phantom: PhantomData,
-        }
-    }
 }
+
+impl_builder_config!(MultiProducerBuilder, NoConsumers, + Clone);
+impl_builder_config!(MultiProducerBuilder, HasConsumers, + Clone);
+impl_first_handlers!(MultiProducerBuilder, + Clone);
+impl_more_handlers!(MultiProducerBuilder, + Clone);
 
 impl<E, F, W> MultiProducerBuilder<HasConsumers, E, F, W>
 where
@@ -551,50 +381,6 @@ where
     F: Fn() -> E + Send + Sync + 'static,
     W: WaitStrategy + Clone + 'static,
 {
-    #[must_use]
-    /// Pin the next consumer thread to a CPU core (best-effort).
-    pub fn pin_at_core(mut self, core_id: usize) -> Self {
-        self.shared.current_cpu_affinity = Some(core_id);
-        self
-    }
-
-    #[must_use]
-    /// Set the OS thread name for the next consumer.
-    pub fn thread_name<S: Into<String>>(mut self, name: S) -> Self {
-        self.shared.current_thread_name = Some(name.into());
-        self
-    }
-
-    #[must_use]
-    /// Register a mutable closure handler (`&mut E`) on the current stage.
-    pub fn handle_events_with<H>(mut self, handler: H) -> Self
-    where
-        H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
-    {
-        self.shared.add_mut_closure(handler, false);
-        self
-    }
-
-    #[must_use]
-    /// Register a mutable [`EventHandler`] on the current stage.
-    pub fn handle_events_with_handler<H>(mut self, handler: H) -> Self
-    where
-        H: EventHandler<E> + Send + Sync + 'static,
-    {
-        self.shared.add_mut_handler(handler, false);
-        self
-    }
-
-    #[must_use]
-    /// Register a read-only fan-out handler (`&E`) that observes every sequence.
-    pub fn fan_out_events_with<H>(mut self, handler: H) -> Self
-    where
-        H: FnMut(&E, i64, bool) + Send + 'static,
-    {
-        self.shared.add_fanout(handler, false);
-        self
-    }
-
     /// Assemble the disruptor, start consumers, and return a handle.
     pub fn build(self) -> DisruptorHandle<E, W> {
         let core = create_disruptor_core(
@@ -609,20 +395,122 @@ where
     }
 }
 
+// --- Dependent stage (shared for SP and MP) ------------------------------------------
+
+/// Builder stage created by `and_then()` on a single- or multi-producer builder.
+///
+/// Consumers registered here form a new pipeline stage that waits for the previous
+/// stage's sequences before processing.
+pub struct DependentBuilder<Inner> {
+    inner: Inner,
+}
+
+/// Dependent stage after a single-producer builder.
+pub type DependentConsumerBuilder<E, F, W> =
+    DependentBuilder<SingleProducerBuilder<HasConsumers, E, F, W>>;
+
+/// Dependent stage after a multi-producer builder.
+pub type DependentMultiConsumerBuilder<E, F, W> =
+    DependentBuilder<MultiProducerBuilder<HasConsumers, E, F, W>>;
+
+/// Dependent-stage methods for an inner `*ProducerBuilder<HasConsumers, …>`.
+macro_rules! impl_dependent {
+    ($builder:ident, $($wait_bound:tt)*) => {
+        impl<E, F, W> DependentBuilder<$builder<HasConsumers, E, F, W>>
+        where
+            E: Send + Sync + 'static,
+            F: Fn() -> E + Send + Sync + 'static,
+            W: WaitStrategy $($wait_bound)* + 'static,
+        {
+            /// Pin the next consumer thread to a CPU core (best-effort).
+            #[must_use]
+            pub fn pin_at_core(mut self, core_id: usize) -> Self {
+                self.inner.shared.current_cpu_affinity = Some(core_id);
+                self
+            }
+
+            /// Set the OS thread name for the next consumer.
+            #[must_use]
+            pub fn thread_name<S: Into<String>>(mut self, name: S) -> Self {
+                self.inner.shared.current_thread_name = Some(name.into());
+                self
+            }
+
+            /// Configure ring-buffer slot padding strategy.
+            #[must_use]
+            pub fn with_slot_padding(mut self, slot_padding: SlotPadding) -> Self {
+                self.inner.shared.slot_padding = slot_padding;
+                self
+            }
+
+            /// Enable 128-byte cache-line slot padding when `enabled` is true.
+            #[must_use]
+            pub fn with_cache_line_padding(self, enabled: bool) -> Self {
+                self.with_slot_padding(if enabled {
+                    SlotPadding::CacheLine128
+                } else {
+                    SlotPadding::None
+                })
+            }
+
+            /// Register a mutable closure handler (`&mut E`) on this dependent stage.
+            #[must_use]
+            pub fn handle_events_with<H>(
+                mut self,
+                handler: H,
+            ) -> $builder<HasConsumers, E, F, W>
+            where
+                H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
+            {
+                self.inner.shared.add_mut_closure(handler);
+                self.inner
+            }
+
+            /// Register a mutable [`EventHandler`] on this dependent stage.
+            #[must_use]
+            pub fn handle_events_with_handler<H>(
+                mut self,
+                handler: H,
+            ) -> $builder<HasConsumers, E, F, W>
+            where
+                H: EventHandler<E> + Send + Sync + 'static,
+            {
+                self.inner.shared.add_mut_handler(handler);
+                self.inner
+            }
+
+            /// Register a read-only fan-out handler (`&E`) on this dependent stage.
+            #[must_use]
+            pub fn fan_out_events_with<H>(
+                mut self,
+                handler: H,
+            ) -> $builder<HasConsumers, E, F, W>
+            where
+                H: FnMut(&E, i64, bool) + Send + 'static,
+            {
+                self.inner.shared.add_fanout(handler);
+                self.inner
+            }
+        }
+    };
+}
+
+impl_dependent!(SingleProducerBuilder, + Clone);
+impl_dependent!(MultiProducerBuilder, + Clone);
+
 // --- Cloneable multi-producer convenience --------------------------------------------
 
 /// Cloneable multi-producer handle sharing one ring buffer and sequencer.
 ///
-/// Each clone can publish concurrently; sequencing is coordinated by the
-/// multi-producer sequencer (bitmap / cursor CAS).
+/// Each clone is an independent [`SimpleProducer`] handle (Arc clones only) for
+/// concurrent publishing on the multi-producer sequencer.
 #[derive(Clone)]
 pub struct CloneableProducer<E, W>
 where
     E: Send + Sync,
     W: WaitStrategy + 'static,
 {
-    ring_buffer: Arc<RingBuffer<E>>,
-    sequencer: SequencerEnum<W>,
+    producer: SimpleProducer<E, W>,
 }
 
 impl<E, W> CloneableProducer<E, W>
@@ -633,14 +521,13 @@ where
     /// Create a cloneable producer from a shared ring buffer and sequencer.
     pub fn new(ring_buffer: Arc<RingBuffer<E>>, sequencer: SequencerEnum<W>) -> Self {
         Self {
-            ring_buffer,
-            sequencer,
+            producer: SimpleProducer::new(ring_buffer, sequencer),
         }
     }
 
-    /// Create a [`SimpleProducer`] bound to the shared ring buffer.
+    /// Create a [`SimpleProducer`] handle (Arc-clones the ring buffer and sequencer).
     pub fn create_producer(&self) -> SimpleProducer<E, W> {
-        SimpleProducer::new(self.ring_buffer.clone(), self.sequencer.clone())
+        self.producer.clone()
     }
 
     /// Try to publish one event; returns [`crate::disruptor::RingBufferFull`] if no slot is free.
@@ -651,7 +538,7 @@ where
     where
         F: FnOnce(&mut E),
     {
-        self.create_producer().try_publish(update)
+        self.producer.clone().try_publish(update)
     }
 
     /// Publish one event, spinning until a slot is available.
@@ -659,7 +546,7 @@ where
     where
         F: FnOnce(&mut E),
     {
-        self.create_producer().publish(update);
+        self.producer.clone().publish(update);
     }
 
     /// Try to publish a batch of `n` events.
@@ -671,7 +558,7 @@ where
     where
         F: for<'a> FnOnce(crate::disruptor::ring_buffer::BatchIterMut<'a, E>),
     {
-        self.create_producer().try_batch_publish(n, update)
+        self.producer.clone().try_batch_publish(n, update)
     }
 
     /// Publish a batch of `n` events, spinning until space is available.
@@ -679,6 +566,6 @@ where
     where
         F: for<'a> FnOnce(crate::disruptor::ring_buffer::BatchIterMut<'a, E>),
     {
-        self.create_producer().batch_publish(n, update);
+        self.producer.clone().batch_publish(n, update);
     }
 }

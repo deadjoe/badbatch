@@ -18,5 +18,4 @@ pub use entry::{build_multi_producer, build_single_producer};
 pub use fluent::{CloneableProducer, MultiProducerBuilder, SingleProducerBuilder};
 pub use handle::DisruptorHandle;
 
-// Re-export DependentConsumerBuilder if public
-pub use fluent::DependentConsumerBuilder;
+pub use fluent::{DependentConsumerBuilder, DependentMultiConsumerBuilder};

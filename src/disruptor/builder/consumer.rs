@@ -2,7 +2,7 @@
 
 use super::core::set_thread_affinity;
 use crate::disruptor::{
-    consumer_engine::{self, LoopControl, RunMode, StopFlag},
+    consumer_engine::{self, RunMode, StopFlag},
     sequence_barrier::ProcessingSequenceBarrier,
     EventHandler, RingBuffer, Sequence, WaitStrategy, INITIAL_CURSOR_VALUE,
 };
@@ -30,19 +30,13 @@ pub(crate) enum ConsumerAccess {
 ///
 /// Dropping a `Consumer` joins the underlying thread and **may block**. Prefer
 /// [`crate::disruptor::builder::DisruptorHandle::shutdown`] for controlled teardown.
+///
+/// Not [`Clone`]: a join handle is unique ownership. Cloning would drop the handle
+/// and produce a hollow shell — that API is intentionally absent.
 #[derive(Debug)]
 pub struct Consumer {
     pub(crate) join_handle: Option<JoinHandle<()>>,
     pub(crate) thread_name: String,
-}
-
-impl Clone for Consumer {
-    fn clone(&self) -> Self {
-        Self {
-            join_handle: None,
-            thread_name: self.thread_name.clone(),
-        }
-    }
 }
 
 impl Consumer {
@@ -132,6 +126,35 @@ fn spawn_named(
         .expect("Failed to spawn consumer thread")
 }
 
+/// Allocate sequence and spawn named thread; body receives sequence + resolved name.
+fn start_consumer_thread<F>(
+    config: ConsumerThreadConfig,
+    default_name: &str,
+    body: F,
+) -> (Arc<Sequence>, Consumer)
+where
+    F: FnOnce(Arc<Sequence>, String, RunMode, Arc<AtomicBool>) + Send + 'static,
+{
+    let consumer_sequence = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
+    let sequence_for_thread = Arc::clone(&consumer_sequence);
+    let thread_name = config
+        .thread_name
+        .unwrap_or_else(|| default_name.to_string());
+    let thread_name_for_handle = thread_name.clone();
+    let cpu_affinity = config.cpu_affinity;
+    let shutdown_flag = config.shutdown_flag;
+    let run_mode = config.run_mode;
+
+    let join_handle = spawn_named(thread_name.clone(), cpu_affinity, move || {
+        body(sequence_for_thread, thread_name, run_mode, shutdown_flag);
+    });
+
+    (
+        consumer_sequence,
+        Consumer::new(join_handle, thread_name_for_handle),
+    )
+}
+
 /// Mutable consumer (sequential or WorkerPool from `run_mode`).
 pub(crate) fn start_mutable_consumer<E, H, W>(
     ring_buffer: Arc<RingBuffer<E>>,
@@ -144,57 +167,43 @@ where
     H: EventHandler<E> + Send + 'static,
     W: WaitStrategy + 'static,
 {
-    let consumer_sequence = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
-    let consumer_sequence_clone = Arc::clone(&consumer_sequence);
-    let thread_name = config
-        .thread_name
-        .unwrap_or_else(|| "disruptor-consumer".to_string());
-    let thread_name_clone = thread_name.clone();
-    let cpu_affinity = config.cpu_affinity;
-    let shutdown_flag = config.shutdown_flag;
-    let run_mode = config.run_mode;
-
-    let join_handle = spawn_named(thread_name.clone(), cpu_affinity, move || {
-        if let Err(e) = event_handler.on_start() {
-            crate::internal_error!("EventHandler on_start failed in '{thread_name}': {e:?}");
-        }
-
-        let control = LoopControl {
-            stop: StopFlag::External(&shutdown_flag),
-        };
-
-        match &run_mode {
-            RunMode::WorkPool(work_seq) => {
-                consumer_engine::run_work_processor_loop(
-                    &ring_buffer,
-                    &sequence_barrier,
-                    &mut event_handler,
-                    &consumer_sequence_clone,
-                    work_seq,
-                    control,
-                    &thread_name,
-                );
+    start_consumer_thread(
+        config,
+        "disruptor-consumer",
+        move |seq, thread_name, run_mode, shutdown| {
+            if let Err(e) = event_handler.on_start() {
+                crate::internal_error!("EventHandler on_start failed in '{thread_name}': {e:?}");
             }
-            RunMode::Sequential => {
-                consumer_engine::run_sequential_batch_loop(
-                    &ring_buffer,
-                    &sequence_barrier,
-                    &mut event_handler,
-                    &consumer_sequence_clone,
-                    control,
-                    &thread_name,
-                );
+
+            let stop = StopFlag::External(&shutdown);
+            match &run_mode {
+                RunMode::WorkPool(work_seq) => {
+                    consumer_engine::run_work_processor_loop(
+                        &ring_buffer,
+                        &sequence_barrier,
+                        &mut event_handler,
+                        &seq,
+                        work_seq,
+                        stop,
+                        &thread_name,
+                    );
+                }
+                RunMode::Sequential => {
+                    consumer_engine::run_sequential_batch_loop(
+                        &ring_buffer,
+                        &sequence_barrier,
+                        &mut event_handler,
+                        &seq,
+                        stop,
+                        &thread_name,
+                    );
+                }
             }
-        }
 
-        if let Err(e) = event_handler.on_shutdown() {
-            crate::internal_error!("EventHandler on_shutdown failed in '{thread_name}': {e:?}");
-        }
-    });
-
-    (
-        consumer_sequence,
-        Consumer::new(join_handle, thread_name_clone),
+            if let Err(e) = event_handler.on_shutdown() {
+                crate::internal_error!("EventHandler on_shutdown failed in '{thread_name}': {e:?}");
+            }
+        },
     )
 }
 
@@ -210,37 +219,25 @@ where
     F: FnMut(&E, i64, bool) -> crate::disruptor::Result<()> + Send + 'static,
     W: WaitStrategy + 'static,
 {
-    debug_assert!(
+    assert!(
         matches!(config.run_mode, RunMode::Sequential),
-        "readonly fan-out must use RunMode::Sequential"
+        "readonly fan-out must use RunMode::Sequential (got WorkPool — assembly bug)"
     );
 
-    let consumer_sequence = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
-    let consumer_sequence_clone = Arc::clone(&consumer_sequence);
-    let thread_name = config
-        .thread_name
-        .unwrap_or_else(|| "disruptor-fanout".to_string());
-    let thread_name_clone = thread_name.clone();
-    let cpu_affinity = config.cpu_affinity;
-    let shutdown_flag = config.shutdown_flag;
-
-    let join_handle = spawn_named(thread_name.clone(), cpu_affinity, move || {
-        let control = LoopControl {
-            stop: StopFlag::External(&shutdown_flag),
-        };
-        consumer_engine::run_sequential_readonly_loop(
-            &ring_buffer,
-            &sequence_barrier,
-            &mut on_event,
-            &consumer_sequence_clone,
-            control,
-            &thread_name,
-        );
-    });
-
-    (
-        consumer_sequence,
-        Consumer::new(join_handle, thread_name_clone),
+    start_consumer_thread(
+        config,
+        "disruptor-fanout",
+        move |seq, thread_name, _run_mode, shutdown| {
+            let stop = StopFlag::External(&shutdown);
+            consumer_engine::run_sequential_readonly_loop(
+                &ring_buffer,
+                &sequence_barrier,
+                &mut on_event,
+                &seq,
+                stop,
+                &thread_name,
+            );
+        },
     )
 }
 
@@ -308,6 +305,8 @@ pub(crate) fn assert_access_compatible<E, W>(
 }
 
 /// Build per-stage run modes: WorkerPool only for multi-mutable stages.
+///
+/// `stage_count` must equal `max(stage_index)+1` for the consumer list (or 0 if empty).
 pub(crate) fn stage_run_modes<E, W>(
     consumers: &[ConsumerInfo<E, W>],
     stage_count: usize,
@@ -316,6 +315,9 @@ where
     E: Send + Sync + 'static,
     W: WaitStrategy + 'static,
 {
+    if stage_count == 0 {
+        return Vec::new();
+    }
     let mut widths = vec![0_usize; stage_count];
     let mut access = vec![ConsumerAccess::Mutable; stage_count];
     for c in consumers {

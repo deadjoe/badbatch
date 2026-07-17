@@ -13,5 +13,7 @@
 mod basic;
 mod common;
 mod handle;
-mod integration;
-mod pipeline;
+mod integration_comprehensive;
+mod integration_e2e;
+mod pipeline_dependency;
+mod pipeline_parallel;
