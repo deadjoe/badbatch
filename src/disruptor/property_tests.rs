@@ -2,9 +2,10 @@
 //!
 //! These tests use proptest to verify properties that should hold for all inputs
 
+#[cfg(feature = "lmax-dsl")]
+use crate::disruptor::disruptor::Disruptor;
 use crate::disruptor::{
     build_single_producer,
-    disruptor::Disruptor,
     event_factory::DefaultEventFactory,
     event_translator::ClosureEventTranslator,
     ring_buffer::RingBuffer,
@@ -333,6 +334,7 @@ mod processing_sequence_barrier_properties {
 }
 
 /// Property tests for `Disruptor` lifecycle behavior.
+#[cfg(feature = "lmax-dsl")]
 mod disruptor_lifecycle_properties {
     use super::*;
 

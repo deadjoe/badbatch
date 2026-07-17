@@ -5,6 +5,7 @@
 //! sequence barriers to ensure proper ordering and dependencies.
 
 use crate::disruptor::{
+    consumer_engine::{self, LoopControl},
     DisruptorError, EventHandler, ExceptionHandler, ProcessingSequenceBarrier, Result, RingBuffer,
     Sequence, SequenceBarrier, WaitStrategy,
 };
@@ -12,6 +13,9 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+
+/// Shared false flag for BatchEventProcessor path (stop is via `running` + barrier alert).
+static BEP_NEVER_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 /// Trait for event processors
 ///
@@ -181,66 +185,25 @@ where
         &mut *self.event_handler.get()
     }
 
-    /// Process events in a batch
-    ///
-    /// This follows the exact LMAX Disruptor BatchEventProcessor.processEvents logic
+    /// Process events using the unified sequential consumer engine.
     fn process_events(&self) {
-        // Start lifecycle
         self.on_start();
 
-        let mut next_sequence = self.sequence.get() + 1;
+        // SAFETY: single processor thread owns handler mutations for the lifetime of run().
+        let handler = unsafe { self.handler_mut() };
+        consumer_engine::run_sequential_batch_loop_with_exceptions(
+            &self.data_provider,
+            &self.sequence_barrier,
+            handler,
+            &self.sequence,
+            LoopControl {
+                shutdown: &BEP_NEVER_SHUTDOWN,
+                running: Some(&self.running),
+            },
+            "batch-event-processor",
+            Some(self.exception_handler.as_ref()),
+        );
 
-        // Main processing loop
-        while self.running.load(Ordering::Acquire) {
-            match self.sequence_barrier.wait_for(next_sequence) {
-                Ok(available_sequence) => {
-                    if available_sequence < next_sequence {
-                        continue;
-                    }
-
-                    let batch_span = available_sequence - next_sequence + 1;
-
-                    // SAFETY: single processor thread owns handler mutations.
-                    let handler = unsafe { self.handler_mut() };
-
-                    let queue_depth = available_sequence - self.sequence.get();
-                    let _ = handler.on_batch_start(batch_span, queue_depth);
-
-                    while next_sequence <= available_sequence {
-                        let end_of_batch = next_sequence == available_sequence;
-
-                        // SAFETY: This processor owns the mutable access contract for the
-                        // requested sequence and only advances its cursor after the handler
-                        // has completed.
-                        let event =
-                            unsafe { &mut *self.data_provider.get_mut_unchecked(next_sequence) };
-
-                        if let Err(e) = handler.on_event(event, next_sequence, end_of_batch) {
-                            let exception_handler = &*self.exception_handler;
-                            exception_handler.handle_event_exception(e, next_sequence, event);
-                        }
-
-                        next_sequence += 1;
-                    }
-
-                    // Publish consumer progress once per completed batch, matching the
-                    // LMAX BatchEventProcessor release-store semantics.
-                    self.sequence.set(available_sequence);
-                }
-                Err(DisruptorError::Alert) => {
-                    if !self.running.load(Ordering::Acquire) {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    // Other errors, log and continue
-                    crate::internal_error!("Event processor error: {e:?}");
-                    thread::sleep(std::time::Duration::from_millis(1));
-                }
-            }
-        }
-
-        // Shutdown lifecycle
         self.on_shutdown();
     }
 }

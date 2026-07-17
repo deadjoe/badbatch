@@ -249,7 +249,7 @@ let consumer = ElegantConsumer::with_affinity(ring_buffer,
 - **ABA Prevention**: Careful handling of sequence wraparound
 
 ### Testing Strategy
-- **Unit Tests**: 283 tests covering all core disruptor components across 27 test modules
+- **Unit Tests**: 285 tests covering all core disruptor components (default features)
 - **Integration Tests**: 48 end-to-end scenarios with multiple producers/consumers
 - **Documentation Tests**: 23 API examples validated through rustdoc
 - **Property Tests**: Invariant checking with proptest for sequence ordering and ring buffer behavior
@@ -497,7 +497,7 @@ let mut producer = build_single_producer(1024, factory, BusySpinWaitStrategy)
 ## Testing and Validation
 
 ### Test Coverage
-- **Unit Tests**: 283 tests covering all core disruptor components across 27 test modules
+- **Unit Tests**: 285 tests covering all core disruptor components (default features)
 - **Integration Tests**: 48 end-to-end scenarios with multiple producers/consumers
 - **Documentation Tests**: 23 API examples validated through rustdoc  
 - **Property Tests**: Invariant checking with proptest for sequence ordering and ring buffer behavior

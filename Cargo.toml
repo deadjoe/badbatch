@@ -31,7 +31,14 @@ crossbeam = "0.8"  # For performance comparison benchmarks
 proptest = "1.10"  # Property-based testing
 
 [features]
-default = []
+# Preferred core path is always on: Builder + Producer + EventPoller + sequencers.
+# `lmax-dsl` keeps the classic Disruptor DSL (default on for continuity of tests/docs).
+# `extras` gates ElegantConsumer and other experimental surfaces.
+# Core Builder/Poller always available. Optional surfaces enabled by default so
+# existing tests/docs keep compiling; use `--no-default-features` for the slim core.
+default = ["lmax-dsl", "extras"]
+lmax-dsl = []
+extras = []
 # Non-lock-free convenience wrapper (`SharedRingBuffer` uses RwLock).
 # NOT part of the core lock-free Disruptor path — opt-in only.
 shared-ring-buffer = []

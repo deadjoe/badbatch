@@ -62,6 +62,12 @@ All 5 TLA+ models re-verified successfully after these changes.
    - Optional model enhancement: add a WorkProcessor claim counter with mutual exclusion on claimed sequences.
 3. **Slot padding CacheLine128**: layout-only; no protocol impact.
 
+## Round-4 Consumer Engine + SP Cell (2026-07-17)
+
+1. **Unified `consumer_engine`**: Builder and `BatchEventProcessor` share sequential/work-processor loops — no protocol change.
+2. **SP `next_value`/`cached_value` → `UnsafeCell`**: still single-publisher exclusive; cursor/gating remain the cross-thread coordination surface (matches LMAX nextValue/cachedValue thread discipline).
+3. **API features**: `lmax-dsl` / `extras` gate secondary surfaces; default keeps them on for continuity.
+
 ## Suggested Model Enhancements (Optional)
 
 - Add a simple safety property asserting per-reader monotonic consumption (prefix strictly increasing), though it’s already implied by the state machine and `Liveness`.
