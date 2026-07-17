@@ -1,0 +1,6 @@
+# Always use the latest stable toolchain via rustup (CI and local).
+# MSRV is declared separately as package.rust-version in Cargo.toml.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
