@@ -207,11 +207,12 @@ for order_label in "${orders[@]}"; do
 done
 
 python3 - "$RESULTS_DIR" <<'PY'
-import json, pathlib, sys, statistics
+import json, pathlib, sys
 
 results_dir = pathlib.Path(sys.argv[1])
-rows = []
-for rust_path in sorted(results_dir.glob("rust_*.json")):
+order = ["unicast", "unicast_batch", "mpsc_batch", "pipeline"]
+found = {}
+for rust_path in results_dir.glob("rust_*.json"):
     scenario = rust_path.stem[len("rust_"):]
     java_path = results_dir / f"java_{scenario}.json"
     if not java_path.exists():
@@ -226,29 +227,38 @@ for rust_path in sorted(results_dir.glob("rust_*.json")):
     jcv = java["summary"].get("cv", 0.0)
     pad = rust.get("event_padding", "none")
     label = scenario if pad == "none" else f"{scenario}[pad={pad}]"
-    rows.append((label, rm, jm, ratio, rcv, jcv, valid,
-                 rust.get("wait_strategy"), rust.get("buffer_size"), rust.get("events_total")))
+    found[scenario] = (label, rm, jm, ratio, rcv, jcv, valid,
+                       rust.get("wait_strategy"), rust.get("buffer_size"), rust.get("events_total"))
+
+rows = [found[s] for s in order if s in found]
+rows += [found[s] for s in sorted(found) if s not in order]
 
 if not rows:
     print("[WARN] No paired rust_*/java_* JSON results found.")
     sys.exit(0)
 
+def m(x):
+    return x / 1_000_000.0
+
 print()
 print("Head-to-Head Summary (median ops/s over measured rounds)")
-print("scenario              rust_ops/s         java_ops/s         rust/java   rust_cv  java_cv  ok")
-print("-------------------- ------------------ ------------------ --------- -------- -------- ---")
+print("scenario              rust Melem/s   java Melem/s   rust/java   rust_cv  java_cv  ok")
+print("-------------------- ------------- ------------- --------- -------- -------- ---")
 for label, rm, jm, ratio, rcv, jcv, valid, *_ in rows:
-    print(f"{label:<20} {rm:>18.2f} {jm:>18.2f} {ratio:>9.4f} {rcv:>8.3f} {jcv:>8.3f} {str(valid):>3}")
+    print(f"{label:<20} {m(rm):>13.2f} {m(jm):>13.2f} {ratio:>9.4f} {rcv:>8.3f} {jcv:>8.3f} {str(valid):>3}")
+    if jcv > 0.25 or rcv > 0.25:
+        print(f"  ^ note: high variance (CV>0.25) — treat median cautiously; re-run or use busy-spin / more rounds")
 
 md = []
 md.append("# Head-to-head report\n")
 env = (results_dir / "environment.txt").read_text() if (results_dir / "environment.txt").exists() else ""
 md.append("## Environment\n\n```\n" + env + "```\n")
 md.append("## Results\n\n")
-md.append("| scenario | rust median ops/s | java median ops/s | rust/java | rust CV | java CV | checksum OK |\n")
-md.append("|----------|------------------:|------------------:|----------:|--------:|--------:|:-----------:|\n")
+md.append("| scenario | rust median Melem/s | java median Melem/s | rust/java | rust CV | java CV | checksum OK |\n")
+md.append("|----------|--------------------:|--------------------:|----------:|--------:|--------:|:-----------:|\n")
 for label, rm, jm, ratio, rcv, jcv, valid, *_ in rows:
-    md.append(f"| {label} | {rm:.2f} | {jm:.2f} | {ratio:.4f} | {rcv:.3f} | {jcv:.3f} | {valid} |\n")
+    note = " ⚠️ high CV" if (jcv > 0.25 or rcv > 0.25) else ""
+    md.append(f"| {label}{note} | {m(rm):.2f} | {m(jm):.2f} | {ratio:.4f} | {rcv:.3f} | {jcv:.3f} | {valid} |\n")
 
 md.append("\n## How to read this\n\n")
 md.append("- **Comparable:** same scenario topology, event count, batch size, wait-strategy name, ")
@@ -258,6 +268,7 @@ md.append("JVM heap objects vs Rust inline slots; GC vs no GC; different OS thre
 md.append("- **ratio > 1** → BadBatch higher median ops/s on this machine/run; **< 1** → LMAX higher.\n")
 md.append("- Prefer **CV** (coefficient of variation) small on both sides; re-run with `--order both-orders` if order effects matter.\n")
 md.append("- Use `quick` for smoke; `full` for publication-scale event counts.\n")
+md.append("- If CV > 0.25, the median is noisy — do not treat a single full run as definitive for that scenario.\n")
 
 md.append("\n## Likely drivers of differences (investigate next)\n\n")
 md.append("1. **Publication API cost** — single-event vs batch (`unicast` vs `unicast_batch`).\n")
