@@ -7,7 +7,7 @@
 //! Writes markdown to `benches/results/baseline_latest.md` (tracked) and
 //! `target/baseline/metrics_<stamp>.md`.
 
-#![allow(missing_docs, clippy::print_stdout, clippy::print_stderr)]
+#![allow(missing_docs, clippy::all, clippy::pedantic, clippy::nursery)]
 
 use badbatch::disruptor::{
     build_multi_producer, build_single_producer, BusySpinWaitStrategy, Producer,

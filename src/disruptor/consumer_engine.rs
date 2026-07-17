@@ -1,8 +1,11 @@
-//! Unified consumer execution engine.
+//! Unified consumer execution engine — **the single authoritative hot loop**.
 //!
-//! Builder-managed threads and [`crate::disruptor::BatchEventProcessor`] share
-//! these loops so sequential batch processing and WorkerPool CAS claim have a
-//! single authoritative implementation.
+//! All managed consumption paths must call into this module:
+//! - Builder-spawned threads (`builder::consumer`)
+//! - [`crate::disruptor::BatchEventProcessor`] (LMAX DSL)
+//!
+//! Sequential batch processing and WorkerPool CAS claim are implemented here
+//! only; do not re-open parallel loop copies in builder/DSL layers.
 
 use crate::disruptor::{
     sequence_barrier::{ProcessingSequenceBarrier, SequenceBarrier},
