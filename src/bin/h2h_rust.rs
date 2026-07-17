@@ -1,9 +1,9 @@
-//! Head-to-head Rust harness for comparing BadBatch against native LMAX Disruptor.
+//! Head-to-head Rust harness for comparing `BadBatch` against native LMAX Disruptor.
 //!
 //! Pairs with `tools/head_to_head` (Java) and `scripts/run_head_to_head.sh`.
 //! Measurement contract (must match Java):
 //! - same scenarios, event payload, batching, warmup/measured rounds
-//! - ops/s = events_total / wall_seconds (publish start → consumer completion)
+//! - ops/s = `events_total` / `wall_seconds` (publish start → consumer completion)
 //! - median over **measured** rounds only; checksum validates correctness
 //!
 //! Rust path under test: public **Builder** API (product path), not experimental
@@ -46,7 +46,7 @@ struct ComparisonEvent {
 
 fn arithmetic_checksum(events_total: u64) -> i64 {
     // sum_{i=0}^{n-1} i = n*(n-1)/2
-    let n = events_total as i128;
+    let n = i128::from(events_total);
     ((n * (n - 1)) / 2) as i64
 }
 
@@ -288,7 +288,9 @@ fn parse_args() -> Result<Config, String> {
     let batch_size = batch_size.unwrap_or_else(|| scenario.default_batch());
 
     if !buffer_size.is_power_of_two() || buffer_size == 0 {
-        return Err(format!("buffer-size must be power of two, got {buffer_size}"));
+        return Err(format!(
+            "buffer-size must be power of two, got {buffer_size}"
+        ));
     }
     if measured_rounds == 0 {
         return Err("measured-rounds must be > 0".into());
@@ -369,11 +371,7 @@ struct Summary {
 }
 
 fn summarize(rounds: &[Round], warmup: usize) -> Summary {
-    let measured: Vec<f64> = rounds
-        .iter()
-        .skip(warmup)
-        .map(|r| r.ops_per_sec)
-        .collect();
+    let measured: Vec<f64> = rounds.iter().skip(warmup).map(|r| r.ops_per_sec).collect();
     let checksum_valid_all = rounds.iter().all(|r| r.checksum_ok);
     if measured.is_empty() {
         return Summary {
@@ -391,7 +389,7 @@ fn summarize(rounds: &[Round], warmup: usize) -> Summary {
     let median = if sorted.len() % 2 == 1 {
         sorted[sorted.len() / 2]
     } else {
-        (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
+        f64::midpoint(sorted[sorted.len() / 2 - 1], sorted[sorted.len() / 2])
     };
     let mean = measured.iter().sum::<f64>() / measured.len() as f64;
     let min = sorted[0];
@@ -432,12 +430,12 @@ fn wait_count(counter: &AtomicU64, target: u64, timeout: Duration) -> bool {
 
 fn run_unicast(cfg: &Config, batch: bool) -> Result<Vec<Round>, String> {
     match cfg.wait {
-        WaitKind::BusySpin => run_unicast_w(cfg, batch, BusySpinWaitStrategy),
-        WaitKind::Yielding => run_unicast_w(cfg, batch, YieldingWaitStrategy),
+        WaitKind::BusySpin => run_unicast_w(cfg, batch, &BusySpinWaitStrategy),
+        WaitKind::Yielding => run_unicast_w(cfg, batch, &YieldingWaitStrategy),
     }
 }
 
-fn run_unicast_w<W>(cfg: &Config, batch: bool, wait: W) -> Result<Vec<Round>, String>
+fn run_unicast_w<W>(cfg: &Config, batch: bool, wait: &W) -> Result<Vec<Round>, String>
 where
     W: badbatch::disruptor::WaitStrategy + Clone + 'static,
 {
@@ -451,13 +449,14 @@ where
         let p = Arc::clone(&processed);
         let c = Arc::clone(&checksum);
 
-        let mut handle = build_single_producer(cfg.buffer_size, ComparisonEvent::default, wait.clone())
-            .with_slot_padding(cfg.pad.slot_padding())
-            .handle_events_with(move |e: &mut ComparisonEvent, _s, _end| {
-                c.fetch_add(e.value as u64, Ordering::Relaxed);
-                p.fetch_add(1, Ordering::Release);
-            })
-            .build();
+        let mut handle =
+            build_single_producer(cfg.buffer_size, ComparisonEvent::default, wait.clone())
+                .with_slot_padding(cfg.pad.slot_padding())
+                .handle_events_with(move |e: &mut ComparisonEvent, _s, _end| {
+                    c.fetch_add(e.value as u64, Ordering::Relaxed);
+                    p.fetch_add(1, Ordering::Release);
+                })
+                .build();
 
         thread::sleep(Duration::from_millis(5));
 
@@ -518,12 +517,12 @@ where
 
 fn run_mpsc_batch(cfg: &Config) -> Result<Vec<Round>, String> {
     match cfg.wait {
-        WaitKind::BusySpin => run_mpsc_batch_w(cfg, BusySpinWaitStrategy),
-        WaitKind::Yielding => run_mpsc_batch_w(cfg, YieldingWaitStrategy),
+        WaitKind::BusySpin => run_mpsc_batch_w(cfg, &BusySpinWaitStrategy),
+        WaitKind::Yielding => run_mpsc_batch_w(cfg, &YieldingWaitStrategy),
     }
 }
 
-fn run_mpsc_batch_w<W>(cfg: &Config, wait: W) -> Result<Vec<Round>, String>
+fn run_mpsc_batch_w<W>(cfg: &Config, wait: &W) -> Result<Vec<Round>, String>
 where
     W: badbatch::disruptor::WaitStrategy + Clone + 'static,
 {
@@ -538,12 +537,13 @@ where
         let p = Arc::clone(&processed);
         let c = Arc::clone(&checksum);
 
-        let mut handle = build_multi_producer(cfg.buffer_size, ComparisonEvent::default, wait.clone())
-            .handle_events_with(move |e: &mut ComparisonEvent, _s, _end| {
-                c.fetch_add(e.value as u64, Ordering::Relaxed);
-                p.fetch_add(1, Ordering::Release);
-            })
-            .build();
+        let mut handle =
+            build_multi_producer(cfg.buffer_size, ComparisonEvent::default, wait.clone())
+                .handle_events_with(move |e: &mut ComparisonEvent, _s, _end| {
+                    c.fetch_add(e.value as u64, Ordering::Relaxed);
+                    p.fetch_add(1, Ordering::Release);
+                })
+                .build();
 
         thread::sleep(Duration::from_millis(5));
 
@@ -608,12 +608,12 @@ where
 
 fn run_pipeline(cfg: &Config) -> Result<Vec<Round>, String> {
     match cfg.wait {
-        WaitKind::BusySpin => run_pipeline_w(cfg, BusySpinWaitStrategy),
-        WaitKind::Yielding => run_pipeline_w(cfg, YieldingWaitStrategy),
+        WaitKind::BusySpin => run_pipeline_w(cfg, &BusySpinWaitStrategy),
+        WaitKind::Yielding => run_pipeline_w(cfg, &YieldingWaitStrategy),
     }
 }
 
-fn run_pipeline_w<W>(cfg: &Config, wait: W) -> Result<Vec<Round>, String>
+fn run_pipeline_w<W>(cfg: &Config, wait: &W) -> Result<Vec<Round>, String>
 where
     W: badbatch::disruptor::WaitStrategy + Clone + 'static,
 {
@@ -627,22 +627,23 @@ where
         let p = Arc::clone(&processed);
         let c = Arc::clone(&checksum);
 
-        let mut handle = build_single_producer(cfg.buffer_size, ComparisonEvent::default, wait.clone())
-            .with_slot_padding(cfg.pad.slot_padding())
-            .handle_events_with(|e: &mut ComparisonEvent, _s, _end| {
-                e.stage1_value = e.value.wrapping_add(1);
-            })
-            .and_then()
-            .handle_events_with(|e: &mut ComparisonEvent, _s, _end| {
-                e.stage2_value = e.stage1_value.wrapping_add(3);
-            })
-            .and_then()
-            .handle_events_with(move |e: &mut ComparisonEvent, _s, _end| {
-                e.stage3_value = e.stage2_value.wrapping_add(7);
-                c.fetch_add(e.stage3_value as u64, Ordering::Relaxed);
-                p.fetch_add(1, Ordering::Release);
-            })
-            .build();
+        let mut handle =
+            build_single_producer(cfg.buffer_size, ComparisonEvent::default, wait.clone())
+                .with_slot_padding(cfg.pad.slot_padding())
+                .handle_events_with(|e: &mut ComparisonEvent, _s, _end| {
+                    e.stage1_value = e.value.wrapping_add(1);
+                })
+                .and_then()
+                .handle_events_with(|e: &mut ComparisonEvent, _s, _end| {
+                    e.stage2_value = e.stage1_value.wrapping_add(3);
+                })
+                .and_then()
+                .handle_events_with(move |e: &mut ComparisonEvent, _s, _end| {
+                    e.stage3_value = e.stage2_value.wrapping_add(7);
+                    c.fetch_add(e.stage3_value as u64, Ordering::Relaxed);
+                    p.fetch_add(1, Ordering::Release);
+                })
+                .build();
 
         thread::sleep(Duration::from_millis(10));
 
@@ -698,30 +699,32 @@ fn git_rev() -> String {
 }
 
 fn write_result(cfg: &Config, rounds: &[Round], summary: &Summary) -> String {
+    use std::fmt::Write as _;
+
     let mut out = String::new();
     out.push_str("{\n");
-    out.push_str(&format!("  \"impl\": \"{}\",\n", cfg.impl_label));
+    writeln!(out, "  \"impl\": \"{}\",", cfg.impl_label).unwrap();
     out.push_str("  \"language\": \"rust\",\n");
-    out.push_str(&format!("  \"scenario\": \"{}\",\n", cfg.scenario.as_str()));
-    out.push_str(&format!("  \"wait_strategy\": \"{}\",\n", cfg.wait.as_str()));
-    out.push_str(&format!("  \"event_padding\": \"{}\",\n", cfg.pad.as_str()));
+    writeln!(out, "  \"scenario\": \"{}\",", cfg.scenario.as_str()).unwrap();
+    writeln!(out, "  \"wait_strategy\": \"{}\",", cfg.wait.as_str()).unwrap();
+    writeln!(out, "  \"event_padding\": \"{}\",", cfg.pad.as_str()).unwrap();
     out.push_str("  \"api_path\": \"builder\",\n");
-    out.push_str(&format!("  \"buffer_size\": {},\n", cfg.buffer_size));
-    out.push_str(&format!("  \"events_total\": {},\n", cfg.events_total));
-    out.push_str(&format!("  \"batch_size\": {},\n", cfg.batch_size));
-    out.push_str(&format!("  \"warmup_rounds\": {},\n", cfg.warmup_rounds));
-    out.push_str(&format!("  \"measured_rounds\": {},\n", cfg.measured_rounds));
-    out.push_str(&format!("  \"run_order\": \"{}\",\n", cfg.run_order));
-    out.push_str(&format!("  \"git_rev\": \"{}\",\n", git_rev()));
+    writeln!(out, "  \"buffer_size\": {},", cfg.buffer_size).unwrap();
+    writeln!(out, "  \"events_total\": {},", cfg.events_total).unwrap();
+    writeln!(out, "  \"batch_size\": {},", cfg.batch_size).unwrap();
+    writeln!(out, "  \"warmup_rounds\": {},", cfg.warmup_rounds).unwrap();
+    writeln!(out, "  \"measured_rounds\": {},", cfg.measured_rounds).unwrap();
+    writeln!(out, "  \"run_order\": \"{}\",", cfg.run_order).unwrap();
+    writeln!(out, "  \"git_rev\": \"{}\",", git_rev()).unwrap();
     out.push_str("  \"rounds\": [\n");
     for (idx, r) in rounds.iter().enumerate() {
         out.push_str("    {\n");
-        out.push_str(&format!("      \"index\": {},\n", r.index));
-        out.push_str(&format!("      \"phase\": \"{}\",\n", r.phase));
-        out.push_str(&format!("      \"elapsed_ns\": {},\n", r.elapsed_ns));
-        out.push_str(&format!("      \"events\": {},\n", r.events));
-        out.push_str(&format!("      \"ops_per_sec\": {:.6},\n", r.ops_per_sec));
-        out.push_str(&format!("      \"checksum_valid\": {}\n", r.checksum_ok));
+        writeln!(out, "      \"index\": {},", r.index).unwrap();
+        writeln!(out, "      \"phase\": \"{}\",", r.phase).unwrap();
+        writeln!(out, "      \"elapsed_ns\": {},", r.elapsed_ns).unwrap();
+        writeln!(out, "      \"events\": {},", r.events).unwrap();
+        writeln!(out, "      \"ops_per_sec\": {:.6},", r.ops_per_sec).unwrap();
+        writeln!(out, "      \"checksum_valid\": {}", r.checksum_ok).unwrap();
         if idx + 1 == rounds.len() {
             out.push_str("    }\n");
         } else {
@@ -730,31 +733,43 @@ fn write_result(cfg: &Config, rounds: &[Round], summary: &Summary) -> String {
     }
     out.push_str("  ],\n");
     out.push_str("  \"summary\": {\n");
-    out.push_str(&format!(
-        "    \"checksum_valid_all\": {},\n",
+    writeln!(
+        out,
+        "    \"checksum_valid_all\": {},",
         summary.checksum_valid_all
-    ));
-    out.push_str(&format!(
-        "    \"median_ops_per_sec\": {:.6},\n",
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    \"median_ops_per_sec\": {:.6},",
         summary.median_ops_per_sec
-    ));
-    out.push_str(&format!(
-        "    \"mean_ops_per_sec\": {:.6},\n",
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    \"mean_ops_per_sec\": {:.6},",
         summary.mean_ops_per_sec
-    ));
-    out.push_str(&format!(
-        "    \"min_ops_per_sec\": {:.6},\n",
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    \"min_ops_per_sec\": {:.6},",
         summary.min_ops_per_sec
-    ));
-    out.push_str(&format!(
-        "    \"max_ops_per_sec\": {:.6},\n",
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    \"max_ops_per_sec\": {:.6},",
         summary.max_ops_per_sec
-    ));
-    out.push_str(&format!(
-        "    \"stddev_ops_per_sec\": {:.6},\n",
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    \"stddev_ops_per_sec\": {:.6},",
         summary.stddev_ops_per_sec
-    ));
-    out.push_str(&format!("    \"cv\": {:.6}\n", summary.cv));
+    )
+    .unwrap();
+    writeln!(out, "    \"cv\": {:.6}", summary.cv).unwrap();
     out.push_str("  }\n");
     out.push_str("}\n");
     out
