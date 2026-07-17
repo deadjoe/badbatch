@@ -522,7 +522,7 @@ Current CI (`.github/workflows/test.yml`):
 - **Windows**: **not supported / not tested**
 - **Miri**: run as a separate nightly job on a subset of tests (see workflow); not a full substitute for loom/TLA+
 
-See also `docs/MODERNIZATION.md` for active modernization phases and architecture decisions.
+See also [`MODERNIZATION.md`](MODERNIZATION.md) for active modernization phases and architecture decisions.
 
 ### Benchmarking Strategy
 - **Comprehensive Suite**: 7 specialized benchmark categories covering all performance aspects

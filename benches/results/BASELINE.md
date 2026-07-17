@@ -38,7 +38,7 @@ Raw run logs: `benches/results/baseline_unix*.md` (last three captures).
 2. **Batch publish is the high-throughput path**  
    Batch 64/256 sits ~**350–450 Melem/s**, well above single-event SPSC. This is the path to advertise for bulk ingest.
 
-3. **DESIGN.md 20–100M SPSC range is still credible**  
+3. **docs/DESIGN.md 20–100M SPSC range is still a coarse planning band**  
    Median single-event SPSC ~**160 Melem/s** on this method sits above the old band (methodology differs from criterion / Java H2H; still a healthy modernized signal).
 
 4. **MPSC / WorkerPool are contention-bound, not “broken”**  
