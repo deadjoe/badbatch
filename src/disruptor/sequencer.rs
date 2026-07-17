@@ -5,9 +5,7 @@
 //! overwrite events that haven't been consumed yet.
 
 use crate::disruptor::sequence_barrier::ProcessingSequenceBarrier;
-use crate::disruptor::{
-    is_power_of_two, DisruptorError, Result, Sequence, SequenceBarrier, WaitStrategy,
-};
+use crate::disruptor::{is_power_of_two, DisruptorError, Result, Sequence, WaitStrategy};
 use arc_swap::ArcSwap;
 use crossbeam_utils::CachePadded;
 use std::convert::TryFrom;
@@ -115,15 +113,6 @@ pub trait Sequencer: Send + Sync + std::fmt::Debug {
     /// True if the sequence was removed
     fn remove_gating_sequence(&self, sequence: Arc<Sequence>) -> bool;
 
-    /// Create a new sequence barrier
-    ///
-    /// # Arguments
-    /// * `sequences_to_track` - The sequences to track in the barrier
-    ///
-    /// # Returns
-    /// A new sequence barrier
-    fn new_barrier(&self, sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier>;
-
     /// Get the minimum sequence from gating sequences
     ///
     /// # Returns
@@ -151,20 +140,41 @@ pub trait Sequencer: Send + Sync + std::fmt::Debug {
 /// Only two concrete sequencer types exist, so enum dispatch provides
 /// the same runtime polymorphism as `Arc<dyn Sequencer>` but with
 /// inline match dispatch instead of vtable lookups on every call.
-#[derive(Debug, Clone)]
-pub enum SequencerEnum {
+#[derive(Debug)]
+pub enum SequencerEnum<W>
+where
+    W: WaitStrategy + 'static,
+{
     /// Single-producer sequencer variant
-    Single(Arc<SingleProducerSequencer>),
+    Single(Arc<SingleProducerSequencer<W>>),
     /// Multi-producer sequencer variant
-    Multi(Arc<MultiProducerSequencer>),
+    Multi(Arc<MultiProducerSequencer<W>>),
 }
 
-impl SequencerEnum {
-    /// Create a new sequence barrier using this sequencer.
+impl<W> Clone for SequencerEnum<W>
+where
+    W: WaitStrategy + 'static,
+{
+    fn clone(&self) -> Self {
+        match self {
+            SequencerEnum::Single(s) => SequencerEnum::Single(Arc::clone(s)),
+            SequencerEnum::Multi(m) => SequencerEnum::Multi(Arc::clone(m)),
+        }
+    }
+}
+
+impl<W> SequencerEnum<W>
+where
+    W: WaitStrategy + 'static,
+{
+    /// Create a monomorphized sequence barrier using this sequencer.
     ///
-    /// Unlike the trait method, this passes the concrete `Arc` directly
-    /// to `ProcessingSequenceBarrier`, eliminating the unsafe `SequencerWrapper`.
-    pub fn new_barrier(&self, sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
+    /// Returns a concrete `ProcessingSequenceBarrier<W>` so the wait path
+    /// has no vtable indirection on the hot consumer loop.
+    pub fn new_barrier(
+        &self,
+        sequences_to_track: Vec<Arc<Sequence>>,
+    ) -> Arc<ProcessingSequenceBarrier<W>> {
         match self {
             SequencerEnum::Single(s) => s.new_barrier_typed(sequences_to_track),
             SequencerEnum::Multi(m) => m.new_barrier_typed(sequences_to_track),
@@ -182,7 +192,10 @@ macro_rules! dispatch_sequencer {
     };
 }
 
-impl Sequencer for SequencerEnum {
+impl<W> Sequencer for SequencerEnum<W>
+where
+    W: WaitStrategy + 'static,
+{
     #[inline]
     fn get_cursor(&self) -> Arc<Sequence> {
         dispatch_sequencer!(self, get_cursor)
@@ -246,12 +259,6 @@ impl Sequencer for SequencerEnum {
     #[inline]
     fn remove_gating_sequence(&self, sequence: Arc<Sequence>) -> bool {
         dispatch_sequencer!(self, remove_gating_sequence, sequence)
-    }
-
-    #[inline]
-    fn new_barrier(&self, sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
-        // Use the typed barrier creation that avoids SequencerWrapper
-        SequencerEnum::new_barrier(self, sequences_to_track)
     }
 
     #[inline]
@@ -341,10 +348,13 @@ fn remove_gating_sequence_cas(
 /// - cachedValue: cached minimum gating sequence for performance
 /// - No atomic operations needed since only one producer thread
 #[derive(Debug)]
-pub struct SingleProducerSequencer {
+pub struct SingleProducerSequencer<W>
+where
+    W: WaitStrategy + 'static,
+{
     buffer_size: usize,
     buffer_size_i64: i64,
-    wait_strategy: Arc<dyn WaitStrategy>,
+    wait_strategy: Arc<W>,
     needs_signal: bool,
     cursor: Arc<Sequence>,
     /// Gating sequences that this sequencer must not overtake.
@@ -362,7 +372,10 @@ pub struct SingleProducerSequencer {
     cached_value: AtomicI64,
 }
 
-impl SingleProducerSequencer {
+impl<W> SingleProducerSequencer<W>
+where
+    W: WaitStrategy + 'static,
+{
     /// Create a new single producer sequencer
     ///
     /// # Arguments
@@ -371,7 +384,7 @@ impl SingleProducerSequencer {
     ///
     /// # Returns
     /// A new SingleProducerSequencer instance
-    pub fn new(buffer_size: usize, wait_strategy: Arc<dyn WaitStrategy>) -> Self {
+    pub fn new(buffer_size: usize, wait_strategy: Arc<W>) -> Self {
         let buffer_size_i64 = i64::try_from(buffer_size).expect("buffer size must fit into i64");
         let needs_signal = wait_strategy.needs_signal();
         Self {
@@ -392,7 +405,7 @@ impl SingleProducerSequencer {
     pub fn new_barrier_typed(
         self: &Arc<Self>,
         sequences_to_track: Vec<Arc<Sequence>>,
-    ) -> Arc<dyn SequenceBarrier> {
+    ) -> Arc<ProcessingSequenceBarrier<W>> {
         Arc::new(ProcessingSequenceBarrier::new(
             self.cursor.clone(),
             Arc::clone(&self.wait_strategy),
@@ -428,7 +441,10 @@ impl SingleProducerSequencer {
     }
 }
 
-impl Sequencer for SingleProducerSequencer {
+impl<W> Sequencer for SingleProducerSequencer<W>
+where
+    W: WaitStrategy + 'static,
+{
     #[inline]
     fn get_cursor(&self) -> Arc<Sequence> {
         Arc::clone(&self.cursor)
@@ -536,10 +552,6 @@ impl Sequencer for SingleProducerSequencer {
         remove_gating_sequence_cas(&self.gating_sequences, &sequence)
     }
 
-    fn new_barrier(&self, _sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
-        panic!("Use SequencerEnum::new_barrier() or SingleProducerSequencer::new_barrier_typed() instead")
-    }
-
     fn get_minimum_sequence(&self) -> i64 {
         let guard = self.gating_sequences.load();
         Sequence::get_minimum_sequence(&guard)
@@ -588,10 +600,13 @@ impl Sequencer for SingleProducerSequencer {
 /// - Cache-friendly memory layout
 /// - ABA problem prevention
 #[derive(Debug)]
-pub struct MultiProducerSequencer {
+pub struct MultiProducerSequencer<W>
+where
+    W: WaitStrategy + 'static,
+{
     buffer_size: usize,
     buffer_size_i64: i64,
-    wait_strategy: Arc<dyn WaitStrategy>,
+    wait_strategy: Arc<W>,
     needs_signal: bool,
     /// Cursor tracks the highest **claimed** sequence number by any producer.
     ///
@@ -623,7 +638,10 @@ pub struct MultiProducerSequencer {
     available_buffer: Vec<AtomicI32>,
 }
 
-impl MultiProducerSequencer {
+impl<W> MultiProducerSequencer<W>
+where
+    W: WaitStrategy + 'static,
+{
     /// Create a new multi producer sequencer with optional bitmap optimization
     ///
     /// # Arguments
@@ -636,7 +654,7 @@ impl MultiProducerSequencer {
     /// # Panics
     /// Panics if `buffer_size` is not a power of 2. Callers should validate
     /// buffer size before construction (e.g., via `Disruptor::new` or builders).
-    pub fn new(buffer_size: usize, wait_strategy: Arc<dyn WaitStrategy>) -> Self {
+    pub fn new(buffer_size: usize, wait_strategy: Arc<W>) -> Self {
         assert!(
             is_power_of_two(buffer_size),
             "Buffer size must be a power of 2"
@@ -687,7 +705,7 @@ impl MultiProducerSequencer {
     pub fn new_barrier_typed(
         self: &Arc<Self>,
         sequences_to_track: Vec<Arc<Sequence>>,
-    ) -> Arc<dyn SequenceBarrier> {
+    ) -> Arc<ProcessingSequenceBarrier<W>> {
         Arc::new(ProcessingSequenceBarrier::new(
             self.cursor.clone(),
             Arc::clone(&self.wait_strategy),
@@ -916,7 +934,10 @@ impl MultiProducerSequencer {
     }
 }
 
-impl Sequencer for MultiProducerSequencer {
+impl<W> Sequencer for MultiProducerSequencer<W>
+where
+    W: WaitStrategy + 'static,
+{
     #[inline]
     fn get_cursor(&self) -> Arc<Sequence> {
         Arc::clone(&self.cursor)
@@ -1097,10 +1118,6 @@ impl Sequencer for MultiProducerSequencer {
         remove_gating_sequence_cas(&self.gating_sequences, &sequence)
     }
 
-    fn new_barrier(&self, _sequences_to_track: Vec<Arc<Sequence>>) -> Arc<dyn SequenceBarrier> {
-        panic!("Use SequencerEnum::new_barrier() or MultiProducerSequencer::new_barrier_typed() instead")
-    }
-
     fn get_minimum_sequence(&self) -> i64 {
         let guard = self.gating_sequences.load();
         Sequence::get_minimum_sequence(&guard)
@@ -1132,6 +1149,7 @@ impl Sequencer for MultiProducerSequencer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::disruptor::sequence_barrier::SequenceBarrier;
     use crate::disruptor::BlockingWaitStrategy;
 
     #[test]

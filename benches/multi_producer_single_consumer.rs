@@ -199,7 +199,7 @@ fn benchmark_mpsc_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u6
             factory,
             BUFFER_SIZE,
             ProducerType::Multi,
-            Box::new(BusySpinWaitStrategy::new()),
+            BusySpinWaitStrategy::new(),
         )
         .unwrap()
         .handle_events_with(handler)

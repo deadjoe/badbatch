@@ -48,15 +48,17 @@ The heart of the Disruptor pattern - a pre-allocated circular buffer.
 **Implementation Details:**
 ```rust
 pub struct RingBuffer<T> {
-    // Inline or 64-byte cache-line-padded slot storage (opt-in via SlotPadding)
+    // Inline, 64-byte, or 128-byte cache-line-padded slot storage (opt-in via SlotPadding)
     storage: SlotStorage<T>,
     index_mask: i64,                 // Fast modulo: (size - 1)
 }
 
 enum SlotStorage<T> {
     Inline(Box<[UnsafeCell<T>]>),
-    CacheLine64(Box<[UnsafeCell<CacheLinePaddedSlot<T>>]>),
+    CacheLine64(Box<[UnsafeCell<CacheLinePaddedSlot64<T>>]>),
+    CacheLine128(Box<[UnsafeCell<CacheLinePaddedSlot128<T>>]>),
 }
+// with_cache_line_padding(true) maps to CacheLine128 (modern false-sharing granularity)
 ```
 
 **Safety Guarantees:**
@@ -78,9 +80,9 @@ Optimized for single-threaded publishing scenarios.
 
 **Implementation Details:**
 ```rust
-pub struct SingleProducerSequencer {
+pub struct SingleProducerSequencer<W: WaitStrategy> {
     buffer_size: usize,
-    wait_strategy: Arc<dyn WaitStrategy>,
+    wait_strategy: Arc<W>,           // Monomorphized; no dyn vtable
     cursor: Arc<Sequence>,
     next_value: AtomicI64,           // Next sequence to claim
     cached_value: AtomicI64,         // Cached minimum gating sequence
@@ -247,7 +249,7 @@ let consumer = ElegantConsumer::with_affinity(ring_buffer,
 - **ABA Prevention**: Careful handling of sequence wraparound
 
 ### Testing Strategy
-- **Unit Tests**: 280 tests covering all core disruptor components across 27 test modules
+- **Unit Tests**: 283 tests covering all core disruptor components across 27 test modules
 - **Integration Tests**: 48 end-to-end scenarios with multiple producers/consumers
 - **Documentation Tests**: 23 API examples validated through rustdoc
 - **Property Tests**: Invariant checking with proptest for sequence ordering and ring buffer behavior
@@ -495,7 +497,7 @@ let mut producer = build_single_producer(1024, factory, BusySpinWaitStrategy)
 ## Testing and Validation
 
 ### Test Coverage
-- **Unit Tests**: 280 tests covering all core disruptor components across 27 test modules
+- **Unit Tests**: 283 tests covering all core disruptor components across 27 test modules
 - **Integration Tests**: 48 end-to-end scenarios with multiple producers/consumers
 - **Documentation Tests**: 23 API examples validated through rustdoc  
 - **Property Tests**: Invariant checking with proptest for sequence ordering and ring buffer behavior
@@ -503,11 +505,17 @@ let mut producer = build_single_producer(1024, factory, BusySpinWaitStrategy)
 - **Formal Verification**: TLA+ models proving correctness of concurrent algorithms
 - **Quality Assurance**: Comprehensive pipeline with security audits, dependency checks, and coverage analysis
 
-### Continuous Integration
-- **Rust Versions**: Tested on stable, beta, and nightly
-- **Platforms**: Linux, macOS, Windows
-- **Architectures**: x86_64, ARM64
-- **Miri**: Memory safety validation
+### Continuous Integration (honest matrix — only claim what CI runs)
+
+Current CI (`.github/workflows/test.yml`):
+
+- **Rust**: latest **stable** for build/test/clippy/fmt/coverage; **nightly** only for Miri
+- **Platforms**: **Linux** (`ubuntu-latest`) in CI; **macOS** is the primary local development platform
+- **Architectures**: CI runners provide the host arch of the GitHub runner (typically x86_64 Linux); local development commonly runs on ARM64 (Apple Silicon)
+- **Windows**: **not supported / not tested**
+- **Miri**: run as a separate nightly job on a subset of tests (see workflow); not a full substitute for loom/TLA+
+
+See also `docs/MODERNIZATION.md` for active modernization phases and architecture decisions.
 
 ### Benchmarking Strategy
 - **Comprehensive Suite**: 7 specialized benchmark categories covering all performance aspects

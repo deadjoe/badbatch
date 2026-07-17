@@ -37,18 +37,19 @@ use std::thread::{self, JoinHandle};
 ///     event_factory,
 ///     1024,
 ///     ProducerType::Single,
-///     Box::new(BlockingWaitStrategy::new()),
+///     BlockingWaitStrategy::new(),
 /// ).unwrap();
 /// ```
 #[derive(Debug)]
-pub struct Disruptor<T>
+pub struct Disruptor<T, W>
 where
     T: Send + Sync + std::fmt::Debug + 'static,
+    W: WaitStrategy + 'static,
 {
     /// The ring buffer for storing events
     ring_buffer: Arc<RingBuffer<T>>,
     /// The sequencer for coordinating access (enum dispatch, no vtable)
-    sequencer: SequencerEnum,
+    sequencer: SequencerEnum<W>,
     /// The buffer size
     buffer_size: usize,
     /// Started event processors
@@ -61,9 +62,10 @@ where
     shutdown_flag: Arc<AtomicBool>,
 }
 
-impl<T> Disruptor<T>
+impl<T, W> Disruptor<T, W>
 where
     T: Send + Sync + std::fmt::Debug + 'static,
+    W: WaitStrategy + 'static,
 {
     /// Create a new Disruptor
     ///
@@ -71,7 +73,7 @@ where
     /// * `event_factory` - Factory for creating events
     /// * `buffer_size` - Size of the ring buffer (must be a power of 2)
     /// * `producer_type` - Whether to use single or multi producer
-    /// * `wait_strategy` - Strategy for waiting for events
+    /// * `wait_strategy` - Strategy for waiting for events (monomorphized)
     ///
     /// # Returns
     /// A new Disruptor instance
@@ -82,7 +84,7 @@ where
         event_factory: F,
         buffer_size: usize,
         producer_type: ProducerType,
-        wait_strategy: Box<dyn WaitStrategy>,
+        wait_strategy: W,
     ) -> Result<Self>
     where
         F: EventFactory<T>,
@@ -95,8 +97,8 @@ where
         let ring_buffer = Arc::new(RingBuffer::new(buffer_size, event_factory)?);
 
         // Create the appropriate sequencer based on producer type
-        let wait_strategy = Arc::from(wait_strategy);
-        let sequencer: SequencerEnum = match producer_type {
+        let wait_strategy = Arc::new(wait_strategy);
+        let sequencer: SequencerEnum<W> = match producer_type {
             ProducerType::Single => SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
                 buffer_size,
                 wait_strategy,
@@ -117,7 +119,12 @@ where
             shutdown_flag: Arc::new(AtomicBool::new(false)),
         })
     }
+}
 
+impl<T> Disruptor<T, BlockingWaitStrategy>
+where
+    T: Send + Sync + std::fmt::Debug + 'static,
+{
     /// Create a new Disruptor with default settings
     ///
     /// Uses single producer and blocking wait strategy by default.
@@ -136,10 +143,16 @@ where
             event_factory,
             buffer_size,
             ProducerType::Single,
-            Box::new(BlockingWaitStrategy::new()),
+            BlockingWaitStrategy::new(),
         )
     }
+}
 
+impl<T, W> Disruptor<T, W>
+where
+    T: Send + Sync + std::fmt::Debug + 'static,
+    W: WaitStrategy + 'static,
+{
     /// Get the ring buffer
     ///
     /// # Returns
@@ -182,18 +195,18 @@ where
     ///
     /// # Returns
     /// A DisruptorBuilder for further configuration
-    pub fn handle_events_with<H>(mut self, event_handler: H) -> DisruptorBuilder<T>
+    pub fn handle_events_with<H>(mut self, event_handler: H) -> DisruptorBuilder<T, W>
     where
         H: EventHandler<T> + 'static,
     {
         // Create a sequence barrier
         let barrier = self.sequencer.new_barrier(vec![]);
 
-        // Create the event processor
+        // Create the event processor (owned handler; dyn only at EventProcessor trait)
         let processor = BatchEventProcessor::new(
             self.ring_buffer.clone(),
             barrier,
-            Box::new(event_handler),
+            event_handler,
             Box::new(crate::disruptor::DefaultExceptionHandler::new()),
         );
 
@@ -376,17 +389,19 @@ where
 ///
 /// This provides a fluent interface for building complex event processing
 /// topologies with dependencies between processors.
-pub struct DisruptorBuilder<T>
+pub struct DisruptorBuilder<T, W>
 where
     T: Send + Sync + std::fmt::Debug + 'static,
+    W: WaitStrategy + 'static,
 {
-    disruptor: Disruptor<T>,
+    disruptor: Disruptor<T, W>,
     last_processor_sequences: Vec<Arc<Sequence>>,
 }
 
-impl<T> DisruptorBuilder<T>
+impl<T, W> DisruptorBuilder<T, W>
 where
     T: Send + Sync + std::fmt::Debug + 'static,
+    W: WaitStrategy + 'static,
 {
     /// Add another event handler that depends on the previous handlers
     ///
@@ -410,7 +425,7 @@ where
         let processor = BatchEventProcessor::new(
             self.disruptor.ring_buffer.clone(),
             barrier,
-            Box::new(event_handler),
+            event_handler,
             Box::new(crate::disruptor::DefaultExceptionHandler::new()),
         );
 
@@ -432,7 +447,7 @@ where
     ///
     /// # Returns
     /// The configured Disruptor instance
-    pub fn build(self) -> Disruptor<T> {
+    pub fn build(self) -> Disruptor<T, W> {
         self.disruptor
     }
 }
@@ -462,7 +477,7 @@ mod tests {
             factory,
             1024,
             ProducerType::Single,
-            Box::new(BlockingWaitStrategy::new()),
+            BlockingWaitStrategy::new(),
         )
         .unwrap();
 
@@ -477,7 +492,7 @@ mod tests {
             factory,
             512,
             ProducerType::Multi,
-            Box::new(YieldingWaitStrategy::new()),
+            YieldingWaitStrategy::new(),
         )
         .unwrap();
 
@@ -500,7 +515,7 @@ mod tests {
             factory,
             1023, // Not a power of 2
             ProducerType::Single,
-            Box::new(BlockingWaitStrategy::new()),
+            BlockingWaitStrategy::new(),
         );
 
         assert!(result.is_err());
@@ -517,7 +532,7 @@ mod tests {
             factory,
             0,
             ProducerType::Single,
-            Box::new(BlockingWaitStrategy::new()),
+            BlockingWaitStrategy::new(),
         );
 
         assert!(result.is_err());
@@ -622,7 +637,7 @@ mod tests {
             factory,
             64,
             ProducerType::Single,
-            Box::new(SleepingWaitStrategy::new()),
+            SleepingWaitStrategy::new(),
         )
         .unwrap();
         assert_eq!(disruptor1.get_buffer_size(), 64);
@@ -632,7 +647,7 @@ mod tests {
             factory2,
             128,
             ProducerType::Multi,
-            Box::new(YieldingWaitStrategy::new()),
+            YieldingWaitStrategy::new(),
         )
         .unwrap();
         assert_eq!(disruptor2.get_buffer_size(), 128);

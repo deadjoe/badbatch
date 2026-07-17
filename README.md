@@ -237,13 +237,16 @@ fn main() {
 }
 ```
 
-Tip: `build_single_producer` / `build_multi_producer` take a full LMAX `WaitStrategy`. To use the simplified strategies there, use adapters like `simple_wait_strategy::busy_spin()` which return a `WaitStrategy` adapter.
+**API note (modernization):** Prefer the Builder path (`build_*` + `WaitStrategy` types such as `BusySpinWaitStrategy` or simplified `simple_wait_strategy::BusySpin`). Same-stage parallel handlers use **WorkerPool work-sharing** (CAS claim — each sequence processed by exactly one worker). User-owned threads: `EventPoller` / `open_single_producer_poller`. `ElegantConsumer` remains for lightweight experiments.
+
+See `docs/MODERNIZATION.md` for architecture decisions.
 
 ## 🔧 Development
 
 ### Prerequisites
-- Rust 1.84 or later (see `Cargo.toml` `rust-version`)
+- Rust **1.97+** stable (see `Cargo.toml` `rust-version`; track latest stable)
 - Git
+- Optional: `nightly` toolchain with `miri` for memory-safety checks
 
 ### Building
 ```bash
@@ -319,23 +322,23 @@ BadBatch is designed for high-performance event processing with the following ch
 
 ### Event Sizing and Cache-Line Padding
 
-BadBatch stores events inline in a contiguous ring buffer. When event structs are smaller than a CPU cache line (64 bytes), multiple adjacent slots share the same cache line. In high-throughput unicast scenarios, this causes **false sharing** between the producer and consumer, severely degrading throughput.
+BadBatch stores events inline in a contiguous ring buffer. When event structs are smaller than the false-sharing granularity (typically **128 bytes** on modern x86_64/aarch64; Sequence padding already uses `CachePadded` at 128B), adjacent slots can share a cache line and degrade unicast throughput.
 
-If your event struct is smaller than 64 bytes and you need maximum unicast throughput, add explicit cache-line alignment:
+If your event is small and you need maximum unicast throughput, either enable Builder slot padding (`with_cache_line_padding(true)` → 128B slots) or align the event type:
 
 ```rust
-#[repr(C, align(64))]
+#[repr(C, align(128))]
 #[derive(Debug, Default)]
 struct MyEvent {
     value: i64,
     payload: i64,
-    // Rust pads to 64 bytes automatically due to align(64)
+    // Rust pads to 128 bytes automatically due to align(128)
 }
 ```
 
-This ensures each slot occupies its own cache line. Events that are already >= 64 bytes do not need this annotation.
+This ensures each slot occupies its own false-sharing unit on modern x86_64/aarch64. Events already ≥ 128 bytes need no extra alignment.
 
-> **Architecture note**: Cache-line padding eliminates false sharing but increases the ring buffer footprint by `64 / sizeof(E)`. On x86 with strict false-sharing penalties this typically helps unicast throughput for small events; on Apple Silicon (large 128 KB L1, efficient coherency fabric) the larger working set can dominate and padding may *hurt* for 16-byte events. The `BusySpinPadded` / `YieldingPadded` SPSC benchmark variants let you measure the tradeoff on your target hardware. Keep `SlotPadding::None` (the default) unless your measurements show padding helps.
+> **Architecture note**: Slot padding eliminates false sharing but increases the ring buffer footprint. Default remains `SlotPadding::None`; opt into `CacheLine128` (Builder `with_cache_line_padding(true)`) or `CacheLine64` via `with_slot_padding` after measuring. On Apple Silicon the larger working set can dominate for tiny events — use the padded SPSC bench variants on your hardware.
 
 ### ARM / Apple Silicon Notes
 

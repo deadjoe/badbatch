@@ -10,10 +10,12 @@ use crate::disruptor::{
     sequence_barrier::ProcessingSequenceBarrier,
     sequencer::{MultiProducerSequencer, SequencerEnum, SingleProducerSequencer},
     EventHandler, RingBuffer, Sequence, SequenceBarrier, Sequencer, WaitStrategy,
+    INITIAL_CURSOR_VALUE,
 };
+use crossbeam_utils::CachePadded;
 use std::marker::PhantomData;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicI64, Ordering},
     Arc,
 };
 use std::thread::{self, JoinHandle};
@@ -23,11 +25,14 @@ use std::thread::{self, JoinHandle};
 /// This struct contains the common implementation used by both the DSL-style
 /// Disruptor class and the Builder-style API to avoid code duplication.
 #[derive(Debug, Clone)]
-pub struct DisruptorCore<E> {
+pub struct DisruptorCore<E, W>
+where
+    W: WaitStrategy + 'static,
+{
     /// Shared ring buffer storing all events managed by the disruptor.
     pub ring_buffer: Arc<RingBuffer<E>>,
     /// Sequencer coordinating producer access to the ring buffer (enum dispatch, no vtable).
-    pub sequencer: SequencerEnum,
+    pub sequencer: SequencerEnum<W>,
     /// Consumer handles that process published events.
     pub consumers: Vec<Consumer>,
     /// Shared flag signaling graceful shutdown to consumer threads.
@@ -35,14 +40,15 @@ pub struct DisruptorCore<E> {
     gating_sequences: Vec<Arc<Sequence>>,
 }
 
-impl<E> DisruptorCore<E>
+impl<E, W> DisruptorCore<E, W>
 where
     E: Send + Sync + 'static,
+    W: WaitStrategy + 'static,
 {
     /// Create a new DisruptorCore with the given components
     pub fn new(
         ring_buffer: Arc<RingBuffer<E>>,
-        sequencer: SequencerEnum,
+        sequencer: SequencerEnum<W>,
         consumers: Vec<Consumer>,
         shutdown_flag: Arc<AtomicBool>,
         gating_sequences: Vec<Arc<Sequence>>,
@@ -94,7 +100,7 @@ where
     }
 
     /// Create a producer for this disruptor core
-    pub fn create_producer(&self) -> SimpleProducer<E> {
+    pub fn create_producer(&self) -> SimpleProducer<E, W> {
         SimpleProducer::new(self.ring_buffer.clone(), self.sequencer.clone())
     }
 }
@@ -103,18 +109,19 @@ where
 ///
 /// This function provides a unified way to create DisruptorCore instances
 /// that can be used by both DSL-style and Builder-style APIs.
+#[allow(clippy::too_many_lines)]
 pub fn create_disruptor_core<E, F, W>(
     size: usize,
     event_factory: F,
     wait_strategy: W,
-    consumers: Vec<ConsumerInfo<E>>,
+    consumers: Vec<ConsumerInfo<E, W>>,
     is_multi_producer: bool,
     slot_padding: SlotPadding,
-) -> DisruptorCore<E>
+) -> DisruptorCore<E, W>
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + 'static,
+    W: WaitStrategy + 'static,
 {
     // Create the ring buffer
     let closure_factory = ClosureEventFactory::new(event_factory);
@@ -123,10 +130,11 @@ where
             .expect("Failed to create ring buffer"),
     );
 
-    let wait_strategy_arc: Arc<dyn WaitStrategy> = Arc::new(wait_strategy);
+    // Monomorphized wait strategy — stored as Arc<W>, no dyn vtable.
+    let wait_strategy_arc = Arc::new(wait_strategy);
 
     // Create the appropriate sequencer
-    let sequencer: SequencerEnum = if is_multi_producer {
+    let sequencer: SequencerEnum<W> = if is_multi_producer {
         SequencerEnum::Multi(Arc::new(MultiProducerSequencer::new(
             size,
             wait_strategy_arc.clone(),
@@ -149,13 +157,21 @@ where
         }
         widths
     });
-    let slot_locks = stage_widths.iter().any(|width| *width > 1).then(|| {
-        Arc::new(
-            (0..size)
-                .map(|_| parking_lot::Mutex::new(()))
-                .collect::<Vec<_>>(),
-        )
-    });
+
+    // LMAX WorkerPool scheme A: one shared work-sequence cursor per parallel stage.
+    // Workers CAS-claim sequences for exclusive ownership — no per-slot Mutex.
+    let stage_work_sequences: Vec<Option<Arc<CachePadded<AtomicI64>>>> = stage_widths
+        .iter()
+        .map(|width| {
+            if *width > 1 {
+                Some(Arc::new(CachePadded::new(AtomicI64::new(
+                    INITIAL_CURSOR_VALUE,
+                ))))
+            } else {
+                None
+            }
+        })
+        .collect();
 
     // Start consumer threads
     let mut consumer_threads: Vec<Consumer> = Vec::new();
@@ -186,16 +202,18 @@ where
             previous_stage_sequences.clone()
         };
 
-        // Create a sequence barrier for this consumer.
-        // Always use ProcessingSequenceBarrier for uniform contiguous-publication
-        // checking. For single-producer, get_highest_published_sequence is a trivial
-        // pass-through so there is no overhead.
-        let sequence_barrier: Arc<dyn SequenceBarrier> = Arc::new(ProcessingSequenceBarrier::new(
+        // Monomorphized barrier so wait_for has no dyn vtable on the hot path.
+        let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
             sequencer.get_cursor(),
             wait_strategy_arc.clone(),
             dependent_sequences,
             sequencer.clone(),
         ));
+
+        let work_sequence = stage_work_sequences
+            .get(stage_index)
+            .and_then(Option::as_ref)
+            .cloned();
 
         // Start the consumer thread
         let (consumer_sequence, consumer) = starter(
@@ -205,8 +223,7 @@ where
                 thread_name,
                 cpu_affinity,
                 shutdown_flag: shutdown_flag.clone(),
-                slot_locks: slot_locks.clone(),
-                needs_slot_lock: stage_widths.get(stage_index).copied().unwrap_or(1) > 1,
+                work_sequence,
             },
         );
 
@@ -219,7 +236,9 @@ where
         consumer_threads.push(consumer);
     }
 
-    // Register consumer sequences with the sequencer for backpressure
+    // Register consumer sequences with the sequencer for backpressure.
+    // For parallel stages, each worker's sequence is a gating sequence; the
+    // minimum across workers provides correct backpressure (LMAX WorkerPool).
     if !consumer_sequences.is_empty() {
         sequencer.add_gating_sequences(&consumer_sequences);
     }
@@ -293,7 +312,7 @@ pub fn build_single_producer<E, F, W>(
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + 'static,
+    W: WaitStrategy + 'static,
 {
     SingleProducerBuilder::new(size, event_factory, wait_strategy)
 }
@@ -329,7 +348,7 @@ pub fn build_multi_producer<E, F, W>(
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + Clone + 'static,
+    W: WaitStrategy + Clone + 'static,
 {
     MultiProducerBuilder::new(size, event_factory, wait_strategy)
 }
@@ -437,39 +456,42 @@ struct ConsumerThreadConfig {
     thread_name: Option<String>,
     cpu_affinity: Option<usize>,
     shutdown_flag: Arc<AtomicBool>,
-    slot_locks: Option<Arc<Vec<parking_lot::Mutex<()>>>>,
-    needs_slot_lock: bool,
+    /// Shared work-sequence cursor for LMAX WorkerPool scheme A (parallel stages only).
+    /// Workers CAS-claim the next sequence for exclusive ownership.
+    work_sequence: Option<Arc<CachePadded<AtomicI64>>>,
 }
 
 /// Start a consumer thread for processing events
 ///
-/// This function creates and starts a consumer thread that processes events
-/// using the provided event handler. It's inspired by the start_processor
-/// function in disruptor-rs.
-fn start_consumer_thread<E, H>(
+/// Single-consumer stages use a sequential batch loop (LMAX BatchEventProcessor).
+/// Parallel same-stage consumers (width > 1) use LMAX WorkerPool scheme A:
+/// CAS-claim sequences from a shared work cursor for exclusive, lock-free ownership.
+#[allow(clippy::too_many_lines)]
+fn start_consumer_thread<E, H, W>(
     ring_buffer: Arc<RingBuffer<E>>,
-    sequence_barrier: Arc<dyn SequenceBarrier>,
+    sequence_barrier: Arc<ProcessingSequenceBarrier<W>>,
     mut event_handler: H,
     config: ConsumerThreadConfig,
 ) -> (Arc<Sequence>, Consumer)
 where
     E: Send + Sync + 'static,
-    H: EventHandler<E> + Send + Sync + 'static,
+    H: EventHandler<E> + Send + 'static,
+    W: WaitStrategy + 'static,
 {
-    // Create a sequence for this consumer
-    let consumer_sequence = Arc::new(Sequence::new(-1));
+    // Create a sequence for this consumer (gating + progress)
+    let consumer_sequence = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
     let consumer_sequence_clone = consumer_sequence.clone();
 
     let ConsumerThreadConfig {
         thread_name,
         cpu_affinity,
         shutdown_flag,
-        slot_locks,
-        needs_slot_lock,
+        work_sequence,
     } = config;
 
     let thread_name = thread_name.unwrap_or_else(|| "disruptor-consumer".to_string());
     let thread_name_clone = thread_name.clone();
+    let is_work_processor = work_sequence.is_some();
 
     // Start the consumer thread
     let join_handle = thread::Builder::new()
@@ -487,8 +509,6 @@ where
                 }
             }
 
-            let mut next_sequence = 0i64;
-
             // Lifecycle: notify handler of start
             if let Err(e) = event_handler.on_start() {
                 crate::internal_error!(
@@ -496,83 +516,133 @@ where
                 );
             }
 
-            // Main event processing loop
-            while !shutdown_flag.load(Ordering::Acquire) {
-                // Wait for events to become available with shutdown support
-                if let Ok(available_sequence) =
-                    sequence_barrier.wait_for_with_shutdown(next_sequence, &shutdown_flag)
-                {
-                    // Lifecycle: notify handler of batch start
-                    let batch_size = available_sequence - next_sequence + 1;
-                    let queue_depth = available_sequence - consumer_sequence_clone.get();
-                    let _ = event_handler.on_batch_start(batch_size, queue_depth);
+            if is_work_processor {
+                // ---------------------------------------------------------------
+                // LMAX WorkProcessor-inspired CAS work claim (WorkerPool scheme A)
+                //
+                // Shared work_sequence starts at INITIAL_CURSOR_VALUE (-1).
+                // Each worker:
+                //   1. CAS-claims next sequence: work_sequence from n-1 -> n
+                //   2. Publishes progress as n-1 before waiting (gating safety)
+                //   3. Waits on barrier until claimed sequence is available
+                //      (must not re-claim on wait retry — exclusive ownership)
+                //   4. Processes exclusively (claim grants sole ownership)
+                //   5. Updates worker sequence to n
+                //
+                // Minimum of worker sequences provides producer backpressure.
+                // No per-slot Mutex — exclusive claim is lock-free.
+                // ---------------------------------------------------------------
+                let work_seq = work_sequence.expect("work processor requires work_sequence");
+                let mut cached_available = INITIAL_CURSOR_VALUE;
 
-                    // Process ALL available events in this batch.
-                    // Never check shutdown inside the inner loop — published events
-                    // must be fully consumed before stopping (LMAX Disruptor contract).
-                    while next_sequence <= available_sequence {
-                        let end_of_batch = next_sequence == available_sequence;
-                        if needs_slot_lock {
-                            let slot_locks = slot_locks
-                                .as_ref()
-                                .expect("parallel consumer stage must have slot locks");
-                            let slot_index = ring_buffer.sequence_to_index(next_sequence);
-                            let _slot_guard = slot_locks[slot_index].lock();
-
-                            // SAFETY: Slot-level locking ensures only one parallel consumer
-                            // creates a mutable reference for this ring slot at a time.
-                            let event =
-                                unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
-
-                            if let Err(e) =
-                                event_handler.on_event(event, next_sequence, end_of_batch)
-                            {
-                                #[cfg(debug_assertions)]
-                                eprintln!(
-                                    "Event processing error in thread '{thread_name}' at sequence {next_sequence}: {e:?}"
-                                );
-                                #[cfg(not(debug_assertions))]
-                                let _ = e;
-                            }
-                        } else {
-                            // SAFETY: We have exclusive access to this sequence range by topology.
-                            let event =
-                                unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
-
-                            if let Err(e) =
-                                event_handler.on_event(event, next_sequence, end_of_batch)
-                            {
-                                #[cfg(debug_assertions)]
-                                eprintln!(
-                                    "Event processing error in thread '{thread_name}' at sequence {next_sequence}: {e:?}"
-                                );
-                                #[cfg(not(debug_assertions))]
-                                let _ = e;
+                'work: while !shutdown_flag.load(Ordering::Acquire) {
+                    // Claim the next sequence via CAS on the shared work cursor.
+                    let claimed = loop {
+                        if shutdown_flag.load(Ordering::Acquire) {
+                            break 'work;
+                        }
+                        let current = work_seq.load(Ordering::Acquire);
+                        let next = current + 1;
+                        // Publish that this worker is done through `current` so
+                        // gating does not stall producers while we wait for `next`.
+                        consumer_sequence_clone.set(current);
+                        match work_seq.compare_exchange(
+                            current,
+                            next,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        ) {
+                            Ok(_) => break next,
+                            Err(_) => {
+                                // Lost the race — another worker claimed this sequence.
+                                std::hint::spin_loop();
                             }
                         }
+                    };
 
-                        if needs_slot_lock {
-                            // Parallel consumers must publish progress per event so downstream
-                            // gating observes the exact point reached by this worker.
-                            consumer_sequence_clone.set(next_sequence);
+                    // Wait until the claimed sequence is available. Never re-claim
+                    // on transient wait failure — that would drop exclusive ownership.
+                    while claimed > cached_available {
+                        if shutdown_flag.load(Ordering::Acquire) {
+                            break 'work;
                         }
-
-                        next_sequence += 1;
+                        match sequence_barrier.wait_for_with_shutdown(claimed, &shutdown_flag) {
+                            Ok(available) => {
+                                cached_available = available;
+                            }
+                            Err(_) if shutdown_flag.load(Ordering::Acquire) => {
+                                break 'work;
+                            }
+                            Err(_) => {
+                                // Timeout / transient alert: retry wait for the same claim.
+                                std::hint::spin_loop();
+                            }
+                        }
                     }
 
-                    if !needs_slot_lock {
-                        // Single-consumer stages can publish progress once per batch.
-                        // This matches the release point used by LMAX BatchEventProcessor
-                        // and removes one release-store per event from the hot path.
+                    let end_of_batch = claimed == cached_available;
+                    let _ = event_handler.on_batch_start(1, cached_available - claimed + 1);
+
+                    // SAFETY: CAS claim grants exclusive ownership of `claimed`.
+                    // No other worker will process this sequence.
+                    let event = unsafe { &mut *ring_buffer.get_mut_unchecked(claimed) };
+
+                    if let Err(e) = event_handler.on_event(event, claimed, end_of_batch) {
+                        #[cfg(debug_assertions)]
+                        eprintln!(
+                            "Event processing error in thread '{thread_name}' at sequence {claimed}: {e:?}"
+                        );
+                        #[cfg(not(debug_assertions))]
+                        let _ = e;
+                    }
+
+                    // Publish progress after processing so gating observes completion.
+                    consumer_sequence_clone.set(claimed);
+                }
+            } else {
+                // Sequential BatchEventProcessor-style loop for width-1 stages.
+                let mut next_sequence = 0i64;
+
+                while !shutdown_flag.load(Ordering::Acquire) {
+                    if let Ok(available_sequence) =
+                        sequence_barrier.wait_for_with_shutdown(next_sequence, &shutdown_flag)
+                    {
+                        let batch_size = available_sequence - next_sequence + 1;
+                        let queue_depth = available_sequence - consumer_sequence_clone.get();
+                        let _ = event_handler.on_batch_start(batch_size, queue_depth);
+
+                        // Process ALL available events in this batch.
+                        // Never check shutdown inside the inner loop — published events
+                        // must be fully consumed before stopping (LMAX Disruptor contract).
+                        while next_sequence <= available_sequence {
+                            let end_of_batch = next_sequence == available_sequence;
+
+                            // SAFETY: exclusive access to this sequence range by topology.
+                            let event =
+                                unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
+
+                            if let Err(e) =
+                                event_handler.on_event(event, next_sequence, end_of_batch)
+                            {
+                                #[cfg(debug_assertions)]
+                                eprintln!(
+                                    "Event processing error in thread '{thread_name}' at sequence {next_sequence}: {e:?}"
+                                );
+                                #[cfg(not(debug_assertions))]
+                                let _ = e;
+                            }
+
+                            next_sequence += 1;
+                        }
+
+                        // Publish progress once per batch (LMAX BatchEventProcessor).
                         consumer_sequence_clone.set(available_sequence);
+                    } else {
+                        if shutdown_flag.load(Ordering::Acquire) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
                     }
-                } else {
-                    // Barrier returned error (Alert on shutdown, or timeout).
-                    if shutdown_flag.load(Ordering::Acquire) {
-                        break;
-                    }
-                    // Small delay to avoid busy loop on transient errors
-                    std::thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
 
@@ -589,26 +659,27 @@ where
     (consumer_sequence, consumer)
 }
 
-type ConsumerStarter<E> = Box<
+type ConsumerStarter<E, W> = Box<
     dyn FnOnce(
             Arc<RingBuffer<E>>,
-            Arc<dyn SequenceBarrier>,
+            Arc<ProcessingSequenceBarrier<W>>,
             ConsumerThreadConfig,
         ) -> (Arc<Sequence>, Consumer)
         + Send,
 >;
 
-fn consumer_info_from_handler<E, H>(
+fn consumer_info_from_handler<E, H, W>(
     handler: H,
     thread_name: Option<String>,
     cpu_affinity: Option<usize>,
     stage_index: usize,
-) -> ConsumerInfo<E>
+) -> ConsumerInfo<E, W>
 where
     E: Send + Sync + 'static,
-    H: EventHandler<E> + Send + Sync + 'static,
+    H: EventHandler<E> + Send + 'static,
+    W: WaitStrategy + 'static,
 {
-    let starter: ConsumerStarter<E> = Box::new(move |ring_buffer, sequence_barrier, config| {
+    let starter: ConsumerStarter<E, W> = Box::new(move |ring_buffer, sequence_barrier, config| {
         start_consumer_thread(ring_buffer, sequence_barrier, handler, config)
     });
 
@@ -626,23 +697,25 @@ where
 /// of consumer threads. When dropped, it will attempt to gracefully
 /// shutdown all consumer threads.
 #[derive(Debug)]
-pub struct DisruptorHandle<E>
+pub struct DisruptorHandle<E, W>
 where
     E: Send + Sync + 'static,
+    W: WaitStrategy + 'static,
 {
     /// Core disruptor components
-    core: DisruptorCore<E>,
+    core: DisruptorCore<E, W>,
     /// The producer for publishing events
-    producer: SimpleProducer<E>,
+    producer: SimpleProducer<E, W>,
     /// Indicates whether shutdown() has been invoked
     is_shutdown: bool,
 }
 
-impl<E> DisruptorHandle<E>
+impl<E, W> DisruptorHandle<E, W>
 where
     E: Send + Sync + 'static,
+    W: WaitStrategy + 'static,
 {
-    fn new(core: DisruptorCore<E>) -> Self {
+    fn new(core: DisruptorCore<E, W>) -> Self {
         let producer = core.create_producer();
         Self {
             core,
@@ -655,19 +728,19 @@ where
     ///
     /// This is useful for multi-producer scenarios where you need multiple threads
     /// to publish events to the same ring buffer.
-    pub fn create_producer(&self) -> SimpleProducer<E> {
+    pub fn create_producer(&self) -> SimpleProducer<E, W> {
         self.core.create_producer()
     }
 
     /// Get a reference to the producer
-    pub fn producer(&mut self) -> &mut SimpleProducer<E> {
+    pub fn producer(&mut self) -> &mut SimpleProducer<E, W> {
         &mut self.producer
     }
 
     /// Consume the handle and return the producer
     ///
     /// Note: This will shutdown all consumer threads before returning the producer
-    pub fn into_producer(mut self) -> SimpleProducer<E> {
+    pub fn into_producer(mut self) -> SimpleProducer<E, W> {
         // Ensure the system is stopped before handing out the producer.
         self.shutdown();
 
@@ -759,9 +832,10 @@ where
     }
 }
 
-impl<E> Drop for DisruptorHandle<E>
+impl<E, W> Drop for DisruptorHandle<E, W>
 where
     E: Send + Sync + 'static,
+    W: WaitStrategy + 'static,
 {
     fn drop(&mut self) {
         if !self.is_shutdown {
@@ -771,11 +845,12 @@ where
 }
 
 /// Consumer information for the builder
-pub struct ConsumerInfo<E>
+pub struct ConsumerInfo<E, W>
 where
     E: Send + Sync + 'static,
+    W: WaitStrategy + 'static,
 {
-    starter: ConsumerStarter<E>,
+    starter: ConsumerStarter<E, W>,
     thread_name: Option<String>,
     cpu_affinity: Option<usize>,
     /// Logical stage index within the processing graph.
@@ -786,12 +861,12 @@ where
 struct SharedBuilderState<E, W>
 where
     E: Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + 'static,
+    W: WaitStrategy + 'static,
 {
     size: usize,
     slot_padding: SlotPadding,
     wait_strategy: W,
-    consumers: Vec<ConsumerInfo<E>>,
+    consumers: Vec<ConsumerInfo<E, W>>,
     current_thread_name: Option<String>,
     current_cpu_affinity: Option<usize>,
     current_stage_index: usize,
@@ -803,7 +878,7 @@ pub struct SingleProducerBuilder<State, E, F, W>
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + 'static,
+    W: WaitStrategy + 'static,
 {
     event_factory: F,
     shared: SharedBuilderState<E, W>,
@@ -815,7 +890,7 @@ pub struct DependentConsumerBuilder<E, F, W>
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + Clone + 'static,
+    W: WaitStrategy + Clone + 'static,
 {
     builder: SingleProducerBuilder<HasConsumers, E, F, W>,
 }
@@ -824,7 +899,7 @@ impl<State, E, F, W> SingleProducerBuilder<State, E, F, W>
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + 'static,
+    W: WaitStrategy + 'static,
 {
     /// Configure the physical ring slot padding strategy.
     ///
@@ -835,14 +910,18 @@ where
         self
     }
 
-    /// Enable or disable 64-byte cache-line padding for ring slots.
+    /// Enable or disable 128-byte cache-line padding for ring slots.
     ///
-    /// This is useful for small events in high-throughput unicast or pipeline
-    /// topologies where adjacent inline slots would otherwise share cache lines.
+    /// Maps to [`SlotPadding::CacheLine128`] when enabled — modern false-sharing
+    /// granularity on x86_64/aarch64 (matches `Sequence` / `CachePadded`). Use
+    /// [`Self::with_slot_padding`] for explicit `CacheLine64` if needed.
+    ///
+    /// Useful for small events in high-throughput unicast or pipeline topologies
+    /// where adjacent inline slots would otherwise share cache lines.
     #[must_use]
     pub fn with_cache_line_padding(self, enabled: bool) -> Self {
         self.with_slot_padding(if enabled {
-            SlotPadding::CacheLine64
+            SlotPadding::CacheLine128
         } else {
             SlotPadding::None
         })
@@ -853,7 +932,7 @@ impl<State, E, F, W> MultiProducerBuilder<State, E, F, W>
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + Clone + 'static,
+    W: WaitStrategy + Clone + 'static,
 {
     /// Configure the physical ring slot padding strategy.
     ///
@@ -864,11 +943,13 @@ where
         self
     }
 
-    /// Enable or disable 64-byte cache-line padding for ring slots.
+    /// Enable or disable 128-byte cache-line padding for ring slots.
+    ///
+    /// Maps to [`SlotPadding::CacheLine128`] when enabled. See single-producer docs.
     #[must_use]
     pub fn with_cache_line_padding(self, enabled: bool) -> Self {
         self.with_slot_padding(if enabled {
-            SlotPadding::CacheLine64
+            SlotPadding::CacheLine128
         } else {
             SlotPadding::None
         })
@@ -879,7 +960,7 @@ impl<E, F, W> DependentConsumerBuilder<E, F, W>
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + Clone + 'static,
+    W: WaitStrategy + Clone + 'static,
 {
     /// Set CPU core affinity for the next event handler
     #[must_use]
@@ -902,11 +983,11 @@ where
         self
     }
 
-    /// Enable or disable 64-byte cache-line padding for ring slots.
+    /// Enable or disable 128-byte cache-line padding for ring slots.
     #[must_use]
     pub fn with_cache_line_padding(self, enabled: bool) -> Self {
         self.with_slot_padding(if enabled {
-            SlotPadding::CacheLine64
+            SlotPadding::CacheLine128
         } else {
             SlotPadding::None
         })
@@ -953,7 +1034,7 @@ where
     }
 
     /// Build the Disruptor and return a DisruptorHandle
-    pub fn build(self) -> DisruptorHandle<E> {
+    pub fn build(self) -> DisruptorHandle<E, W> {
         self.builder.build()
     }
 }
@@ -962,7 +1043,7 @@ impl<E, F, W> SingleProducerBuilder<NoConsumers, E, F, W>
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + 'static,
+    W: WaitStrategy + 'static,
 {
     fn new(size: usize, event_factory: F, wait_strategy: W) -> Self {
         Self {
@@ -1102,7 +1183,7 @@ impl<E, F, W> SingleProducerBuilder<HasConsumers, E, F, W>
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + Clone + 'static,
+    W: WaitStrategy + Clone + 'static,
 {
     /// Set CPU core affinity for the next event handler
     #[must_use]
@@ -1188,7 +1269,7 @@ where
     /// Build the Disruptor and return a DisruptorHandle
     ///
     /// This creates the `RingBuffer`, `Sequencer`, and starts all event processors.
-    pub fn build(self) -> DisruptorHandle<E> {
+    pub fn build(self) -> DisruptorHandle<E, W> {
         // Use the unified factory function
         let core = create_disruptor_core(
             self.shared.size,
@@ -1208,7 +1289,7 @@ pub struct MultiProducerBuilder<State, E, F, W>
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + Clone + 'static,
+    W: WaitStrategy + Clone + 'static,
 {
     event_factory: F,
     shared: SharedBuilderState<E, W>,
@@ -1219,7 +1300,7 @@ impl<E, F, W> MultiProducerBuilder<NoConsumers, E, F, W>
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + Clone + 'static,
+    W: WaitStrategy + Clone + 'static,
 {
     fn new(size: usize, event_factory: F, wait_strategy: W) -> Self {
         Self {
@@ -1307,7 +1388,7 @@ impl<E, F, W> MultiProducerBuilder<HasConsumers, E, F, W>
 where
     E: Send + Sync + 'static,
     F: Fn() -> E + Send + Sync + 'static,
-    W: WaitStrategy + Send + Sync + Clone + 'static,
+    W: WaitStrategy + Clone + 'static,
 {
     /// Set CPU core affinity for the next event handler
     #[must_use]
@@ -1360,7 +1441,7 @@ where
     /// Build the Disruptor and return a DisruptorHandle
     ///
     /// This creates the `RingBuffer`, `MultiProducerSequencer`, and starts all event processors.
-    pub fn build(self) -> DisruptorHandle<E> {
+    pub fn build(self) -> DisruptorHandle<E, W> {
         // Use the unified factory function to create the core components and start consumer threads
         let core = create_disruptor_core(
             self.shared.size,
@@ -1379,22 +1460,24 @@ where
 ///
 /// This implementation now properly coordinates multiple producers using a shared sequencer.
 #[derive(Clone)]
-pub struct CloneableProducer<E>
+pub struct CloneableProducer<E, W>
 where
     E: Send + Sync,
+    W: WaitStrategy + 'static,
 {
     ring_buffer: Arc<RingBuffer<E>>,
-    sequencer: SequencerEnum,
+    sequencer: SequencerEnum<W>,
 }
 
-impl<E> CloneableProducer<E>
+impl<E, W> CloneableProducer<E, W>
 where
     E: Send + Sync,
+    W: WaitStrategy + 'static,
 {
     /// Creates a new CloneableProducer with the given ring buffer and sequencer
     ///
     /// This constructor allows creating custom producer instances from existing components
-    pub fn new(ring_buffer: Arc<RingBuffer<E>>, sequencer: SequencerEnum) -> Self {
+    pub fn new(ring_buffer: Arc<RingBuffer<E>>, sequencer: SequencerEnum<W>) -> Self {
         Self {
             ring_buffer,
             sequencer,
@@ -1405,14 +1488,15 @@ where
     ///
     /// Each thread should call this to get its own producer instance.
     /// This avoids the lifetime issues with shared mutable access.
-    pub fn create_producer(&self) -> SimpleProducer<E> {
+    pub fn create_producer(&self) -> SimpleProducer<E, W> {
         SimpleProducer::new(self.ring_buffer.clone(), self.sequencer.clone())
     }
 }
 
-impl<E> CloneableProducer<E>
+impl<E, W> CloneableProducer<E, W>
 where
     E: Send + Sync,
+    W: WaitStrategy + 'static,
 {
     /// Publish an event using a closure (convenience API).
     ///
@@ -1596,7 +1680,7 @@ mod tests {
         let builder = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
             .with_cache_line_padding(true);
 
-        assert_eq!(builder.shared.slot_padding, SlotPadding::CacheLine64);
+        assert_eq!(builder.shared.slot_padding, SlotPadding::CacheLine128);
     }
 
     #[test]
@@ -1627,7 +1711,7 @@ mod tests {
 
         assert_eq!(
             disruptor.core.ring_buffer.slot_padding(),
-            SlotPadding::CacheLine64
+            SlotPadding::CacheLine128
         );
 
         disruptor.publish(|event| {
@@ -2487,26 +2571,20 @@ mod tests {
 
         wait_until(
             Duration::from_secs(1),
-            || {
-                closure_total.load(Ordering::SeqCst) == 5
-                    && stateful_total.load(Ordering::SeqCst) == 5
-            },
-            "both mixed handlers to process all events",
+            || closure_total.load(Ordering::SeqCst) + stateful_total.load(Ordering::SeqCst) == 5,
+            "work-pool mixed handlers to process all events",
         );
 
         // Shutdown
         disruptor_handle.shutdown();
 
-        // Verify both handlers processed all events
+        // WorkerPool scheme A: same-stage handlers partition events via CAS claim
+        let stateful_n = stateful_total.load(Ordering::SeqCst);
+        let closure_n = closure_total.load(Ordering::SeqCst);
         assert_eq!(
-            stateful_total.load(Ordering::SeqCst),
+            stateful_n + closure_n,
             5,
-            "Stateful handler should process all events"
-        );
-        assert_eq!(
-            closure_total.load(Ordering::SeqCst),
-            5,
-            "Closure handler should process all events"
+            "mixed handlers must jointly process all events exactly once"
         );
 
         println!("Mixed handler types test completed successfully");
@@ -3060,8 +3138,13 @@ mod tests {
         use std::sync::Arc;
         use std::time::{Duration, Instant};
 
+        // LMAX WorkerPool scheme A: parallel same-stage handlers CAS-claim sequences
+        // exclusively (work-sharing). Downstream waits on min(worker sequences).
+        let upstream_claims = Arc::new(AtomicUsize::new(0));
+        let upstream_claims_clone = Arc::clone(&upstream_claims);
+        let upstream_claims_clone2 = Arc::clone(&upstream_claims);
         let downstream_processed = Arc::new(AtomicUsize::new(0));
-        let downstream_processed_clone = downstream_processed.clone();
+        let downstream_processed_clone = Arc::clone(&downstream_processed);
 
         let mut disruptor_handle =
             build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
@@ -3069,13 +3152,15 @@ mod tests {
                 .handle_events_with(
                     move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
                         std::thread::sleep(Duration::from_millis(25));
-                        event.data.push_str("|slow");
+                        event.data.push_str("|worker");
+                        upstream_claims_clone.fetch_add(1, Ordering::SeqCst);
                     },
                 )
                 .thread_name("parallel-fast")
                 .handle_events_with(
                     move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
-                        event.data.push_str("|fast");
+                        event.data.push_str("|worker");
+                        upstream_claims_clone2.fetch_add(1, Ordering::SeqCst);
                     },
                 )
                 .and_then()
@@ -3083,30 +3168,30 @@ mod tests {
                 .handle_events_with(
                     move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
                         assert!(
-                            event.data.contains("|slow"),
-                            "downstream stage must wait for the slow upstream handler"
-                        );
-                        assert!(
-                            event.data.contains("|fast"),
-                            "downstream stage must observe every parallel upstream mutation"
+                            event.data.contains("|worker"),
+                            "downstream must observe the exclusive upstream work-claim mutation"
                         );
                         downstream_processed_clone.fetch_add(1, Ordering::SeqCst);
                     },
                 )
                 .build();
 
-        disruptor_handle.publish(|event| {
-            event.value = 1;
-            event.data.clear();
-        });
+        // Publish several events so both workers can claim some work
+        for i in 0..4 {
+            disruptor_handle.publish(|event| {
+                event.value = i;
+                event.data.clear();
+            });
+        }
 
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while downstream_processed.load(Ordering::SeqCst) < 1 && Instant::now() < deadline {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while downstream_processed.load(Ordering::SeqCst) < 4 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
 
         disruptor_handle.shutdown();
-        assert_eq!(downstream_processed.load(Ordering::SeqCst), 1);
+        assert_eq!(upstream_claims.load(Ordering::SeqCst), 4);
+        assert_eq!(downstream_processed.load(Ordering::SeqCst), 4);
     }
 
     #[test]
@@ -3115,8 +3200,13 @@ mod tests {
         use std::sync::Arc;
         use std::time::{Duration, Instant};
 
+        // WorkerPool scheme A on a dependent stage: workers share the upstream
+        // barrier and CAS-claim sequences for exclusive processing.
+        let mid_claims = Arc::new(AtomicUsize::new(0));
+        let mid_a = Arc::clone(&mid_claims);
+        let mid_b = Arc::clone(&mid_claims);
         let final_stage_processed = Arc::new(AtomicUsize::new(0));
-        let final_stage_processed_clone = final_stage_processed.clone();
+        let final_stage_processed_clone = Arc::clone(&final_stage_processed);
 
         let mut disruptor_handle =
             build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
@@ -3131,21 +3221,23 @@ mod tests {
                 .handle_events_with(
                     move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
                         assert!(
-                    event.data.contains("|root"),
-                    "every handler in the dependent stage must wait for the full upstream stage"
-                );
-                        std::thread::sleep(Duration::from_millis(20));
-                        event.data.push_str("|left");
+                            event.data.contains("|root"),
+                            "work-claim handlers must wait for the full upstream stage"
+                        );
+                        std::thread::sleep(Duration::from_millis(5));
+                        event.data.push_str("|mid");
+                        mid_a.fetch_add(1, Ordering::SeqCst);
                     },
                 )
                 .thread_name("right")
                 .handle_events_with(
                     move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
                         assert!(
-                    event.data.contains("|root"),
-                    "parallel handlers in the same dependent stage must share the upstream barrier"
-                );
-                        event.data.push_str("|right");
+                            event.data.contains("|root"),
+                            "parallel workers share the upstream barrier"
+                        );
+                        event.data.push_str("|mid");
+                        mid_b.fetch_add(1, Ordering::SeqCst);
                     },
                 )
                 .and_then()
@@ -3153,25 +3245,30 @@ mod tests {
                 .handle_events_with(
                     move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
                         assert!(event.data.contains("|root"));
-                        assert!(event.data.contains("|left"));
-                        assert!(event.data.contains("|right"));
+                        assert!(
+                            event.data.contains("|mid"),
+                            "final stage sees exclusive mid-stage mutation"
+                        );
                         final_stage_processed_clone.fetch_add(1, Ordering::SeqCst);
                     },
                 )
                 .build();
 
-        disruptor_handle.publish(|event| {
-            event.value = 7;
-            event.data.clear();
-        });
+        for i in 0..4 {
+            disruptor_handle.publish(|event| {
+                event.value = i;
+                event.data.clear();
+            });
+        }
 
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while final_stage_processed.load(Ordering::SeqCst) < 1 && Instant::now() < deadline {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while final_stage_processed.load(Ordering::SeqCst) < 4 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
 
         disruptor_handle.shutdown();
-        assert_eq!(final_stage_processed.load(Ordering::SeqCst), 1);
+        assert_eq!(mid_claims.load(Ordering::SeqCst), 4);
+        assert_eq!(final_stage_processed.load(Ordering::SeqCst), 4);
     }
 
     #[test]
@@ -3666,36 +3763,30 @@ mod tests {
         wait_until(
             Duration::from_secs(1),
             || {
-                consumer1_count.load(Ordering::SeqCst) == 10
-                    && consumer2_count.load(Ordering::SeqCst) == 10
+                consumer1_count.load(Ordering::SeqCst) + consumer2_count.load(Ordering::SeqCst)
+                    == 10
             },
-            "both parallel consumers to process all events",
+            "work-pool consumers to claim and process all events",
         );
 
         // Shutdown
         disruptor_handle.shutdown();
 
-        // Verify both consumers processed events
+        // WorkerPool scheme A: each event is claimed by exactly one worker
         let consumer1_processed = consumer1_count.load(Ordering::SeqCst);
         let consumer2_processed = consumer2_count.load(Ordering::SeqCst);
 
-        // In LMAX Disruptor, parallel consumers each process all events
-        // So each consumer should process all 10 events
         assert_eq!(
-            consumer1_processed, 10,
-            "Consumer 1 should process all 10 events"
+            consumer1_processed + consumer2_processed,
+            10,
+            "work-pool workers must jointly process all 10 events exactly once"
         );
-        assert_eq!(
-            consumer2_processed, 10,
-            "Consumer 2 should process all 10 events"
-        );
+        assert!(consumer1_processed > 0 || consumer2_processed > 0);
 
         println!("✅ Multi-core CPU affinity test passed:");
         println!("   Consumer on core 0 processed: {consumer1_processed} events");
         println!("   Consumer on core 1 processed: {consumer2_processed} events");
-        println!(
-            "   Both consumers processed all events in parallel (correct LMAX Disruptor behavior)"
-        );
+        println!("   Work-pool CAS claim split work across workers (LMAX WorkerPool scheme A)");
     }
 
     #[test]

@@ -501,7 +501,9 @@ impl TryFrom<CliConfig> for ResolvedConfig {
         if events_total == 0 {
             return Err(String::from("events_total must be > 0"));
         }
-        if scenario == Scenario::MpscBatch && events_total % MPSC_PRODUCER_COUNT as u64 != 0 {
+        if scenario == Scenario::MpscBatch
+            && !events_total.is_multiple_of(MPSC_PRODUCER_COUNT as u64)
+        {
             return Err(format!(
                 "mpsc_batch requires events_total divisible by {MPSC_PRODUCER_COUNT}, got {events_total}"
             ));
@@ -732,35 +734,36 @@ where
     }
 }
 
-struct LowLevelSingleProducerRuntime<E> {
+struct LowLevelSingleProducerRuntime<E, W>
+where
+    W: WaitStrategy + 'static,
+{
     ring_buffer: Arc<RingBuffer<E>>,
-    sequencer: Arc<SingleProducerSequencer>,
+    sequencer: Arc<SingleProducerSequencer<W>>,
     sequence_barrier: Arc<dyn SequenceBarrier>,
     consumer_sequence: Arc<Sequence>,
     shutdown_flag: Arc<AtomicBool>,
     consumer_handle: thread::JoinHandle<Result<(), String>>,
 }
 
-impl<E> LowLevelSingleProducerRuntime<E>
+impl<E, W> LowLevelSingleProducerRuntime<E, W>
 where
     E: UnicastEvent,
+    W: WaitStrategy + 'static,
 {
-    fn new<W>(
+    fn new(
         buffer_size: usize,
         wait_strategy: W,
         consumer_mode: ConsumerMode,
         ready_count: Arc<AtomicU64>,
         processed: Arc<AtomicU64>,
         checksum: Arc<AtomicI64>,
-    ) -> Result<Self, String>
-    where
-        W: WaitStrategy + Send + Sync + Clone + 'static,
-    {
+    ) -> Result<Self, String> {
         let ring_buffer = Arc::new(
             RingBuffer::new(buffer_size, DefaultEventFactory::<E>::new())
                 .map_err(|error| format!("failed to create direct ring buffer: {error:?}"))?,
         );
-        let wait_strategy_arc: Arc<dyn WaitStrategy> = Arc::new(wait_strategy);
+        let wait_strategy_arc = Arc::new(wait_strategy);
         let sequencer = Arc::new(SingleProducerSequencer::new(
             buffer_size,
             Arc::clone(&wait_strategy_arc),
@@ -1645,7 +1648,7 @@ where
         let processed = Arc::new(AtomicU64::new(0));
         let checksum = Arc::new(AtomicI64::new(0));
 
-        let runtime = LowLevelSingleProducerRuntime::<E>::new(
+        let runtime: LowLevelSingleProducerRuntime<E, _> = LowLevelSingleProducerRuntime::new(
             config.buffer_size,
             wait_strategy.clone(),
             ConsumerMode::DirectPerBatch,
@@ -1720,7 +1723,7 @@ where
         let processed = Arc::new(AtomicU64::new(0));
         let checksum = Arc::new(AtomicI64::new(0));
 
-        let runtime = LowLevelSingleProducerRuntime::<E>::new(
+        let runtime: LowLevelSingleProducerRuntime<E, _> = LowLevelSingleProducerRuntime::new(
             config.buffer_size,
             wait_strategy.clone(),
             ConsumerMode::DirectPerBatch,
@@ -1813,7 +1816,7 @@ where
         let processed = Arc::new(AtomicU64::new(0));
         let checksum = Arc::new(AtomicI64::new(0));
 
-        let runtime = LowLevelSingleProducerRuntime::<E>::new(
+        let runtime: LowLevelSingleProducerRuntime<E, _> = LowLevelSingleProducerRuntime::new(
             config.buffer_size,
             wait_strategy.clone(),
             config.consumer_mode,
@@ -1902,7 +1905,7 @@ where
         let processed = Arc::new(AtomicU64::new(0));
         let checksum = Arc::new(AtomicI64::new(0));
 
-        let runtime = LowLevelSingleProducerRuntime::<E>::new(
+        let runtime: LowLevelSingleProducerRuntime<E, _> = LowLevelSingleProducerRuntime::new(
             config.buffer_size,
             wait_strategy.clone(),
             config.consumer_mode,
@@ -2280,9 +2283,9 @@ fn summarize_runs(runs: &[RoundRecord]) -> SummaryStats {
 
     let mut sorted = measured.clone();
     sorted.sort_by(f64::total_cmp);
-    let median = if sorted.len() % 2 == 0 {
+    let median = if sorted.len().is_multiple_of(2) {
         let upper = sorted.len() / 2;
-        (sorted[upper - 1] + sorted[upper]) / 2.0
+        f64::midpoint(sorted[upper - 1], sorted[upper])
     } else {
         sorted[sorted.len() / 2]
     };

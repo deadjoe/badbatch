@@ -26,7 +26,10 @@ use badbatch::disruptor::{
 
 fn create_barrier(
     buffer_size: usize,
-) -> (Arc<MultiProducerSequencer>, Arc<ProcessingSequenceBarrier>) {
+) -> (
+    Arc<MultiProducerSequencer<BusySpinWaitStrategy>>,
+    Arc<ProcessingSequenceBarrier<BusySpinWaitStrategy>>,
+) {
     let wait_strategy = Arc::new(BusySpinWaitStrategy::new());
     let sequencer = Arc::new(MultiProducerSequencer::new(
         buffer_size,
@@ -41,7 +44,10 @@ fn create_barrier(
     (sequencer, barrier)
 }
 
-fn claim_first_n(sequencer: &Arc<MultiProducerSequencer>, count: usize) -> Vec<i64> {
+fn claim_first_n(
+    sequencer: &Arc<MultiProducerSequencer<BusySpinWaitStrategy>>,
+    count: usize,
+) -> Vec<i64> {
     (0..count).map(|_| sequencer.next().unwrap()).collect()
 }
 

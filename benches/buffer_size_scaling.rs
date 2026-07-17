@@ -187,7 +187,7 @@ fn benchmark_fast_processing_scaling(
             factory,
             buffer_size,
             ProducerType::Single,
-            Box::new(BusySpinWaitStrategy::new()),
+            BusySpinWaitStrategy::new(),
         )
         .unwrap()
         .handle_events_with(handler)
@@ -244,7 +244,7 @@ fn benchmark_medium_processing_scaling(
             factory,
             buffer_size,
             ProducerType::Single,
-            Box::new(YieldingWaitStrategy::new()),
+            YieldingWaitStrategy::new(),
         )
         .unwrap()
         .handle_events_with(handler)
@@ -303,7 +303,7 @@ fn benchmark_slow_processing_scaling(
             factory,
             buffer_size,
             ProducerType::Single,
-            Box::new(YieldingWaitStrategy::new()),
+            YieldingWaitStrategy::new(),
         )
         .unwrap()
         .handle_events_with(handler)
@@ -357,7 +357,7 @@ fn benchmark_memory_scaling(group: &mut BenchmarkGroup<WallTime>, buffer_size: u
                 factory,
                 buffer_size,
                 ProducerType::Single,
-                Box::new(BusySpinWaitStrategy::new()),
+                BusySpinWaitStrategy::new(),
             )
             .unwrap()
             .handle_events_with(handler)
@@ -413,7 +413,7 @@ fn benchmark_buffer_utilization(
             factory,
             buffer_size,
             ProducerType::Single,
-            Box::new(BusySpinWaitStrategy::new()),
+            BusySpinWaitStrategy::new(),
         )
         .unwrap()
         .handle_events_with(handler)

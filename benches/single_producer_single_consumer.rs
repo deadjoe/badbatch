@@ -171,7 +171,7 @@ fn benchmark_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pa
         factory,
         BUFFER_SIZE,
         ProducerType::Single,
-        Box::new(BusySpinWaitStrategy::new()),
+        BusySpinWaitStrategy::new(),
     )
     .unwrap()
     .handle_events_with(handler)
@@ -230,7 +230,7 @@ fn benchmark_yielding(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
         factory,
         BUFFER_SIZE,
         ProducerType::Single,
-        Box::new(YieldingWaitStrategy::new()),
+        YieldingWaitStrategy::new(),
     )
     .unwrap()
     .handle_events_with(handler)
@@ -289,7 +289,7 @@ fn benchmark_blocking(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
         factory,
         BUFFER_SIZE,
         ProducerType::Single,
-        Box::new(BlockingWaitStrategy::new()),
+        BlockingWaitStrategy::new(),
     )
     .unwrap()
     .handle_events_with(handler)
@@ -349,7 +349,7 @@ fn benchmark_sleeping(group: &mut BenchmarkGroup<WallTime>, burst_size: u64, pau
         factory,
         BUFFER_SIZE,
         ProducerType::Single,
-        Box::new(SleepingWaitStrategy::new()),
+        SleepingWaitStrategy::new(),
     )
     .unwrap()
     .handle_events_with(handler)

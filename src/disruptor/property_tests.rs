@@ -380,7 +380,7 @@ mod disruptor_lifecycle_properties {
                 factory,
                 32,
                 ProducerType::Single,
-                Box::new(BlockingWaitStrategy::new()),
+                BlockingWaitStrategy::new(),
             )
             .unwrap()
             .handle_events_with(handler)
@@ -483,8 +483,15 @@ mod builder_dependency_properties {
             let expected_sequences =
                 (0..i64::try_from(event_count).expect("event count fits in i64"))
                     .collect::<Vec<_>>();
-            prop_assert_eq!(stage1_a.lock().unwrap().clone(), expected_sequences.clone());
-            prop_assert_eq!(stage1_b.lock().unwrap().clone(), expected_sequences.clone());
+            // WorkerPool scheme A: stage-1 workers partition sequences (union covers all).
+            let mut stage1_all = stage1_a.lock().unwrap().clone();
+            stage1_all.extend(stage1_b.lock().unwrap().clone());
+            stage1_all.sort_unstable();
+            prop_assert_eq!(stage1_all, expected_sequences.clone());
+            prop_assert_eq!(
+                stage1_a.lock().unwrap().len() + stage1_b.lock().unwrap().len(),
+                event_count
+            );
             prop_assert_eq!(stage2.lock().unwrap().clone(), expected_sequences);
         }
     }

@@ -12,11 +12,12 @@ use std::sync::Arc;
 /// This is much simpler than the full LMAX WaitStrategy interface,
 /// focusing on the core waiting behavior without complex dependencies.
 pub trait SimpleWaitStrategy: Copy + Send + Sync + std::fmt::Debug {
-    /// Wait for a sequence to become available
+    /// Idle / backoff while a sequence is not yet available.
     ///
-    /// This is called when a consumer is waiting for new events.
-    /// The implementation should decide how to wait (busy spin, yield, sleep, etc.)
-    fn wait_for(&self, sequence: i64);
+    /// Named `backoff` (not `wait_for`) to avoid colliding with
+    /// [`crate::disruptor::WaitStrategy::wait_for`] once these types implement
+    /// the full wait-strategy trait.
+    fn backoff(&self);
 }
 
 /// Busy spin wait strategy - lowest possible latency
@@ -28,7 +29,7 @@ pub struct BusySpin;
 
 impl SimpleWaitStrategy for BusySpin {
     #[inline]
-    fn wait_for(&self, _sequence: i64) {
+    fn backoff(&self) {
         // Do nothing, true busy spin for lowest latency
     }
 }
@@ -43,7 +44,7 @@ pub struct BusySpinWithHint;
 
 impl SimpleWaitStrategy for BusySpinWithHint {
     #[inline]
-    fn wait_for(&self, _sequence: i64) {
+    fn backoff(&self) {
         hint::spin_loop();
     }
 }
@@ -74,7 +75,7 @@ impl Default for Yielding {
 }
 
 impl SimpleWaitStrategy for Yielding {
-    fn wait_for(&self, _sequence: i64) {
+    fn backoff(&self) {
         // Try busy spinning first
         for _ in 0..self.spin_tries {
             hint::spin_loop();
@@ -110,7 +111,7 @@ impl Default for Sleeping {
 }
 
 impl SimpleWaitStrategy for Sleeping {
-    fn wait_for(&self, _sequence: i64) {
+    fn backoff(&self) {
         std::thread::sleep(std::time::Duration::from_nanos(self.sleep_nanos));
     }
 }
@@ -155,7 +156,7 @@ where
             if alerted.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(crate::disruptor::DisruptorError::Alert);
             }
-            self.strategy.wait_for(sequence);
+            self.strategy.backoff();
             available = cursor.get();
         }
 
@@ -168,7 +169,7 @@ where
                 if min_dep >= sequence {
                     break;
                 }
-                self.strategy.wait_for(sequence);
+                self.strategy.backoff();
             }
         }
 
@@ -208,7 +209,7 @@ where
                 return Err(crate::disruptor::DisruptorError::Timeout);
             }
             // Backoff according to strategy
-            self.strategy.wait_for(sequence);
+            self.strategy.backoff();
         }
     }
 
@@ -237,12 +238,250 @@ where
             if available >= sequence {
                 return Ok(available);
             }
-            self.strategy.wait_for(sequence);
+            self.strategy.backoff();
         }
     }
 
     fn signal_all_when_blocking(&self) {
         // Simple strategies don't need signaling
+    }
+
+    #[inline]
+    fn needs_signal(&self) -> bool {
+        false
+    }
+}
+
+// Direct WaitStrategy impls so simplified ZSTs can be passed to `build_*` without adapters.
+impl crate::disruptor::WaitStrategy for BusySpin {
+    fn wait_for_with_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        alerted: &std::sync::atomic::AtomicBool,
+    ) -> crate::disruptor::Result<i64> {
+        SimpleWaitStrategyAdapter::new(*self).wait_for_with_alert(
+            sequence,
+            cursor,
+            dependent_sequences,
+            alerted,
+        )
+    }
+
+    fn wait_for_with_timeout_and_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        timeout: std::time::Duration,
+        alerted: &std::sync::atomic::AtomicBool,
+    ) -> crate::disruptor::Result<i64> {
+        SimpleWaitStrategyAdapter::new(*self).wait_for_with_timeout_and_alert(
+            sequence,
+            cursor,
+            dependent_sequences,
+            timeout,
+            alerted,
+        )
+    }
+
+    fn wait_for_with_shutdown_and_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        shutdown_flag: &std::sync::atomic::AtomicBool,
+        alerted: &std::sync::atomic::AtomicBool,
+    ) -> crate::disruptor::Result<i64> {
+        SimpleWaitStrategyAdapter::new(*self).wait_for_with_shutdown_and_alert(
+            sequence,
+            cursor,
+            dependent_sequences,
+            shutdown_flag,
+            alerted,
+        )
+    }
+
+    fn signal_all_when_blocking(&self) {}
+
+    #[inline]
+    fn needs_signal(&self) -> bool {
+        false
+    }
+}
+
+impl crate::disruptor::WaitStrategy for BusySpinWithHint {
+    fn wait_for_with_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        alerted: &std::sync::atomic::AtomicBool,
+    ) -> crate::disruptor::Result<i64> {
+        SimpleWaitStrategyAdapter::new(*self).wait_for_with_alert(
+            sequence,
+            cursor,
+            dependent_sequences,
+            alerted,
+        )
+    }
+
+    fn wait_for_with_timeout_and_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        timeout: std::time::Duration,
+        alerted: &std::sync::atomic::AtomicBool,
+    ) -> crate::disruptor::Result<i64> {
+        SimpleWaitStrategyAdapter::new(*self).wait_for_with_timeout_and_alert(
+            sequence,
+            cursor,
+            dependent_sequences,
+            timeout,
+            alerted,
+        )
+    }
+
+    fn wait_for_with_shutdown_and_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        shutdown_flag: &std::sync::atomic::AtomicBool,
+        alerted: &std::sync::atomic::AtomicBool,
+    ) -> crate::disruptor::Result<i64> {
+        SimpleWaitStrategyAdapter::new(*self).wait_for_with_shutdown_and_alert(
+            sequence,
+            cursor,
+            dependent_sequences,
+            shutdown_flag,
+            alerted,
+        )
+    }
+
+    fn signal_all_when_blocking(&self) {}
+
+    #[inline]
+    fn needs_signal(&self) -> bool {
+        false
+    }
+}
+
+impl crate::disruptor::WaitStrategy for Yielding {
+    fn wait_for_with_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        alerted: &std::sync::atomic::AtomicBool,
+    ) -> crate::disruptor::Result<i64> {
+        SimpleWaitStrategyAdapter::new(*self).wait_for_with_alert(
+            sequence,
+            cursor,
+            dependent_sequences,
+            alerted,
+        )
+    }
+
+    fn wait_for_with_timeout_and_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        timeout: std::time::Duration,
+        alerted: &std::sync::atomic::AtomicBool,
+    ) -> crate::disruptor::Result<i64> {
+        SimpleWaitStrategyAdapter::new(*self).wait_for_with_timeout_and_alert(
+            sequence,
+            cursor,
+            dependent_sequences,
+            timeout,
+            alerted,
+        )
+    }
+
+    fn wait_for_with_shutdown_and_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        shutdown_flag: &std::sync::atomic::AtomicBool,
+        alerted: &std::sync::atomic::AtomicBool,
+    ) -> crate::disruptor::Result<i64> {
+        SimpleWaitStrategyAdapter::new(*self).wait_for_with_shutdown_and_alert(
+            sequence,
+            cursor,
+            dependent_sequences,
+            shutdown_flag,
+            alerted,
+        )
+    }
+
+    fn signal_all_when_blocking(&self) {}
+
+    #[inline]
+    fn needs_signal(&self) -> bool {
+        false
+    }
+}
+
+impl crate::disruptor::WaitStrategy for Sleeping {
+    fn wait_for_with_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        alerted: &std::sync::atomic::AtomicBool,
+    ) -> crate::disruptor::Result<i64> {
+        SimpleWaitStrategyAdapter::new(*self).wait_for_with_alert(
+            sequence,
+            cursor,
+            dependent_sequences,
+            alerted,
+        )
+    }
+
+    fn wait_for_with_timeout_and_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        timeout: std::time::Duration,
+        alerted: &std::sync::atomic::AtomicBool,
+    ) -> crate::disruptor::Result<i64> {
+        SimpleWaitStrategyAdapter::new(*self).wait_for_with_timeout_and_alert(
+            sequence,
+            cursor,
+            dependent_sequences,
+            timeout,
+            alerted,
+        )
+    }
+
+    fn wait_for_with_shutdown_and_alert(
+        &self,
+        sequence: i64,
+        cursor: &Sequence,
+        dependent_sequences: &[Arc<Sequence>],
+        shutdown_flag: &std::sync::atomic::AtomicBool,
+        alerted: &std::sync::atomic::AtomicBool,
+    ) -> crate::disruptor::Result<i64> {
+        SimpleWaitStrategyAdapter::new(*self).wait_for_with_shutdown_and_alert(
+            sequence,
+            cursor,
+            dependent_sequences,
+            shutdown_flag,
+            alerted,
+        )
+    }
+
+    fn signal_all_when_blocking(&self) {}
+
+    #[inline]
+    fn needs_signal(&self) -> bool {
+        false
     }
 }
 
@@ -288,28 +527,28 @@ mod tests {
     fn test_busy_spin_strategy() {
         let strategy = BusySpin;
         // Should not block or panic
-        strategy.wait_for(42);
+        strategy.backoff();
     }
 
     #[test]
     fn test_busy_spin_with_hint_strategy() {
         let strategy = BusySpinWithHint;
         // Should not block or panic
-        strategy.wait_for(42);
+        strategy.backoff();
     }
 
     #[test]
     fn test_yielding_strategy() {
         let strategy = Yielding::new(5);
         // Should not block indefinitely
-        strategy.wait_for(42);
+        strategy.backoff();
     }
 
     #[test]
     fn test_sleeping_strategy() {
         let strategy = Sleeping::new(1000); // 1 microsecond
         let start = std::time::Instant::now();
-        strategy.wait_for(42);
+        strategy.backoff();
         let elapsed = start.elapsed();
         // Should have slept for at least some time
         assert!(elapsed.as_nanos() >= 1000);

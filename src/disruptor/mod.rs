@@ -74,6 +74,9 @@ pub mod thread_management;
 // Elegant consumer handling (inspired by disruptor-rs)
 pub mod elegant_consumer;
 
+// User-driven event polling (inspired by disruptor-rs)
+pub mod event_poller;
+
 // Main Disruptor DSL
 #[allow(clippy::module_inception)]
 pub mod disruptor;
@@ -101,6 +104,7 @@ pub use wait_strategy::{
 // Re-export builder functions and producer types (inspired by disruptor-rs)
 pub use builder::{build_multi_producer, build_single_producer, CloneableProducer};
 pub use elegant_consumer::ElegantConsumer;
+pub use event_poller::{open_single_producer_poller, EventBatch, EventPoller, Polling};
 pub use producer::{MissingFreeSlots, Producer, RingBufferFull, SimpleProducer};
 
 /// The initial cursor value for sequences (matches LMAX Disruptor)
