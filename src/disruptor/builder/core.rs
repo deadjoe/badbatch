@@ -63,8 +63,11 @@ where
         self.consumers.len()
     }
 
-    /// Signal shutdown and join all consumer threads.
-    pub fn shutdown(&mut self) {
+    /// Abrupt stop: signal shutdown and join all consumer threads.
+    ///
+    /// Published-but-unconsumed events are **not** drained (LMAX `halt()`
+    /// semantics). Use [`Self::shutdown_with_timeout`] for a draining stop.
+    pub fn halt(&mut self) {
         if self.shutdown_flag.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -85,6 +88,65 @@ where
 
         for sequence in self.gating_sequences.drain(..) {
             self.sequencer.remove_gating_sequence(sequence);
+        }
+    }
+
+    /// Draining stop (LMAX `shutdown()` semantics): wait until every consumer
+    /// has processed the published backlog, then halt.
+    ///
+    /// The drain aborts early — proceeding straight to halt — when the
+    /// pipeline is poisoned or a consumer thread has already exited (its
+    /// sequence would never advance), or when `timeout` elapses.
+    ///
+    /// # Errors
+    /// - [`crate::disruptor::DisruptorError::Poisoned`] if the pipeline was poisoned
+    /// - [`crate::disruptor::DisruptorError::ShutdownError`] if a consumer died before draining
+    /// - [`crate::disruptor::DisruptorError::Timeout`] if `timeout` elapsed with backlog remaining
+    pub fn shutdown_with_timeout(
+        &mut self,
+        timeout: Option<std::time::Duration>,
+    ) -> crate::disruptor::Result<()> {
+        let drained = self.drain(timeout);
+        self.halt();
+        drained
+    }
+
+    /// Wait until all gating sequences reach the cursor (backlog consumed).
+    fn drain(&self, timeout: Option<std::time::Duration>) -> crate::disruptor::Result<()> {
+        if self.shutdown_flag.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let deadline = timeout.map(|d| std::time::Instant::now() + d);
+        loop {
+            if self.sequencer.is_poisoned() {
+                return Err(crate::disruptor::DisruptorError::Poisoned);
+            }
+            if self.consumers.iter().any(|c| {
+                c.join_handle
+                    .as_ref()
+                    .is_some_and(std::thread::JoinHandle::is_finished)
+            }) {
+                return Err(crate::disruptor::DisruptorError::ShutdownError(
+                    "consumer thread exited before the backlog was drained".to_string(),
+                ));
+            }
+
+            // Note: for multi-producer sequencers the cursor tracks the highest
+            // *claimed* sequence; callers must stop publishing before shutdown
+            // or a pending claim can stall the drain until timeout.
+            let cursor = self.sequencer.get_cursor().get();
+            let consumed =
+                Sequence::get_minimum_sequence_with_default(&self.gating_sequences, cursor);
+            if consumed >= cursor {
+                return Ok(());
+            }
+
+            if let Some(deadline) = deadline {
+                if std::time::Instant::now() >= deadline {
+                    return Err(crate::disruptor::DisruptorError::Timeout);
+                }
+            }
+            std::thread::yield_now();
         }
     }
 

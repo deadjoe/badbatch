@@ -68,9 +68,7 @@ fn single_mode_handle_publishes() {
     for _ in 0..10 {
         handle.publish(|event| event.value = 1).unwrap();
     }
-    // shutdown() does not drain the backlog (known P1 semantics); wait for
-    // consumption before shutting down.
-    wait_for_count(&seen, 10);
+    // shutdown() drains the published backlog (P1 round) — no manual wait.
     handle.shutdown();
 
     assert_eq!(seen.load(Ordering::Relaxed), 10);
@@ -102,21 +100,8 @@ fn multi_mode_one_producer_per_thread() {
     for t in threads {
         t.join().unwrap();
     }
-    wait_for_count(&seen, 200);
+    // shutdown() drains the published backlog (P1 round) — no manual wait.
     handle.shutdown();
 
     assert_eq!(seen.load(Ordering::Relaxed), 200);
-}
-
-/// Spin (with a 5s deadline) until the handler-observed count reaches `expected`.
-fn wait_for_count(counter: &AtomicI64, expected: i64) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while counter.load(Ordering::Relaxed) < expected {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting for {expected} events (saw {})",
-            counter.load(Ordering::Relaxed)
-        );
-        thread::yield_now();
-    }
 }
