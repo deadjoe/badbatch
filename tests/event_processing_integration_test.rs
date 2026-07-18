@@ -305,7 +305,8 @@ fn test_try_run_once_functionality() {
     let factory = DefaultEventFactory::<TestEvent>::new();
     let ring_buffer = Arc::new(badbatch::disruptor::RingBuffer::new(16, factory).unwrap());
     let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-    let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone()));
+    // SAFETY: claim methods are driven by a single producer thread in this test.
+    let sequencer = Arc::new(unsafe { SingleProducerSequencer::new(16, wait_strategy.clone()) });
     let barrier = Arc::new(ProcessingSequenceBarrier::new(
         sequencer.get_cursor(),
         wait_strategy,
@@ -351,7 +352,8 @@ fn test_sequence_barrier_dependency_resolution() {
     use badbatch::disruptor::{Sequence, SingleProducerSequencer};
 
     let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-    let sequencer = Arc::new(SingleProducerSequencer::new(64, wait_strategy.clone()));
+    // SAFETY: claim methods are driven by a single producer thread in this test.
+    let sequencer = Arc::new(unsafe { SingleProducerSequencer::new(64, wait_strategy.clone()) });
 
     // Test that new_barrier_typed creates proper barriers with dependency tracking
     let dep_sequence = Arc::new(Sequence::new(5));

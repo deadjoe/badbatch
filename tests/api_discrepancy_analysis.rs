@@ -280,12 +280,11 @@ mod design_md_verification {
         }
 
         let factory = DefaultEventFactory::<TestEvent>::new();
-        let ring_buffer = std::sync::Arc::new(RingBuffer::new(1024, factory).unwrap());
-        let sequencer = badbatch::disruptor::SequencerEnum::Single(std::sync::Arc::new(
-            SingleProducerSequencer::new(1024, std::sync::Arc::new(BusySpinWaitStrategy)),
-        ));
-
-        let mut producer = producer::SimpleProducer::new(ring_buffer, sequencer);
+        // SimpleProducer::new is crate-private since the 2026-07-18 soundness
+        // audit; the supported low-level path is the poller bundle.
+        let (mut producer, _poller, _shutdown) =
+            badbatch::disruptor::open_single_producer_poller(1024, factory, BusySpinWaitStrategy)
+                .unwrap();
 
         // All documented methods exist and work
         let _result1 = producer.try_publish(|event| event.value = 42);

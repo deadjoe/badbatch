@@ -212,9 +212,12 @@ fn test_cloneable_producer_clone() {
         .build();
 
     let producer1 = handle.create_producer();
-    let producer2 = producer1.clone();
+    // SimpleProducer is deliberately not Clone (soundness audit 2026-07-18);
+    // multi-mode handles create one handle per publishing thread instead.
+    let producer2 = handle.create_producer();
 
-    // Both SimpleProducer clones should operate on the same underlying buffer
+    // Both producer handles operate on the same underlying buffer
+    drop(producer1);
     drop(producer2);
     drop(handle);
     drop(rx);

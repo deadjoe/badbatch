@@ -386,9 +386,9 @@ mod tests {
         cursor: Arc<Sequence>,
         wait_strategy: Arc<BlockingWaitStrategy>,
     ) -> Arc<ProcessingSequenceBarrier<BlockingWaitStrategy>> {
-        let sequencer = crate::disruptor::sequencer::SequencerEnum::Single(Arc::new(
-            SingleProducerSequencer::new(16, wait_strategy.clone()),
-        ));
+        let sequencer = crate::disruptor::sequencer::SequencerEnum::Single(Arc::new(unsafe {
+            SingleProducerSequencer::new(16, wait_strategy.clone())
+        }));
         Arc::new(ProcessingSequenceBarrier::new(
             cursor,
             wait_strategy,
@@ -469,9 +469,9 @@ mod tests {
         let data_provider = create_test_ring_buffer(8);
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = crate::disruptor::sequencer::SequencerEnum::Single(Arc::new(
-            SingleProducerSequencer::new(16, wait_strategy.clone()),
-        ));
+        let sequencer = crate::disruptor::sequencer::SequencerEnum::Single(Arc::new(unsafe {
+            SingleProducerSequencer::new(16, wait_strategy.clone())
+        }));
         let sequence_barrier = Arc::new(ProcessingSequenceBarrier::new(
             cursor,
             wait_strategy,
@@ -789,7 +789,8 @@ mod tests {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let ring_buffer = Arc::new(RingBuffer::new(16, factory).unwrap());
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone()));
+        let sequencer =
+            Arc::new(unsafe { SingleProducerSequencer::new(16, wait_strategy.clone()) });
         let barrier = Arc::new(ProcessingSequenceBarrier::new(
             sequencer.get_cursor(),
             wait_strategy,
@@ -842,7 +843,8 @@ mod tests {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let ring_buffer = Arc::new(RingBuffer::new(16, factory).unwrap());
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone()));
+        let sequencer =
+            Arc::new(unsafe { SingleProducerSequencer::new(16, wait_strategy.clone()) });
         let barrier = Arc::new(ProcessingSequenceBarrier::new(
             sequencer.get_cursor(),
             wait_strategy,
@@ -889,7 +891,8 @@ mod tests {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let ring_buffer = Arc::new(RingBuffer::new(16, factory).unwrap());
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = Arc::new(SingleProducerSequencer::new(16, wait_strategy.clone()));
+        let sequencer =
+            Arc::new(unsafe { SingleProducerSequencer::new(16, wait_strategy.clone()) });
         let barrier = Arc::new(ProcessingSequenceBarrier::new(
             sequencer.get_cursor(),
             wait_strategy,

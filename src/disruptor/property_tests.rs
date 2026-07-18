@@ -174,7 +174,7 @@ mod single_producer_sequencer_properties {
         ) {
             let buffer_size = 1usize << size_power;
             let wait_strategy = Arc::new(BusySpinWaitStrategy::new());
-            let sequencer = SingleProducerSequencer::new(buffer_size, wait_strategy);
+            let sequencer = unsafe { SingleProducerSequencer::new(buffer_size, wait_strategy) };
 
             let mut last_sequence = -1i64;
 
@@ -195,7 +195,7 @@ mod single_producer_sequencer_properties {
         ) {
             let buffer_size = 1usize << size_power;
             let wait_strategy = Arc::new(BusySpinWaitStrategy::new());
-            let sequencer = SingleProducerSequencer::new(buffer_size, wait_strategy);
+            let sequencer = unsafe { SingleProducerSequencer::new(buffer_size, wait_strategy) };
 
             for request_size in sequences {
                 let request_i64 = i64::try_from(request_size).expect("request size fits in i64");
