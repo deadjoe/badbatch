@@ -289,7 +289,13 @@ fn test_exception_handling_stops_processor_by_default() {
     }
     assert!(poisoned, "producer never observed the poisoned pipeline");
 
-    disruptor.shutdown().unwrap();
+    // On a poisoned pipeline the backlog is undrainable (the consumer is
+    // dead), so draining shutdown reports Poisoned — but it must still halt
+    // and join the consumer threads (see `Disruptor::shutdown`'s contract).
+    match disruptor.shutdown() {
+        Ok(()) | Err(badbatch::disruptor::DisruptorError::Poisoned) => {}
+        Err(other) => panic!("unexpected shutdown error on poisoned pipeline: {other:?}"),
+    }
 }
 
 #[test]
