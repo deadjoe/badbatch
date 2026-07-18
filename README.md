@@ -50,14 +50,18 @@ fn main() {
         })
         .build();
 
-    handle.publish(|event| event.value = 42);
+    handle.publish(|event| event.value = 42).unwrap();
 
-    handle.batch_publish(5, |batch| {
-        for (i, event) in batch.enumerate() {
-            event.value = i as i64;
-        }
-    });
+    handle
+        .batch_publish(5, |batch| {
+            for (i, event) in batch.enumerate() {
+                event.value = i as i64;
+            }
+        })
+        .unwrap();
 
+    // Drains the published backlog, then stops and joins consumers.
+    // `shutdown_timeout(..)` bounds the drain; `halt()` stops abruptly.
     handle.shutdown();
 }
 ```
@@ -74,28 +78,47 @@ Pipeline stages: `.and_then()` starts a dependent stage that waits on the previo
 Multi-producer:
 
 ```rust
-use badbatch::disruptor::{build_multi_producer, BusySpinWaitStrategy};
+use badbatch::disruptor::{build_multi_producer, BusySpinWaitStrategy, Producer};
 
 #[derive(Default)]
 struct MyEvent { value: i64 }
 
-let handle = build_multi_producer(1024, MyEvent::default, BusySpinWaitStrategy)
-    .handle_events_with(|_e, _s, _b| {})
+let mut handle = build_multi_producer(1024, MyEvent::default, BusySpinWaitStrategy)
+    .handle_events_with(|_e: &mut MyEvent, _s, _b| {})
     .build();
-// handle.create_producer() / CloneableProducer for additional publishers
+
+// Multi mode only: one producer handle per publishing thread.
+let mut producer = handle.create_producer();
+producer.publish(|e| e.value = 1).unwrap();
+
+handle.shutdown();
 ```
 
 ### EventPoller (user-owned thread)
 
 ```rust
-use badbatch::disruptor::{open_single_producer_poller, BusySpinWaitStrategy};
+use badbatch::disruptor::{
+    open_single_producer_poller, BusySpinWaitStrategy, DefaultEventFactory, Producer,
+};
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct MyEvent { value: i64 }
 
-let (mut poller, mut producer) =
-    open_single_producer_poller(1024, MyEvent::default, BusySpinWaitStrategy).unwrap();
-// producer.publish(...); poller.poll() / take() on the consumer thread
+// Returns (producer, poller, shutdown_flag); the factory implements EventFactory.
+let (mut producer, mut poller, _shutdown) = open_single_producer_poller(
+    1024,
+    DefaultEventFactory::<MyEvent>::new(),
+    BusySpinWaitStrategy,
+)
+.unwrap();
+
+producer.publish(|e| e.value = 7).unwrap();
+
+let mut batch = poller.poll().expect("published events");
+while let Some((sequence, event)) = batch.next_mut() {
+    let _ = (sequence, event.value);
+}
+drop(batch); // commits the consumed prefix; `ack_all()` would skip untaken events
 ```
 
 ### Features
@@ -103,9 +126,10 @@ let (mut poller, mut producer) =
 | Feature | Default | Contents |
 |---------|---------|----------|
 | (always on) | — | Builder, sequencers, `consumer_engine`, EventPoller, wait strategies |
-| `lmax-dsl` | yes | Classic `Disruptor` DSL / `BatchEventProcessor`-oriented API |
-| `extras` | yes | `ElegantConsumer` and related helpers |
-| `full-benchmarks` | no | Extra benchmark surface |
+| `lmax-dsl` | yes | Classic `Disruptor` DSL / `BatchEventProcessor`-oriented API (Java-compat surface) |
+| `extras` | yes | `ElegantConsumer` and related helpers (legacy; no panic poisoning) |
+| `deadlock-detection` | no | parking_lot lock diagnostics — never in production builds |
+| `bench-tools` | no | Diagnostic/benchmark binaries (`h2h_rust`, `baseline_metrics`, `*_breakdown`) |
 
 Core-only: `cargo test --lib --no-default-features`.
 
@@ -281,7 +305,7 @@ This project follows the [Rust Code of Conduct](https://www.rust-lang.org/polici
 
 Licensed under the **Apache License, Version 2.0** ([LICENSE](LICENSE)).
 
-```
+```text
 Copyright 2025–2026 Joe <smartjoe@gmail.com>
 ```
 

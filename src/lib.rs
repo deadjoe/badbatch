@@ -206,3 +206,10 @@ mod tests {
         assert!(!version().is_empty());
     }
 }
+
+/// Compiles every Rust code block in `README.md` as a doctest, so the README
+/// can never drift from the real API again (2026-07-18 audit: the poller
+/// example had three independent errors and nothing caught them).
+#[doc = include_str!("../README.md")]
+#[cfg(doctest)]
+pub struct ReadmeDoctests;
