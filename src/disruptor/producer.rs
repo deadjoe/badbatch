@@ -36,6 +36,105 @@ impl std::fmt::Display for MissingFreeSlots {
 
 impl std::error::Error for MissingFreeSlots {}
 
+/// Why a non-blocking publish attempt was rejected.
+///
+/// Distinguishes *transient* backpressure (retrying is meaningful) from
+/// *terminal* pipeline states (retrying can never succeed). Before the
+/// 2026-07-19 audit the try path reported terminal states as "ring full",
+/// which turned a poisoned or shut-down pipeline into an infinite retry loop
+/// in caller code.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TryPublishError {
+    /// The ring buffer is full right now — transient; retrying is meaningful.
+    Full(RingBufferFull),
+    /// Not enough free slots for the requested batch (carries the deficit).
+    ///
+    /// Usually transient; it is permanent only when the requested batch is
+    /// larger than the ring buffer itself.
+    MissingFreeSlots(MissingFreeSlots),
+    /// The pipeline was poisoned by a panic in an update closure or event
+    /// handler — terminal; retrying will never succeed.
+    Poisoned,
+    /// The sequencer was closed by shutdown/halt — terminal; retrying will
+    /// never succeed.
+    Shutdown,
+}
+
+impl TryPublishError {
+    /// `true` when retrying can never succeed ([`TryPublishError::Poisoned`]
+    /// or [`TryPublishError::Shutdown`]).
+    ///
+    /// The intended retry discipline:
+    ///
+    /// ```rust
+    /// use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy, TryPublishError};
+    ///
+    /// #[derive(Default)]
+    /// struct MyEvent { price: f64 }
+    ///
+    /// let mut producer = build_single_producer(8, MyEvent::default, BusySpinWaitStrategy)
+    ///     .handle_events_with(|_event, _sequence, _end_of_batch| {})
+    ///     .build();
+    ///
+    /// loop {
+    ///     match producer.try_publish(|e| e.price = 42.0) {
+    ///         Ok(_) => break,
+    ///         Err(e) if e.is_transient() => std::hint::spin_loop(),
+    ///         Err(e) => panic!("terminal publish failure: {e}"),
+    ///     }
+    /// }
+    /// # drop(producer); // Clean shutdown
+    /// ```
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Poisoned | Self::Shutdown)
+    }
+
+    /// `true` when the rejection is transient backpressure and retrying is
+    /// meaningful (the negation of [`Self::is_terminal`]).
+    pub fn is_transient(&self) -> bool {
+        !self.is_terminal()
+    }
+}
+
+impl std::fmt::Display for TryPublishError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Full(e) => write!(f, "{e}"),
+            Self::MissingFreeSlots(e) => write!(f, "{e}"),
+            Self::Poisoned => write!(
+                f,
+                "Pipeline was poisoned by a panic; publishing is disabled"
+            ),
+            Self::Shutdown => write!(
+                f,
+                "Sequencer is closed (shutdown/halt); publishing is disabled"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TryPublishError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Full(e) => Some(e),
+            Self::MissingFreeSlots(e) => Some(e),
+            Self::Poisoned | Self::Shutdown => None,
+        }
+    }
+}
+
+impl From<RingBufferFull> for TryPublishError {
+    fn from(e: RingBufferFull) -> Self {
+        Self::Full(e)
+    }
+}
+
+impl From<MissingFreeSlots> for TryPublishError {
+    fn from(e: MissingFreeSlots) -> Self {
+        Self::MissingFreeSlots(e)
+    }
+}
+
 /// Producer trait inspired by disruptor-rs
 ///
 /// Provides a simplified API for publishing events into the Disruptor.
@@ -47,8 +146,11 @@ where
 {
     /// Publish an Event into the Disruptor
     ///
-    /// Returns a `Result` with the published sequence number or a [RingBufferFull]
-    /// in case the ring buffer is full.
+    /// Returns a `Result` with the published sequence number or a
+    /// [`TryPublishError`] describing why the claim was rejected:
+    /// [`TryPublishError::Full`] (transient backpressure — retrying is
+    /// meaningful), or a terminal state ([`TryPublishError::Poisoned`] /
+    /// [`TryPublishError::Shutdown`]) where retrying can never succeed.
     ///
     /// # Examples
     ///
@@ -67,14 +169,17 @@ where
     /// let sequence = producer.try_publish(|e| { e.price = 42.0; }).unwrap();
     /// # drop(producer); // Clean shutdown
     /// ```
-    fn try_publish<F>(&mut self, update: F) -> std::result::Result<i64, RingBufferFull>
+    fn try_publish<F>(&mut self, update: F) -> std::result::Result<i64, TryPublishError>
     where
         F: FnOnce(&mut E);
 
     /// Publish a batch of Events into the Disruptor
     ///
-    /// Returns a `Result` with the upper published sequence number or a [MissingFreeSlots]
-    /// in case the ring buffer did not have enough available slots for the batch.
+    /// Returns a `Result` with the upper published sequence number or a
+    /// [`TryPublishError`]: [`TryPublishError::MissingFreeSlots`] when the ring
+    /// did not have enough available slots for the batch (transient unless the
+    /// batch exceeds the ring capacity), or a terminal state
+    /// ([`TryPublishError::Poisoned`] / [`TryPublishError::Shutdown`]).
     ///
     /// # Examples
     ///
@@ -101,7 +206,7 @@ where
         &'a mut self,
         n: usize,
         update: F,
-    ) -> std::result::Result<i64, MissingFreeSlots>
+    ) -> std::result::Result<i64, TryPublishError>
     where
         E: 'a,
         F: FnOnce(BatchIterMut<'a, E>);
@@ -294,6 +399,24 @@ where
         self.sequencer.get_cursor().get()
     }
 
+    /// Classify a rejected try-claim.
+    ///
+    /// Terminal pipeline states must not be reported as transient backpressure
+    /// (2026-07-19 audit). The poisoned/closed flags are monotonic — once set
+    /// they are never cleared — so observing them after a `None` claim is
+    /// conclusive. In the race where the claim actually failed on fullness
+    /// *and* a terminal flag was set concurrently, the pipeline is terminal
+    /// anyway, so reporting the terminal state is strictly more useful.
+    fn classify_try_rejection(&self, transient: TryPublishError) -> TryPublishError {
+        if self.sequencer.is_poisoned() {
+            TryPublishError::Poisoned
+        } else if self.sequencer.is_closed() {
+            TryPublishError::Shutdown
+        } else {
+            transient
+        }
+    }
+
     // Note: wait_for_capacity is no longer needed as we use sequencer.next() which blocks
 }
 
@@ -302,13 +425,13 @@ where
     T: Send + Sync,
     W: WaitStrategy + 'static,
 {
-    fn try_publish<F>(&mut self, update: F) -> std::result::Result<i64, RingBufferFull>
+    fn try_publish<F>(&mut self, update: F) -> std::result::Result<i64, TryPublishError>
     where
         F: FnOnce(&mut T),
     {
         // Try to claim the next sequence from the sequencer
         let Some(sequence) = self.sequencer.try_next() else {
-            return Err(RingBufferFull);
+            return Err(self.classify_try_rejection(TryPublishError::Full(RingBufferFull)));
         };
 
         // Get the event at the claimed sequence and update it
@@ -327,7 +450,7 @@ where
         &'a mut self,
         n: usize,
         update: F,
-    ) -> std::result::Result<i64, MissingFreeSlots>
+    ) -> std::result::Result<i64, TryPublishError>
     where
         T: 'a,
         F: FnOnce(BatchIterMut<'a, T>),
@@ -338,7 +461,11 @@ where
             #[allow(clippy::cast_sign_loss)]
             let remaining = self.sequencer.remaining_capacity().max(0) as u64;
             let deficit = (n as u64).saturating_sub(remaining);
-            return Err(MissingFreeSlots(deficit));
+            return Err(
+                self.classify_try_rejection(TryPublishError::MissingFreeSlots(MissingFreeSlots(
+                    deficit,
+                ))),
+            );
         };
 
         let start_sequence = end_sequence - (batch_size - 1);
@@ -531,7 +658,7 @@ mod tests {
         // Some sequencers may return an error for zero-size requests
         if result.is_err() {
             // This is acceptable behavior for zero-size batches
-            assert!(matches!(result, Err(MissingFreeSlots(_))));
+            assert!(matches!(result, Err(TryPublishError::MissingFreeSlots(_))));
         } else {
             // If it succeeds, sequence should not advance
             assert_eq!(producer.current_sequence(), -1);
@@ -580,6 +707,38 @@ mod tests {
             missing_slots.to_string(),
             "Missing free slots in Ring Buffer: 5"
         );
+    }
+
+    #[test]
+    fn test_try_publish_error_classification() {
+        // Transient backpressure variants are retryable.
+        let full = TryPublishError::Full(RingBufferFull);
+        assert!(full.is_transient());
+        assert!(!full.is_terminal());
+        assert_eq!(full.to_string(), "Ring Buffer is full");
+
+        let missing = TryPublishError::MissingFreeSlots(MissingFreeSlots(3));
+        assert!(missing.is_transient());
+        assert_eq!(missing.to_string(), "Missing free slots in Ring Buffer: 3");
+
+        // Terminal variants must never be retried.
+        let poisoned = TryPublishError::Poisoned;
+        assert!(poisoned.is_terminal());
+        assert!(!poisoned.is_transient());
+
+        let shutdown = TryPublishError::Shutdown;
+        assert!(shutdown.is_terminal());
+        assert!(!shutdown.is_transient());
+
+        // The wrapped transient errors remain accessible as sources.
+        assert!(std::error::Error::source(&full).is_some());
+        assert!(std::error::Error::source(&poisoned).is_none());
+
+        // From conversions keep the legacy error types usable.
+        let from_full: TryPublishError = RingBufferFull.into();
+        assert!(matches!(from_full, TryPublishError::Full(_)));
+        let from_missing: TryPublishError = MissingFreeSlots(2).into();
+        assert!(matches!(from_missing, TryPublishError::MissingFreeSlots(_)));
     }
 
     #[test]

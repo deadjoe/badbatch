@@ -112,7 +112,7 @@ pub use builder::{build_multi_producer, build_single_producer, CloneableProducer
 #[cfg(feature = "extras")]
 pub use elegant_consumer::ElegantConsumer;
 pub use event_poller::{open_single_producer_poller, EventBatch, EventPoller, Polling};
-pub use producer::{MissingFreeSlots, Producer, RingBufferFull, SimpleProducer};
+pub use producer::{MissingFreeSlots, Producer, RingBufferFull, SimpleProducer, TryPublishError};
 
 /// The initial cursor value for sequences (matches LMAX Disruptor)
 pub const INITIAL_CURSOR_VALUE: i64 = -1;
