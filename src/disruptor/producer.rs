@@ -226,16 +226,21 @@ where
 {
 }
 
-/// Poisons the sequencer if dropped while unwinding: a claim was made but the
-/// user's update closure panicked before publish, so the slot would otherwise
-/// be exposed as a never-written event on the next publish (2026-07-18 audit).
+/// Poisons the sequencer if dropped: a claim was made but the user's update
+/// closure panicked before publish, so the slot would otherwise be exposed as
+/// a never-written event on the next publish (2026-07-18 audit).
+///
+/// Usage: construct before calling into user code, `std::mem::forget` after it
+/// returns. On the success path the forget makes the guard free (no drop glue
+/// runs); the `Drop` impl is only reachable while unwinding past the guard.
+/// This deliberately avoids `std::thread::panicking()`, whose per-call TLS
+/// access cost ~59% of end-to-end unicast throughput when it sat on the
+/// per-event publish path (P3 baseline bisection, 2026-07-19).
 pub(crate) struct PoisonOnPanic<'a, W: WaitStrategy + 'static>(pub(crate) &'a SequencerEnum<W>);
 
 impl<W: WaitStrategy + 'static> Drop for PoisonOnPanic<'_, W> {
     fn drop(&mut self) {
-        if std::thread::panicking() {
-            self.0.poison();
-        }
+        self.0.poison();
     }
 }
 
@@ -311,7 +316,7 @@ where
         let event = unsafe { &mut *self.ring_buffer.get_mut_unchecked(sequence) };
         let poison_guard = PoisonOnPanic(&self.sequencer);
         update(event);
-        drop(poison_guard);
+        std::mem::forget(poison_guard); // disarm: Drop only runs while unwinding
 
         // Publish the sequence to make it available to consumers
         self.sequencer.publish(sequence);
@@ -345,7 +350,7 @@ where
         };
         let poison_guard = PoisonOnPanic(&self.sequencer);
         update(iter);
-        drop(poison_guard);
+        std::mem::forget(poison_guard); // disarm: Drop only runs while unwinding
 
         // Publish the entire range to make it available to consumers
         self.sequencer.publish_range(start_sequence, end_sequence);
@@ -365,7 +370,7 @@ where
         let event = unsafe { &mut *self.ring_buffer.get_mut_unchecked(sequence) };
         let poison_guard = PoisonOnPanic(&self.sequencer);
         update(event);
-        drop(poison_guard);
+        std::mem::forget(poison_guard); // disarm: Drop only runs while unwinding
 
         // Publish the sequence to make it available to consumers
         self.sequencer.publish(sequence);
@@ -390,7 +395,7 @@ where
         };
         let poison_guard = PoisonOnPanic(&self.sequencer);
         update(iter);
-        drop(poison_guard);
+        std::mem::forget(poison_guard); // disarm: Drop only runs while unwinding
 
         // Publish the entire range to make it available to consumers
         self.sequencer.publish_range(start_sequence, end_sequence);

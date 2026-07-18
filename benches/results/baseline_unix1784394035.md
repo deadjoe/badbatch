@@ -1,6 +1,6 @@
 # BadBatch post-modernization throughput baseline
 
-- **UTC stamp**: `unix1784394119`
+- **UTC stamp**: `unix1784394035`
 - **Host**: `Darwin Bearmac16.local 25.5.0 Darwin Kernel Version 25.5.0: Tue Jun  9 22:18:58 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T6000 arm64`
 - **rustc**: `rustc 1.97.1 (8bab26f4f 2026-07-14) (Homebrew)`
 - **git**: `363be13`
@@ -10,16 +10,16 @@
 
 | Scenario | Events | Time (s) | Throughput (Melem/s) | OK |
 |----------|-------:|---------:|---------------------:|:--:|
-| SPSC BusySpin pad=none | 2000000 | 0.015 | **134.41** | yes |
-| SPSC BusySpin pad=128 | 2000000 | 0.108 | **18.57** | yes |
-| SPSC BatchBusySpin batch=64 | 2000000 | 0.008 | **251.95** | yes |
-| SPSC BatchBusySpin batch=256 | 2000000 | 0.007 | **283.28** | yes |
-| MPSC BusySpin producers=2 | 2000000 | 0.238 | **8.39** | yes |
-| MPSC BusySpin producers=4 | 2000000 | 0.327 | **6.12** | yes |
-| WorkerPool BusySpin workers=2 | 2000000 | 0.197 | **10.13** | yes |
-| WorkerPool BusySpin workers=4 | 2000000 | 0.404 | **4.95** | yes |
-| Pipeline stages=2 BusySpin | 2000000 | 0.016 | **125.95** | yes |
-| Pipeline stages=3 BusySpin | 1000000 | 0.014 | **73.30** | yes |
+| SPSC BusySpin pad=none | 2000000 | 0.020 | **101.15** | yes |
+| SPSC BusySpin pad=128 | 2000000 | 0.123 | **16.25** | yes |
+| SPSC BatchBusySpin batch=64 | 2000000 | 0.009 | **211.57** | yes |
+| SPSC BatchBusySpin batch=256 | 2000000 | 0.007 | **304.94** | yes |
+| MPSC BusySpin producers=2 | 2000000 | 0.261 | **7.65** | yes |
+| MPSC BusySpin producers=4 | 2000000 | 0.328 | **6.10** | yes |
+| WorkerPool BusySpin workers=2 | 2000000 | 0.173 | **11.53** | yes |
+| WorkerPool BusySpin workers=4 | 2000000 | 0.430 | **4.65** | yes |
+| Pipeline stages=2 BusySpin | 2000000 | 0.016 | **128.89** | yes |
+| Pipeline stages=3 BusySpin | 1000000 | 0.021 | **46.70** | yes |
 
 ## Interpretation notes
 

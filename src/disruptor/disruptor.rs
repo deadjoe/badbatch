@@ -403,7 +403,7 @@ where
         // an unpublished claim would expose a never-written slot later.
         let poison_guard = crate::disruptor::producer::PoisonOnPanic(&self.sequencer);
         translator.translate_to(event, sequence);
-        drop(poison_guard);
+        std::mem::forget(poison_guard); // disarm: Drop only runs while unwinding
 
         // Publish the sequence to make it available to consumers
         self.sequencer.publish(sequence);
@@ -433,7 +433,7 @@ where
             // panic: an unpublished claim would expose a never-written slot.
             let poison_guard = crate::disruptor::producer::PoisonOnPanic(&self.sequencer);
             translator.translate_to(event, sequence);
-            drop(poison_guard);
+            std::mem::forget(poison_guard); // disarm: Drop only runs while unwinding
 
             // Publish the sequence to make it available to consumers
             self.sequencer.publish(sequence);
