@@ -27,6 +27,16 @@ use std::thread::{self, JoinHandle};
 /// event processors, and their dependencies. This follows the exact design from
 /// the original LMAX Disruptor class.
 ///
+/// # Publishing & thread safety
+///
+/// `Disruptor` is `Sync` and publishing takes `&self`, so the DSL can be shared
+/// across threads. With `ProducerType::Single` that shared claim path is
+/// serialized behind an internal mutex (one publisher at a time — this is what
+/// keeps the single-producer sequencer sound); uncontended it is cheap, but it
+/// is still a per-publish lock. `ProducerType::Multi` never takes it. For
+/// lock-free single-publisher publishing, use the Builder's `Send`-only
+/// producer handles instead (see the module-level note).
+///
 /// # Type Parameters
 /// * `T` - The event type stored in the ring buffer
 ///
@@ -384,7 +394,11 @@ where
             if self.sequencer.is_poisoned() {
                 return Err(DisruptorError::Poisoned);
             }
-            if self.thread_handles.iter().any(std::thread::JoinHandle::is_finished) {
+            if self
+                .thread_handles
+                .iter()
+                .any(std::thread::JoinHandle::is_finished)
+            {
                 return Err(DisruptorError::ShutdownError(
                     "consumer thread exited before the backlog was drained".to_string(),
                 ));
