@@ -42,7 +42,7 @@ fi
 for ((i=1; i<=runs; i++)); do
   echo
   echo "--- run ${i}/${runs} ---"
-  cargo run --release --bin baseline_metrics -- --events "$EVENTS" --buffer "$BUFFER"
+  cargo run --release --features bench-tools --bin baseline_metrics -- --events "$EVENTS" --buffer "$BUFFER"
 done
 
 echo

@@ -91,7 +91,7 @@ cp "$RESULTS_DIR/environment.txt" "$RESULTS_DIR/environment.env"
 
 echo "[INFO] Results → $RESULTS_DIR"
 echo "[INFO] Building Rust h2h_rust (release)..."
-cargo build --release --bin h2h_rust
+cargo build --release --features bench-tools --bin h2h_rust
 
 echo "[INFO] Compiling Java HeadToHead + LMAX sources..."
 JAVA_CP="$RESULTS_DIR/java_classes"
