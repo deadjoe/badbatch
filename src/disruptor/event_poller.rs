@@ -89,8 +89,10 @@ where
 
     /// Non-blocking attempt to claim a batch of available events.
     ///
-    /// On success returns an [`EventBatch`] RAII guard. When the guard is dropped,
-    /// the poller's gating sequence advances to the last available sequence in the batch.
+    /// On success returns an [`EventBatch`] RAII guard. When the guard is
+    /// dropped, the poller's gating sequence advances to the last event
+    /// actually taken via [`EventBatch::next_mut`]; untaken events are
+    /// redelivered by the next poll ([`EventBatch::ack_all`] skips them).
     ///
     /// # Errors
     /// - [`Polling::Idle`] when nothing is published yet
@@ -152,7 +154,8 @@ where
 /// RAII batch of events available to a poller.
 ///
 /// Iterate with [`EventBatch::next_mut`] (mutable) or as shared references via
-/// [`EventBatch::get`]. Dropping the batch commits progress up to `to`.
+/// [`EventBatch::get`]. Dropping the batch commits only the consumed prefix;
+/// [`EventBatch::ack_all`] commits everything including untaken events.
 pub struct EventBatch<'p, T, W>
 where
     T: Send + Sync,
@@ -223,19 +226,28 @@ where
         Some((seq, event))
     }
 
-    /// Commit progress early without dropping. Subsequent drop is a no-op for gating.
+    /// Commit the consumed prefix now (same as dropping the batch, explicit).
     pub fn commit(mut self) {
-        self.commit_inner();
+        let last = self.current - 1;
+        self.commit_to(last);
     }
 
-    fn commit_inner(&mut self) {
+    /// Commit the **entire** batch, including events never taken via
+    /// [`Self::next_mut`]. This was the implicit drop behavior before the
+    /// 2026-07-18 audit; skipping events is now an explicit choice.
+    pub fn ack_all(mut self) {
+        let last = self.to;
+        self.commit_to(last);
+    }
+
+    fn commit_to(&mut self, last: i64) {
         if self.committed {
             return;
         }
         self.committed = true;
-        if self.to >= self.from {
-            self.poller.sequence.set(self.to);
-            self.poller.next_sequence = self.to + 1;
+        if last >= self.from {
+            self.poller.sequence.set(last);
+            self.poller.next_sequence = last + 1;
         }
     }
 }
@@ -245,8 +257,14 @@ where
     T: Send + Sync,
     W: WaitStrategy + 'static,
 {
+    /// Commits only the prefix actually consumed via [`EventBatch::next_mut`]
+    /// (2026-07-18 audit): a partial iteration, early return, or panic no
+    /// longer silently acknowledges events that were never looked at. Events
+    /// left untaken are redelivered by the next poll; use
+    /// [`EventBatch::ack_all`] to deliberately skip them.
     fn drop(&mut self) {
-        self.commit_inner();
+        let last = self.current - 1;
+        self.commit_to(last);
     }
 }
 
@@ -339,6 +357,81 @@ mod tests {
         shutdown.store(true, Ordering::Release);
         poller.halt();
         assert_eq!(poller.poll().err(), Some(Polling::Shutdown));
+    }
+
+    // P1 regression (2026-07-18 audit): dropping a batch used to acknowledge
+    // the WHOLE batch regardless of how many events were actually taken —
+    // partial processing, early return, or a panic silently skipped events.
+    #[test]
+    fn dropped_batch_commits_only_consumed_prefix() {
+        let factory = DefaultEventFactory::<Ev>::new();
+        let (mut producer, mut poller, _shutdown) =
+            open_single_producer_poller(8, factory, BusySpinWaitStrategy).unwrap();
+
+        for i in 0..3 {
+            let _ = producer.publish(|e| e.v = i);
+        }
+
+        {
+            let mut batch = poller.poll().expect("events");
+            assert_eq!(batch.len(), 3);
+            let (s, e) = batch.next_mut().unwrap();
+            assert_eq!((s, e.v), (0, 0));
+            // Dropped here having consumed only sequence 0.
+        }
+
+        assert_eq!(poller.sequence().get(), 0);
+        assert_eq!(poller.next_sequence(), 1);
+
+        // The untaken events are redelivered.
+        let mut batch = poller.poll().expect("redelivered events");
+        assert_eq!(batch.from_sequence(), 1);
+        assert_eq!(batch.to_sequence(), 2);
+        let (s, e) = batch.next_mut().unwrap();
+        assert_eq!((s, e.v), (1, 1));
+        let (s, e) = batch.next_mut().unwrap();
+        assert_eq!((s, e.v), (2, 2));
+    }
+
+    #[test]
+    fn ack_all_skips_untaken_events_explicitly() {
+        let factory = DefaultEventFactory::<Ev>::new();
+        let (mut producer, mut poller, _shutdown) =
+            open_single_producer_poller(8, factory, BusySpinWaitStrategy).unwrap();
+
+        for i in 0..3 {
+            let _ = producer.publish(|e| e.v = i);
+        }
+
+        let mut batch = poller.poll().expect("events");
+        let (s, _) = batch.next_mut().unwrap();
+        assert_eq!(s, 0);
+        batch.ack_all();
+
+        // Everything acknowledged: nothing left to poll.
+        assert_eq!(poller.sequence().get(), 2);
+        assert_eq!(poller.next_sequence(), 3);
+        assert_eq!(poller.poll().err(), Some(Polling::Idle));
+    }
+
+    #[test]
+    fn untouched_batch_drop_redelivers_everything() {
+        let factory = DefaultEventFactory::<Ev>::new();
+        let (mut producer, mut poller, _shutdown) =
+            open_single_producer_poller(8, factory, BusySpinWaitStrategy).unwrap();
+
+        let _ = producer.publish(|e| e.v = 5);
+
+        {
+            let batch = poller.poll().expect("events");
+            assert_eq!(batch.len(), 1);
+            // Dropped without taking anything.
+        }
+        assert_eq!(poller.next_sequence(), 0);
+
+        let mut batch = poller.poll().expect("redelivered");
+        let (s, e) = batch.next_mut().unwrap();
+        assert_eq!((s, e.v), (0, 5));
     }
 
     #[test]
