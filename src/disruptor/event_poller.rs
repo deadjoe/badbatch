@@ -202,6 +202,12 @@ where
     }
 
     /// Immutable access to the event at `sequence` (must be within `[from, to]`).
+    ///
+    /// **Reading is not consuming.** Only [`EventBatch::next_mut`] advances the
+    /// consumed prefix that `Drop` commits; events accessed solely through
+    /// `get()` are *not* committed and will be delivered again by the next
+    /// `poll()`. If you inspect a batch via `get()` and still want it fully
+    /// acknowledged, call [`EventBatch::ack_all`] instead of dropping it.
     #[must_use]
     pub fn get(&self, sequence: i64) -> Option<&T> {
         if sequence < self.from || sequence > self.to {
