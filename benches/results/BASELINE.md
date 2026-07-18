@@ -1,5 +1,38 @@
 # Post-modernization throughput baseline (macOS)
 
+## Post-audit capture (2026-07-19, commit `fa04ba6`)
+
+Re-captured after the 2026-07-18 audit rounds (P0 soundness, P1 failure
+semantics, P2 surface) plus the P3 hot-path fix (`#[inline]` on claim methods,
+Relaxed poison-flag loads, forget-based panic guards).
+
+| Scenario | Run1 | Run2 | Run3 | **Median** |
+|----------|-----:|-----:|-----:|-----------:|
+| SPSC BusySpin pad=none | 65.2 | 101.2 | 180.9 | **101.2** |
+| SPSC BusySpin pad=128 | 21.2 | 16.3 | 22.3 | **21.2** |
+| SPSC BatchBusySpin batch=64 | 417.2 | 211.6 | 304.6 | **304.6** |
+| SPSC BatchBusySpin batch=256 | 377.0 | 304.9 | 334.8 | **334.8** |
+| MPSC BusySpin producers=2 | 7.1 | 7.7 | 8.6 | **7.7** |
+| MPSC BusySpin producers=4 | 5.8 | 6.1 | 5.6 | **5.8** |
+| WorkerPool workers=2 | 7.8 | 11.5 | 9.9 | **9.9** |
+| WorkerPool workers=4 | 4.9 | 4.7 | 4.6 | **4.7** |
+| Pipeline stages=2 | 118.3 | 128.9 | 81.2 | **118.3** |
+| Pipeline stages=3 | 40.1 | 46.7 | 61.5 | **46.7** |
+
+**Read this capture with its variance in mind.** The machine was noisier than
+at the original capture (SPSC spread 65–181). The controlled comparison is the
+**interleaved A/B on identical machine state** against pre-audit `da1097e`:
+SPSC 136.5 (old) vs 160.9 (new), pipeline 110 vs 116, MPSC-2 8.2 vs 8.4
+(medians, Melem/s) — the audited code is at **parity within run noise**; the
+deltas against the table below are machine drift, not code cost.
+
+Bisection note: the P1 poisoning commit initially cost ~5× on single-event
+paths (inline-threshold regression on `next_n` + per-event Acquire load
+pairing STLR/LDAR into a StoreLoad barrier on ARM). Fixed in `fa04ba6`; see
+that commit message before adding anything to the claim hot path.
+
+## Original capture (commits `5c1d84a` / `71d3bab`)
+
 Recorded on the development machine after commits `5c1d84a` / `71d3bab` (consumer engine + monomorphization + WorkerPool).
 
 ## Environment
