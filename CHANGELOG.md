@@ -13,6 +13,44 @@ compiler, or when CI stabilizes on a new stable series. Patch toolchain updates
 
 ## [0.2.0] — 2026-07
 
+### Try-publish error taxonomy & probe self-activation (2026-07-19 audit — breaking)
+
+Closes the last failure-delivery gap from the 2026-07-19 audit (R1), plus two
+regressions found red on `main` while verifying it:
+
+- **`TryPublishError` (breaking).** `Producer::try_publish` /
+  `try_batch_publish` (and the `DisruptorHandle` / `CloneableProducer`
+  delegates) now return `Result<i64, TryPublishError>`, distinguishing
+  *transient* backpressure — `Full(RingBufferFull)` /
+  `MissingFreeSlots(MissingFreeSlots)`, with the legacy payload types
+  unchanged — from *terminal* states (`Poisoned` / `Shutdown`). Previously
+  every try-path rejection surfaced as "ring full", so the idiomatic
+  `Err(_) => retry` loop spun forever on a poisoned or halted pipeline.
+  `is_terminal()` / `is_transient()` encode the retry discipline;
+  classification reads the monotonic poisoned/closed flags, so a terminal
+  report is always conclusive.
+- **`try_run_once` self-activates (regression fix).** The halt-race fix made
+  `on_start()` stop setting the running flag — leaving *no* safe way to
+  activate `try_run_once` (the only remaining flag-setting path was `run()`
+  itself, the exact race the probe exists to avoid). The probe now claims the
+  running flag via CAS for the duration of the call — mutually exclusive with
+  `run()` and other probes — and releases it on every exit path.
+- **Poisoned-pipeline shutdown expectation (test fix).** `Disruptor::shutdown`
+  on a poisoned pipeline reports `DisruptorError::Poisoned` (the backlog is
+  undrainable with a dead consumer) while still halting and joining consumer
+  threads; the integration test now asserts that documented contract instead
+  of `unwrap()`ing it away.
+- **Docs.** `EventBatch::get` explicitly documents that reading is not
+  consuming (un-taken events are redelivered); the DSL `Disruptor` documents
+  its single-producer shared-publish mutex; the `Sequencer` trait documents
+  that external implementations keeping the no-op `poison`/`close` defaults
+  opt out of failure propagation.
+
+Coverage: new `tests/try_publish_errors.rs` (transient recovery end-to-end,
+exact deficit, poisoned/shutdown on both try paths); strengthened assertions
+in `tests/failure_semantics.rs` and `tests/lifecycle_residuals.rs`;
+`mpsc_exactly_once_stress` retries only on the transient variant.
+
 ### Lifecycle residual closure (post-audit)
 
 Closes the four secondary residuals left after P0–P2:
@@ -87,7 +125,9 @@ results. Five changes, each breaking for callers of the old signatures:
 - **Poller partial commit.** Dropping an `EventBatch` acknowledges only the
   events actually taken via `next_mut`; untaken events are redelivered.
   `ack_all()` is the explicit full-batch acknowledgement (the old drop
-  behavior).
+  behavior). **Migration note:** `EventBatch::get` only *reads* — a batch
+  inspected solely through `get()` and then dropped is redelivered in full;
+  call `ack_all()` when read-only access should still commit the batch.
 
 Coverage: `tests/failure_semantics.rs`, `tests/shutdown_semantics.rs`,
 poller partial-commit unit tests, and reworked exception-policy integration
