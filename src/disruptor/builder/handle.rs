@@ -109,17 +109,23 @@ where
     }
 
     /// Try to publish an event (delegated to producer)
+    ///
+    /// # Errors
+    /// [`TryPublishError::Full`](crate::disruptor::producer::TryPublishError::Full)
+    /// on transient backpressure (retry is meaningful); a terminal
+    /// [`TryPublishError::Shutdown`](crate::disruptor::producer::TryPublishError::Shutdown)
+    /// after shutdown/halt or
+    /// [`TryPublishError::Poisoned`](crate::disruptor::producer::TryPublishError::Poisoned)
+    /// on a poisoned pipeline (retrying can never succeed).
     pub fn try_publish<F>(
         &mut self,
         update: F,
-    ) -> std::result::Result<i64, crate::disruptor::producer::RingBufferFull>
+    ) -> std::result::Result<i64, crate::disruptor::producer::TryPublishError>
     where
         F: FnOnce(&mut E),
     {
-        // After halt/shutdown the sequencer is closed; surface as "full" on the
-        // try path (typed as RingBufferFull) — use `publish` for Shutdown.
         if self.is_shutdown {
-            return Err(crate::disruptor::producer::RingBufferFull);
+            return Err(crate::disruptor::producer::TryPublishError::Shutdown);
         }
         self.producer.try_publish(update)
     }
@@ -139,16 +145,23 @@ where
     }
 
     /// Try to publish a batch of events (delegated to producer)
+    ///
+    /// # Errors
+    /// [`TryPublishError::MissingFreeSlots`](crate::disruptor::producer::TryPublishError::MissingFreeSlots)
+    /// on transient backpressure; a terminal
+    /// [`TryPublishError::Shutdown`](crate::disruptor::producer::TryPublishError::Shutdown) /
+    /// [`TryPublishError::Poisoned`](crate::disruptor::producer::TryPublishError::Poisoned)
+    /// where retrying can never succeed.
     pub fn try_batch_publish<F>(
         &mut self,
         n: usize,
         update: F,
-    ) -> std::result::Result<i64, crate::disruptor::producer::MissingFreeSlots>
+    ) -> std::result::Result<i64, crate::disruptor::producer::TryPublishError>
     where
         F: for<'a> FnOnce(crate::disruptor::ring_buffer::BatchIterMut<'a, E>),
     {
         if self.is_shutdown {
-            return Err(crate::disruptor::producer::MissingFreeSlots(n as u64));
+            return Err(crate::disruptor::producer::TryPublishError::Shutdown);
         }
         self.producer.try_batch_publish(n, update)
     }
