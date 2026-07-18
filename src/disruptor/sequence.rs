@@ -180,6 +180,24 @@ impl Sequence {
         }
         minimum
     }
+
+    /// Get the minimum sequence value, clamped to at most `minimum`
+    ///
+    /// Port of LMAX `Util.getMinimumSequence(sequences, minimum)`. Producer-side
+    /// capacity checks must call this with the producer's own position (`nextValue`
+    /// for single, cursor for multi) so that an empty gating list gates on the
+    /// producer itself instead of `i64::MAX` — otherwise wrap-point checks pass
+    /// vacuously and over-capacity claims become possible.
+    pub fn get_minimum_sequence_with_default(sequences: &[Arc<Sequence>], minimum: i64) -> i64 {
+        let mut minimum = minimum;
+        for sequence in sequences {
+            let value = sequence.get();
+            if value < minimum {
+                minimum = value;
+            }
+        }
+        minimum
+    }
 }
 
 // Ensure Sequence is Send and Sync for multi-threading
