@@ -135,16 +135,14 @@ where
         self.producer.try_batch_publish(n, update)
     }
 
-    /// Shutdown the disruptor and wait for all consumer threads to complete.
+    /// Draining shutdown: wait until consumers have processed the published
+    /// backlog, then stop and join all consumer threads (LMAX `shutdown()`).
     ///
-    /// **Recommended Usage**: Call this method explicitly before dropping the
-    /// `DisruptorHandle` to ensure controlled shutdown and avoid potential
-    /// blocking in the `Drop` implementation of individual consumers.
-    ///
-    /// This method:
-    /// 1. Sets the shutdown flag to signal all consumer threads to stop
-    /// 2. Waits for all consumer threads to complete gracefully
-    /// 3. Prevents blocking behavior when the disruptor is dropped
+    /// The drain aborts early (proceeding straight to the abrupt stop) when
+    /// the pipeline is poisoned or a consumer thread has already died. Stop
+    /// publishing before calling this — with a live consumer that never
+    /// catches up this blocks indefinitely; use [`Self::shutdown_timeout`]
+    /// for a bounded wait or [`Self::halt`] for an immediate stop.
     ///
     /// # Example
     /// ```rust,no_run
@@ -164,7 +162,41 @@ where
         if self.is_shutdown {
             return;
         }
-        self.core.shutdown();
+        let _ = self.core.shutdown_with_timeout(None);
+        self.is_shutdown = true;
+    }
+
+    /// Draining shutdown with a deadline.
+    ///
+    /// Drains like [`Self::shutdown`] but gives up after `timeout` and stops
+    /// abruptly, reporting what interrupted the drain.
+    ///
+    /// # Errors
+    /// - [`crate::disruptor::DisruptorError::Timeout`] — backlog remained when the deadline hit
+    /// - [`crate::disruptor::DisruptorError::Poisoned`] — pipeline was poisoned
+    /// - [`crate::disruptor::DisruptorError::ShutdownError`] — a consumer died before draining
+    ///
+    /// The disruptor is stopped in every case; the error only reports drain
+    /// completeness.
+    pub fn shutdown_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> crate::disruptor::Result<()> {
+        if self.is_shutdown {
+            return Ok(());
+        }
+        let result = self.core.shutdown_with_timeout(Some(timeout));
+        self.is_shutdown = true;
+        result
+    }
+
+    /// Abrupt stop (LMAX `halt()`): signal consumers to stop and join them
+    /// without draining the published backlog.
+    pub fn halt(&mut self) {
+        if self.is_shutdown {
+            return;
+        }
+        self.core.halt();
         self.is_shutdown = true;
     }
 
@@ -202,7 +234,9 @@ where
 {
     fn drop(&mut self) {
         if !self.is_shutdown {
-            self.shutdown();
+            // Bounded drain so Drop cannot hang forever on a stuck consumer;
+            // falls back to an abrupt stop when the deadline hits.
+            let _ = self.shutdown_timeout(std::time::Duration::from_secs(2));
         }
     }
 }
