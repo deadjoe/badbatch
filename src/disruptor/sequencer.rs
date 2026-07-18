@@ -443,6 +443,17 @@ where
         ))
     }
 
+    /// Minimum of the gating sequences, clamped to at most `minimum`.
+    ///
+    /// LMAX `Util.getMinimumSequence(gatingSequences, minimum)`: with no gating
+    /// sequences registered the producer gates on its own position, so wrap-point
+    /// checks stay meaningful instead of comparing against `i64::MAX`.
+    #[inline]
+    fn gating_minimum(&self, minimum: i64) -> i64 {
+        let guard = self.gating_sequences.load();
+        Sequence::get_minimum_sequence_with_default(&guard, minimum)
+    }
+
     /// Check if there's available capacity for the required number of sequences
     /// This matches the LMAX Disruptor SingleProducerSequencer.hasAvailableCapacity method
     fn has_available_capacity_internal(&self, required_capacity: usize, do_store: bool) -> bool {
@@ -459,7 +470,7 @@ where
                 self.cursor.set_volatile(next_value);
             }
 
-            let min_sequence = self.get_minimum_sequence();
+            let min_sequence = self.gating_minimum(next_value);
             unsafe { self.set_cached_value(min_sequence) };
 
             if wrap_point > min_sequence {
@@ -511,7 +522,7 @@ where
             // (~1-5μs per sched_yield). PAUSE (x86) / YIELD (ARM) stays on-core.
             let mut min_sequence;
             while {
-                min_sequence = self.get_minimum_sequence();
+                min_sequence = self.gating_minimum(next_value);
                 wrap_point > min_sequence
             } {
                 std::hint::spin_loop();
@@ -531,7 +542,9 @@ where
     }
 
     fn try_next_n(&self, n: i64) -> Option<i64> {
-        if n < 1 {
+        // Same bounds as next_n: a claim larger than the buffer can never succeed
+        // and would alias ring slots within a single batch if allowed through.
+        if n < 1 || n > self.buffer_size_i64 {
             return None;
         }
 
@@ -592,14 +605,7 @@ where
         // This follows the exact LMAX Disruptor SingleProducerSequencer.remainingCapacity logic
         // SAFETY: single-publisher exclusive access.
         let next_value = unsafe { self.next_value() };
-        let consumed = self.get_minimum_sequence();
-
-        // If no consumers are registered, consumed will be i64::MAX
-        // In this case, we have full capacity available
-        if consumed == i64::MAX {
-            return self.buffer_size_i64;
-        }
-
+        let consumed = self.gating_minimum(next_value);
         let used_capacity = next_value.saturating_sub(consumed);
         self.buffer_size_i64.saturating_sub(used_capacity)
     }
@@ -953,7 +959,10 @@ where
         let cached_gating_sequence = self.cached_gating_sequence.load(Ordering::Acquire);
 
         if wrap_point > cached_gating_sequence || cached_gating_sequence > cursor_value {
-            let min_sequence = Sequence::get_minimum_sequence(gating_sequences);
+            // LMAX Util.getMinimumSequence(gatingSequences, cursor): with no gating
+            // sequences the producer gates on the cursor, keeping wrap checks meaningful.
+            let min_sequence =
+                Sequence::get_minimum_sequence_with_default(gating_sequences, cursor_value);
             self.cached_gating_sequence
                 .store(min_sequence, Ordering::Release);
 
@@ -1004,8 +1013,10 @@ where
             let cached_gating_sequence = self.cached_gating_sequence.load(Ordering::Acquire);
 
             if wrap_point > cached_gating_sequence || cached_gating_sequence > current {
-                // Get the actual minimum sequence from gating sequences
-                let min_sequence = self.get_minimum_sequence();
+                // Gating minimum clamped to the current cursor (LMAX Util semantics):
+                // empty gating gates on the cursor instead of i64::MAX.
+                let guard = self.gating_sequences.load();
+                let min_sequence = Sequence::get_minimum_sequence_with_default(&guard, current);
 
                 // If we don't have enough capacity, wait until we do
                 if wrap_point > min_sequence {
@@ -1035,7 +1046,9 @@ where
     }
 
     fn try_next_n(&self, n: i64) -> Option<i64> {
-        if n < 1 {
+        // Same bounds as next_n: a claim larger than the buffer can never succeed
+        // and would alias ring slots within a single batch if allowed through.
+        if n < 1 || n > self.buffer_size_i64 {
             return None;
         }
 
@@ -1157,14 +1170,8 @@ where
 
     fn remaining_capacity(&self) -> i64 {
         let next_value = self.cursor.get();
-        let consumed = self.get_minimum_sequence();
-
-        // If no consumers are registered, consumed will be i64::MAX
-        // In this case, we have full capacity available
-        if consumed == i64::MAX {
-            return self.buffer_size_i64;
-        }
-
+        let guard = self.gating_sequences.load();
+        let consumed = Sequence::get_minimum_sequence_with_default(&guard, next_value);
         let used_capacity = next_value.saturating_sub(consumed);
         self.buffer_size_i64.saturating_sub(used_capacity)
     }
@@ -1182,7 +1189,7 @@ where
 mod tests {
     use super::*;
     use crate::disruptor::sequence_barrier::SequenceBarrier;
-    use crate::disruptor::BlockingWaitStrategy;
+    use crate::disruptor::{BlockingWaitStrategy, BusySpinWaitStrategy};
 
     #[test]
     fn test_multi_producer_sequencer_creation() {
@@ -1946,5 +1953,80 @@ mod tests {
             sequencer.is_bitmap_available(seq),
             "Bitmap should reflect the published sequence"
         );
+    }
+
+    // Soundness regression (P0-4, audit 2026-07-18): try_next_n must reject claims
+    // larger than the buffer even with no gating sequences registered, otherwise a
+    // single batch maps two sequences onto the same ring slot (aliased &mut).
+
+    #[test]
+    fn test_single_try_next_n_rejects_over_capacity_without_gating() {
+        let sequencer = SingleProducerSequencer::new(8, Arc::new(BusySpinWaitStrategy));
+
+        assert_eq!(sequencer.try_next_n(9), None);
+        assert_eq!(sequencer.try_next_n(1000), None);
+        assert_eq!(sequencer.try_next_n(0), None);
+
+        // Full-buffer claims stay legal, and with no gating sequences the
+        // producer may wrap freely (LMAX semantics) — but never over-claim.
+        assert_eq!(sequencer.try_next_n(8), Some(7));
+        assert_eq!(sequencer.try_next_n(8), Some(15));
+        assert_eq!(sequencer.try_next_n(9), None);
+    }
+
+    #[test]
+    fn test_multi_try_next_n_rejects_over_capacity_without_gating() {
+        let sequencer = MultiProducerSequencer::new(8, Arc::new(BusySpinWaitStrategy));
+
+        assert_eq!(sequencer.try_next_n(9), None);
+        assert_eq!(sequencer.try_next_n(1000), None);
+        assert_eq!(sequencer.try_next_n(0), None);
+
+        assert_eq!(sequencer.try_next_n(8), Some(7));
+        assert_eq!(sequencer.try_next_n(8), Some(15));
+        assert_eq!(sequencer.try_next_n(9), None);
+    }
+
+    #[test]
+    fn test_single_try_next_n_respects_gating_backpressure() {
+        let sequencer = SingleProducerSequencer::new(8, Arc::new(BusySpinWaitStrategy));
+        let consumer = Arc::new(Sequence::new(-1));
+        sequencer.add_gating_sequences(std::slice::from_ref(&consumer));
+
+        // Fill the buffer, then further claims must fail until the consumer moves.
+        assert_eq!(sequencer.try_next_n(8), Some(7));
+        assert_eq!(sequencer.try_next(), None);
+
+        consumer.set(3);
+        assert_eq!(sequencer.try_next_n(4), Some(11));
+        assert_eq!(sequencer.try_next(), None);
+    }
+
+    #[test]
+    fn test_multi_try_next_n_respects_gating_backpressure() {
+        let sequencer = MultiProducerSequencer::new(8, Arc::new(BusySpinWaitStrategy));
+        let consumer = Arc::new(Sequence::new(-1));
+        sequencer.add_gating_sequences(std::slice::from_ref(&consumer));
+
+        assert_eq!(sequencer.try_next_n(8), Some(7));
+        assert_eq!(sequencer.try_next(), None);
+
+        consumer.set(3);
+        assert_eq!(sequencer.try_next_n(4), Some(11));
+        assert_eq!(sequencer.try_next(), None);
+    }
+
+    #[test]
+    fn test_remaining_capacity_without_gating_stays_bounded() {
+        let single = SingleProducerSequencer::new(8, Arc::new(BusySpinWaitStrategy));
+        assert_eq!(single.remaining_capacity(), 8);
+        single.try_next_n(4);
+        // No gating sequences: producer gates on itself, capacity stays full.
+        assert_eq!(single.remaining_capacity(), 8);
+
+        let multi = MultiProducerSequencer::new(8, Arc::new(BusySpinWaitStrategy));
+        assert_eq!(multi.remaining_capacity(), 8);
+        multi.try_next_n(4);
+        assert_eq!(multi.remaining_capacity(), 8);
     }
 }
