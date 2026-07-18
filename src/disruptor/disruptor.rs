@@ -1,8 +1,15 @@
-//! Disruptor Main Class Implementation
+//! Disruptor Main Class Implementation (classic LMAX-style DSL)
 //!
 //! This module provides the main Disruptor class that serves as the entry point
 //! for configuring and using the Disruptor pattern. It provides a DSL-style
 //! interface for setting up the ring buffer, sequencers, and event processors.
+//!
+//! **Compatibility surface.** This DSL mirrors the Java LMAX API for users
+//! porting existing topologies. New code should prefer the type-state Builder
+//! ([`crate::disruptor::build_single_producer`] /
+//! [`crate::disruptor::build_multi_producer`]): it encodes producer-mode
+//! capabilities in the type system and has the richer lifecycle
+//! (draining shutdown with timeout, abrupt halt).
 
 use crate::disruptor::{
     is_power_of_two, sequencer::SequencerEnum, BatchEventProcessor, BlockingWaitStrategy,
@@ -331,16 +338,13 @@ where
         // Signal shutdown to all threads atomically
         self.shutdown_flag.store(true, Ordering::Release);
 
-        // Ensure memory ordering before halting processors
-        std::sync::atomic::fence(Ordering::SeqCst);
-
-        // Halt all event processors to ensure they stop processing
+        // Halt all event processors: running=false (Release) + barrier alert
+        // wakes waiters. The alert/join pair below is the synchronization —
+        // the old extra SeqCst fence and fixed 1ms sleep added nothing
+        // (2026-07-18 audit cleanup).
         for processor in &self.event_processors {
             processor.halt();
         }
-
-        // Give threads a brief moment to notice the shutdown signal
-        std::thread::sleep(std::time::Duration::from_millis(1));
 
         // Wait for all threads to complete with better error handling
         let mut join_errors = Vec::new();

@@ -1,8 +1,11 @@
 //! Elegant consumer handling inspired by disruptor-rs
 //!
-//! Lightweight helper for demos/experiments with automatic batch detection and
-//! clean shutdown. Prefer the monomorphized Builder (`build_*`) or
-//! [`crate::disruptor::EventPoller`] for production-shaped topologies.
+//! **Legacy/extras surface.** Lightweight helper for demos/experiments with
+//! automatic batch detection and clean shutdown. Prefer the monomorphized
+//! Builder (`build_*`) or [`crate::disruptor::EventPoller`] for
+//! production-shaped topologies: unlike those paths, `ElegantConsumer`
+//! threads are not covered by panic poisoning — a panicking handler here
+//! still stalls producer gating (2026-07-18 audit, known gap).
 //!
 //! Uses [`SimpleWaitStrategy`] (`backoff`); those ZSTs also implement full
 //! [`crate::disruptor::WaitStrategy`] for Builder use without adapters.
