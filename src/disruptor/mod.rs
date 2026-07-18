@@ -97,7 +97,7 @@ pub use event_processor::{BatchEventProcessor, EventProcessor};
 pub use event_translator::{
     EventTranslator, EventTranslatorOneArg, EventTranslatorThreeArg, EventTranslatorTwoArg,
 };
-pub use exception_handler::{DefaultExceptionHandler, ExceptionHandler};
+pub use exception_handler::{DefaultExceptionHandler, ErrorDecision, ExceptionHandler};
 pub use producer_type::ProducerType;
 pub use ring_buffer::{RingBuffer, SlotPadding};
 pub use sequence_barrier::{ProcessingSequenceBarrier, SequenceBarrier};

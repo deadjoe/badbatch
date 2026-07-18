@@ -305,7 +305,15 @@ where
 
             if let Err(e) = handler.on_event(event, current_sequence, end_of_batch) {
                 let exception_handler = &*self.exception_handler;
-                exception_handler.handle_event_exception(e, current_sequence, event);
+                let decision = exception_handler.handle_event_exception(e, current_sequence, event);
+                if decision == crate::disruptor::ErrorDecision::Stop {
+                    // Freeze at the last fully processed event, poison the
+                    // producers, and stop this processor (LMAX fatal default).
+                    self.sequence.set(current_sequence - 1);
+                    self.sequence_barrier.poison_producers();
+                    self.running.store(false, Ordering::Release);
+                    return Err(DisruptorError::Poisoned);
+                }
             }
 
             current_sequence += 1;
@@ -794,12 +802,15 @@ mod tests {
             _error: DisruptorError,
             sequence: i64,
             _event: &TestEvent,
-        ) {
+        ) -> crate::disruptor::ErrorDecision {
             self.state
                 .event_error_sequences
                 .lock()
                 .unwrap()
                 .push(sequence);
+            // Recording handler skips and continues (tests assert sequences
+            // keep advancing past failing events).
+            crate::disruptor::ErrorDecision::Continue
         }
 
         fn handle_on_start_exception(&self, _error: DisruptorError) {

@@ -235,14 +235,15 @@ fn test_real_event_processing_multiple_consumers() {
 }
 
 #[test]
-fn test_exception_handling_continues_processing() {
+fn test_exception_handling_stops_processor_by_default() {
+    // Default policy (2026-07-18 audit): a handler error is fatal, matching
+    // LMAX FatalExceptionHandler. The processor freezes at the last fully
+    // processed event and producers observe a poisoned pipeline.
     let factory = DefaultEventFactory::<TestEvent>::new();
 
-    // Create a handler that will fail on sequence 3
     let handler = CountingEventHandler::new_with_failure("failing_consumer", 3);
     let count_ref = handler.count.clone();
     let sequence_ref = handler.last_sequence.clone();
-    let processed_sequences = handler.processed_sequences.clone();
 
     let mut disruptor = Disruptor::new(
         factory,
@@ -256,7 +257,68 @@ fn test_exception_handling_continues_processing() {
 
     disruptor.start().unwrap();
 
-    // Publish events including the one that will fail
+    for i in 0..8 {
+        let _ = disruptor.publish_event(ClosureEventTranslator::new(
+            move |event: &mut TestEvent, _seq: i64| {
+                event.value = i;
+            },
+        ));
+    }
+
+    // Only sequences 0..=2 are processed before the fatal stop at 3.
+    wait_until(
+        Duration::from_secs(1),
+        || count_ref.load(Ordering::Acquire) == 3,
+        "processor to stop at the failing event",
+    );
+    assert_eq!(sequence_ref.load(Ordering::Acquire), 2);
+
+    // The pipeline is poisoned: publishing eventually fails loudly.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut poisoned = false;
+    while Instant::now() < deadline {
+        let result = disruptor.publish_event(ClosureEventTranslator::new(
+            |event: &mut TestEvent, _seq: i64| {
+                event.value = 0;
+            },
+        ));
+        if matches!(result, Err(badbatch::disruptor::DisruptorError::Poisoned)) {
+            poisoned = true;
+            break;
+        }
+    }
+    assert!(poisoned, "producer never observed the poisoned pipeline");
+
+    disruptor.shutdown().unwrap();
+}
+
+#[test]
+fn test_exception_handling_continues_with_ignore_handler() {
+    // Explicit skip policy: IgnoreExceptionHandler returns Continue, so the
+    // failing event is skipped and processing carries on (the pre-audit
+    // behavior, now opt-in instead of a silent default).
+    let factory = DefaultEventFactory::<TestEvent>::new();
+
+    let handler = CountingEventHandler::new_with_failure("failing_consumer", 3);
+    let count_ref = handler.count.clone();
+    let sequence_ref = handler.last_sequence.clone();
+    let processed_sequences = handler.processed_sequences.clone();
+
+    let mut disruptor = Disruptor::new(
+        factory,
+        32,
+        ProducerType::Single,
+        BlockingWaitStrategy::new(),
+    )
+    .unwrap()
+    .handle_events_with_exception_handler(
+        handler,
+        Box::new(badbatch::disruptor::exception_handler::IgnoreExceptionHandler::new()),
+    )
+    .build();
+
+    disruptor.start().unwrap();
+
     for i in 0..8 {
         disruptor
             .publish_event(ClosureEventTranslator::new(
@@ -270,26 +332,14 @@ fn test_exception_handling_continues_processing() {
     wait_until(
         Duration::from_secs(1),
         || count_ref.load(Ordering::Acquire) == 7,
-        "processor to continue after a handler error",
+        "processor to continue after a skipped handler error",
     );
 
-    let processed_count = count_ref.load(Ordering::Acquire);
-    let last_sequence = sequence_ref.load(Ordering::Acquire);
-    let seen_sequences = processed_sequences.lock().unwrap().clone();
-
-    badbatch::test_log!(
-        "Processed {processed_count} events (should be 7, since sequence 3 failed)"
-    );
-
+    assert_eq!(sequence_ref.load(Ordering::Acquire), 7);
     assert_eq!(
-        processed_count, 7,
-        "all non-failing events should be processed"
+        processed_sequences.lock().unwrap().clone(),
+        vec![0, 1, 2, 4, 5, 6, 7]
     );
-    assert_eq!(
-        last_sequence, 7,
-        "processing should continue past the failed event"
-    );
-    assert_eq!(seen_sequences, vec![0, 1, 2, 4, 5, 6, 7]);
 
     disruptor.shutdown().unwrap();
 }
