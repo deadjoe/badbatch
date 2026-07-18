@@ -13,6 +13,46 @@ compiler, or when CI stabilizes on a new stable series. Patch toolchain updates
 
 ## [0.2.0] — 2026-07
 
+### Soundness (2026-07-18 cross-audit — breaking)
+
+Four independent safe-API undefined-behavior holes, each reproduced under Miri
+from `#![forbid(unsafe_code)]` callers, were closed. The safe surface shrank;
+low-level composition now requires `unsafe` with documented contracts.
+
+- **Producer capability typing.** `SimpleProducer` no longer implements
+  `Clone`; `DisruptorHandle<E, W, M>` carries a `SingleProducerMode` /
+  `MultiProducerMode` marker and only multi-mode handles have
+  `create_producer`. `SimpleProducer::new`, `CloneableProducer::new`,
+  `DisruptorCore` and `create_disruptor_core` are crate-private.
+  `SingleProducerSequencer::new` is `unsafe fn` (single claim-driver
+  contract). Cloning a single-mode producer used to race on the sequencer's
+  non-atomic `UnsafeCell` claim state.
+- **Ring buffer read access.** `RingBuffer::get` and `DataProvider::get` are
+  `unsafe fn`: a safe `&T` could previously be held across a producer write to
+  the same slot (Stacked Borrows violation). `Disruptor::get_ring_buffer` is
+  removed. `EventPoller::new` and `BatchEventProcessor::new` are `unsafe fn`
+  with topology contracts; use `open_single_producer_poller`, the Builder, or
+  the DSL, which discharge them internally.
+- **Handler exclusivity.** `BatchEventProcessor` keeps its handler behind
+  `parking_lot::Mutex` (locked once per `run()`, `try_lock` on cold lifecycle
+  methods) instead of `UnsafeCell` + hand-written `Sync`; concurrent
+  `on_start`/`try_run_once` used to alias `&mut H`.
+- **DSL publish serialization.** `Disruptor` (lmax-dsl) is `Sync` with
+  `publish_event(&self)`; in `ProducerType::Single` mode a shared
+  `Arc<Disruptor>` could drive the unsynchronized claim path from two
+  threads. Single-mode DSL publishing now serializes claim access behind an
+  internal mutex (multi mode takes no lock).
+- **Claim bounds.** `try_next_n` (single and multi) rejects `n < 1` and
+  `n > buffer_size`, and producer-side capacity checks clamp the gating
+  minimum to the producer position (LMAX `Util.getMinimumSequence(seqs, min)`
+  semantics) instead of treating an empty gating list as `i64::MAX`. A
+  capacity-8 sequencer used to accept `try_next_n(1000)` and alias `&mut`
+  slots within one batch.
+
+Regression coverage: `tests/soundness_regression.rs`, two `compile_fail`
+doctests (producer clone, single-mode `create_producer`), and an extended
+Miri CI subset (claim bounds, concurrent lifecycle).
+
 ### License
 
 - Project license changed from **AGPL-3.0** to **Apache-2.0** (see `LICENSE`, `NOTICE`).

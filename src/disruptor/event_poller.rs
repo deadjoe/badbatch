@@ -46,8 +46,16 @@ where
     /// Create a poller bound to a ring buffer and monomorphized barrier.
     ///
     /// `shutdown` is observed on each poll; set it to stop the consumer loop.
+    ///
+    /// # Safety
+    /// The poller takes `&mut` access to slots the barrier reports available.
+    /// The caller must guarantee the topology invariant: the barrier's sequence
+    /// progression only exposes slots that no other consumer accesses mutably
+    /// and that the producer cannot rewrite before this poller's gating sequence
+    /// (registered with the sequencer) advances past them. Prefer
+    /// [`open_single_producer_poller`], which wires this correctly.
     #[must_use]
-    pub fn new(
+    pub unsafe fn new(
         ring_buffer: Arc<RingBuffer<T>>,
         barrier: Arc<ProcessingSequenceBarrier<W>>,
         shutdown: Arc<AtomicBool>,
@@ -286,7 +294,11 @@ where
         seq_enum.clone(),
     ));
 
-    let poller = EventPoller::new(Arc::clone(&ring_buffer), barrier, Arc::clone(&shutdown));
+    // SAFETY: fresh ring + fresh single sequencer; this poller is the only
+    // consumer, and its sequence is registered as the sole gating sequence
+    // below, so the producer cannot wrap uncommitted slots.
+    let poller =
+        unsafe { EventPoller::new(Arc::clone(&ring_buffer), barrier, Arc::clone(&shutdown)) };
     sequencer.add_gating_sequences(&[poller.sequence()]);
 
     let producer = SimpleProducer::new(ring_buffer, seq_enum);

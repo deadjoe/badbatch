@@ -319,12 +319,14 @@ fn test_try_run_once_functionality() {
     let sequence_ref = handler.last_sequence.clone();
     let processed_sequences = handler.processed_sequences.clone();
 
-    let processor = BatchEventProcessor::new(
-        ring_buffer.clone(),
-        barrier,
-        handler,
-        Box::new(DefaultExceptionHandler::new()),
-    );
+    let processor = unsafe {
+        BatchEventProcessor::new(
+            ring_buffer.clone(),
+            barrier,
+            handler,
+            Box::new(DefaultExceptionHandler::new()),
+        )
+    };
 
     processor.on_start();
 
