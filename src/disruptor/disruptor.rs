@@ -204,7 +204,36 @@ where
     ///
     /// # Returns
     /// A DisruptorBuilder for further configuration
-    pub fn handle_events_with<H>(mut self, event_handler: H) -> DisruptorBuilder<T, W>
+    pub fn handle_events_with<H>(self, event_handler: H) -> DisruptorBuilder<T, W>
+    where
+        H: EventHandler<T> + 'static,
+    {
+        // Default exception handler follows LMAX FatalExceptionHandler
+        // semantics: log and stop the processor (2026-07-18 audit).
+        self.handle_events_with_exception_handler(
+            event_handler,
+            Box::new(crate::disruptor::DefaultExceptionHandler::new()),
+        )
+    }
+
+    /// Handle events with an explicit [`crate::disruptor::ExceptionHandler`]
+    ///
+    /// The exception handler's [`crate::disruptor::ErrorDecision`] controls
+    /// whether a handler error stops this processor (LMAX fatal default) or
+    /// skips the failing event and continues
+    /// (e.g. `IgnoreExceptionHandler`).
+    ///
+    /// # Arguments
+    /// * `event_handler` - The handler to process events
+    /// * `exception_handler` - Policy for handler errors
+    ///
+    /// # Returns
+    /// A DisruptorBuilder for further configuration
+    pub fn handle_events_with_exception_handler<H>(
+        mut self,
+        event_handler: H,
+        exception_handler: Box<dyn crate::disruptor::ExceptionHandler<T>>,
+    ) -> DisruptorBuilder<T, W>
     where
         H: EventHandler<T> + 'static,
     {
@@ -221,7 +250,7 @@ where
                 self.ring_buffer.clone(),
                 barrier,
                 event_handler,
-                Box::new(crate::disruptor::DefaultExceptionHandler::new()),
+                exception_handler,
             )
         };
 

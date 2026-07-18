@@ -9,8 +9,8 @@
 
 use crate::disruptor::{
     sequence_barrier::{ProcessingSequenceBarrier, SequenceBarrier},
-    DisruptorError, EventHandler, ExceptionHandler, Result, RingBuffer, Sequence, WaitStrategy,
-    INITIAL_CURSOR_VALUE,
+    DisruptorError, ErrorDecision, EventHandler, ExceptionHandler, Result, RingBuffer, Sequence,
+    WaitStrategy, INITIAL_CURSOR_VALUE,
 };
 use crossbeam_utils::CachePadded;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -117,7 +117,16 @@ pub fn run_sequential_batch_loop_with_exceptions<E, H, W>(
 
                 let batch_size = available_sequence - next_sequence + 1;
                 let queue_depth = available_sequence - consumer_sequence.get();
-                let _ = event_handler.on_batch_start(batch_size, queue_depth);
+                if let Err(e) = event_handler.on_batch_start(batch_size, queue_depth) {
+                    // Fatal: nothing of this batch was processed; freeze the
+                    // sequence and poison the producers (2026-07-18 audit —
+                    // this Result used to be silently discarded).
+                    crate::internal_error!(
+                        "on_batch_start failed in '{thread_name}' at sequence {next_sequence}: {e:?}"
+                    );
+                    sequence_barrier.poison_producers();
+                    return;
+                }
 
                 while next_sequence <= available_sequence {
                     let end_of_batch = next_sequence == available_sequence;
@@ -126,19 +135,23 @@ pub fn run_sequential_batch_loop_with_exceptions<E, H, W>(
                     let event = unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
 
                     if let Err(e) = event_handler.on_event(event, next_sequence, end_of_batch) {
-                        if let Some(eh) = exception_handler {
-                            eh.handle_event_exception(e, next_sequence, event);
+                        let decision = if let Some(eh) = exception_handler {
+                            eh.handle_event_exception(e, next_sequence, event)
                         } else {
-                            #[cfg(debug_assertions)]
-                            {
-                                eprintln!(
-                                    "Event processing error in '{thread_name}' at sequence {next_sequence}: {e:?}"
-                                );
-                            }
-                            #[cfg(not(debug_assertions))]
-                            {
-                                let _ = (e, thread_name);
-                            }
+                            // No exception handler: LMAX-default fatal stop
+                            // (used to silently skip; 2026-07-18 audit).
+                            crate::internal_error!(
+                                "Event processing error in '{thread_name}' at sequence {next_sequence}: {e:?}"
+                            );
+                            ErrorDecision::Stop
+                        };
+
+                        if decision == ErrorDecision::Stop {
+                            // Freeze at the last fully processed event and fail
+                            // the producers fast instead of stalling them.
+                            consumer_sequence.set(next_sequence - 1);
+                            sequence_barrier.poison_producers();
+                            return;
                         }
                     }
 
@@ -201,20 +214,28 @@ pub fn run_work_processor_loop<E, H, W>(
         }
 
         let end_of_batch = claimed == cached_available;
-        let _ = event_handler.on_batch_start(1, cached_available - claimed + 1);
+        if let Err(e) = event_handler.on_batch_start(1, cached_available - claimed + 1) {
+            // Fatal (2026-07-18 audit): this Result used to be discarded.
+            crate::internal_error!(
+                "on_batch_start failed in '{thread_name}' at sequence {claimed}: {e:?}"
+            );
+            sequence_barrier.poison_producers();
+            break 'work;
+        }
 
         // SAFETY: CAS claim grants exclusive ownership of `claimed`.
         let event = unsafe { &mut *ring_buffer.get_mut_unchecked(claimed) };
 
         if let Err(e) = event_handler.on_event(event, claimed, end_of_batch) {
-            #[cfg(debug_assertions)]
-            {
-                eprintln!("Event processing error in '{thread_name}' at sequence {claimed}: {e:?}");
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                let _ = (e, thread_name);
-            }
+            // WorkerPool has no per-worker exception handler; apply the
+            // LMAX-default fatal policy (used to silently skip the event).
+            // Note: `claimed` was already CAS-taken from the shared work
+            // cursor, so this worker's sequence stays at its pre-claim value.
+            crate::internal_error!(
+                "Event processing error in '{thread_name}' at sequence {claimed}: {e:?}"
+            );
+            sequence_barrier.poison_producers();
+            break 'work;
         }
 
         consumer_sequence.set(claimed);
@@ -259,16 +280,13 @@ pub fn run_sequential_readonly_loop<E, F, W>(
                     // until it advances. Fan-out consumers do not mutate slots.
                     let event = unsafe { ring_buffer.get(next_sequence) };
                     if let Err(e) = on_event(event, next_sequence, end_of_batch) {
-                        #[cfg(debug_assertions)]
-                        {
-                            eprintln!(
-                                "Readonly fan-out error in '{thread_name}' at sequence {next_sequence}: {e:?}"
-                            );
-                        }
-                        #[cfg(not(debug_assertions))]
-                        {
-                            let _ = (e, thread_name);
-                        }
+                        // LMAX-default fatal policy (used to silently skip).
+                        crate::internal_error!(
+                            "Readonly fan-out error in '{thread_name}' at sequence {next_sequence}: {e:?}"
+                        );
+                        consumer_sequence.set(next_sequence - 1);
+                        sequence_barrier.poison_producers();
+                        return;
                     }
                     next_sequence += 1;
                 }

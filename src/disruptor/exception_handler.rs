@@ -7,6 +7,21 @@
 use crate::disruptor::DisruptorError;
 use std::fmt::Debug;
 
+/// What the consumer loop should do after a handler error.
+///
+/// Returned by [`ExceptionHandler::handle_event_exception`]. `Stop` matches
+/// LMAX's default `FatalExceptionHandler` semantics (log, then kill the
+/// processor); `Continue` matches the "skip the event" policy that used to be
+/// the silent default before the 2026-07-18 audit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorDecision {
+    /// Stop this consumer: its sequence freezes at the last fully processed
+    /// event and the producers are poisoned so publishing fails fast.
+    Stop,
+    /// Skip the failing event and keep consuming.
+    Continue,
+}
+
 /// Handler for exceptions that occur during event processing
 ///
 /// This trait allows custom handling of exceptions that occur during
@@ -26,7 +41,15 @@ pub trait ExceptionHandler<T>: Send + Sync {
     /// * `error` - The error that occurred
     /// * `sequence` - The sequence number of the event that caused the error
     /// * `event` - The event that was being processed when the error occurred
-    fn handle_event_exception(&self, error: DisruptorError, sequence: i64, event: &T);
+    ///
+    /// # Returns
+    /// The [`ErrorDecision`] the consumer loop must follow.
+    fn handle_event_exception(
+        &self,
+        error: DisruptorError,
+        sequence: i64,
+        event: &T,
+    ) -> ErrorDecision;
 
     /// Handle an exception that occurred during the event processing loop startup
     ///
@@ -73,10 +96,18 @@ impl<T> ExceptionHandler<T> for DefaultExceptionHandler<T>
 where
     T: Debug + Send + Sync,
 {
-    fn handle_event_exception(&self, error: DisruptorError, sequence: i64, event: &T) {
+    fn handle_event_exception(
+        &self,
+        error: DisruptorError,
+        sequence: i64,
+        event: &T,
+    ) -> ErrorDecision {
         crate::internal_error!(
             "Exception processing event at sequence {sequence}: {error:?}. Event: {event:?}"
         );
+        // LMAX default (FatalExceptionHandler): a handler error kills the
+        // processor instead of silently skipping events (2026-07-18 audit).
+        ErrorDecision::Stop
     }
 
     fn handle_on_start_exception(&self, error: DisruptorError) {
@@ -115,8 +146,14 @@ impl<T> ExceptionHandler<T> for IgnoreExceptionHandler<T>
 where
     T: Send + Sync,
 {
-    fn handle_event_exception(&self, _error: DisruptorError, _sequence: i64, _event: &T) {
-        // Ignore the exception
+    fn handle_event_exception(
+        &self,
+        _error: DisruptorError,
+        _sequence: i64,
+        _event: &T,
+    ) -> ErrorDecision {
+        // Ignore the exception and keep consuming.
+        ErrorDecision::Continue
     }
 
     fn handle_on_start_exception(&self, _error: DisruptorError) {
@@ -153,7 +190,12 @@ impl<T> ExceptionHandler<T> for PanicExceptionHandler<T>
 where
     T: Debug + Send + Sync,
 {
-    fn handle_event_exception(&self, error: DisruptorError, sequence: i64, event: &T) {
+    fn handle_event_exception(
+        &self,
+        error: DisruptorError,
+        sequence: i64,
+        event: &T,
+    ) -> ErrorDecision {
         panic!("Exception processing event at sequence {sequence}: {error:?}. Event: {event:?}");
     }
 
@@ -177,7 +219,7 @@ where
 /// * `H` - The closure type for shutdown exceptions
 pub struct ClosureExceptionHandler<T, F, S, H>
 where
-    F: Fn(DisruptorError, i64, &T) + Send + Sync,
+    F: Fn(DisruptorError, i64, &T) -> ErrorDecision + Send + Sync,
     S: Fn(DisruptorError) + Send + Sync,
     H: Fn(DisruptorError) + Send + Sync,
 {
@@ -189,7 +231,7 @@ where
 
 impl<T, F, S, H> ClosureExceptionHandler<T, F, S, H>
 where
-    F: Fn(DisruptorError, i64, &T) + Send + Sync,
+    F: Fn(DisruptorError, i64, &T) -> ErrorDecision + Send + Sync,
     S: Fn(DisruptorError) + Send + Sync,
     H: Fn(DisruptorError) + Send + Sync,
 {
@@ -212,12 +254,17 @@ where
 impl<T, F, S, H> ExceptionHandler<T> for ClosureExceptionHandler<T, F, S, H>
 where
     T: Send + Sync,
-    F: Fn(DisruptorError, i64, &T) + Send + Sync,
+    F: Fn(DisruptorError, i64, &T) -> ErrorDecision + Send + Sync,
     S: Fn(DisruptorError) + Send + Sync,
     H: Fn(DisruptorError) + Send + Sync,
 {
-    fn handle_event_exception(&self, error: DisruptorError, sequence: i64, event: &T) {
-        (self.event_handler)(error, sequence, event);
+    fn handle_event_exception(
+        &self,
+        error: DisruptorError,
+        sequence: i64,
+        event: &T,
+    ) -> ErrorDecision {
+        (self.event_handler)(error, sequence, event)
     }
 
     fn handle_on_start_exception(&self, error: DisruptorError) {
@@ -245,8 +292,11 @@ mod tests {
         let handler = DefaultExceptionHandler::<TestEvent>::new();
         let event = TestEvent { value: 42 };
 
-        // These should not panic, just log to stderr
-        handler.handle_event_exception(DisruptorError::BufferFull, 1, &event);
+        // Logs to stderr and demands the LMAX-default fatal stop.
+        assert_eq!(
+            handler.handle_event_exception(DisruptorError::BufferFull, 1, &event),
+            ErrorDecision::Stop
+        );
         handler.handle_on_start_exception(DisruptorError::Shutdown);
         handler.handle_on_shutdown_exception(DisruptorError::Timeout);
     }
@@ -256,8 +306,11 @@ mod tests {
         let handler = IgnoreExceptionHandler::<TestEvent>::new();
         let event = TestEvent { value: 42 };
 
-        // These should do nothing
-        handler.handle_event_exception(DisruptorError::BufferFull, 1, &event);
+        // Ignoring means the loop keeps going.
+        assert_eq!(
+            handler.handle_event_exception(DisruptorError::BufferFull, 1, &event),
+            ErrorDecision::Continue
+        );
         handler.handle_on_start_exception(DisruptorError::Shutdown);
         handler.handle_on_shutdown_exception(DisruptorError::Timeout);
     }
@@ -282,6 +335,7 @@ mod tests {
                     sequence,
                     event.value,
                 ));
+                ErrorDecision::Continue
             },
             move |error| {
                 start_calls.start.lock().unwrap().push(format!("{error:?}"));
@@ -296,7 +350,10 @@ mod tests {
         );
 
         let event = TestEvent { value: 42 };
-        handler.handle_event_exception(DisruptorError::BufferFull, 1, &event);
+        assert_eq!(
+            handler.handle_event_exception(DisruptorError::BufferFull, 1, &event),
+            ErrorDecision::Continue
+        );
         handler.handle_on_start_exception(DisruptorError::Shutdown);
         handler.handle_on_shutdown_exception(DisruptorError::Timeout);
 
@@ -313,7 +370,7 @@ mod tests {
     fn test_panic_exception_handler_panics_on_event_exception() {
         let handler = PanicExceptionHandler::<TestEvent>::new();
         let event = TestEvent { value: 99 };
-        handler.handle_event_exception(DisruptorError::BufferFull, 7, &event);
+        let _ = handler.handle_event_exception(DisruptorError::BufferFull, 7, &event);
     }
 
     #[test]
