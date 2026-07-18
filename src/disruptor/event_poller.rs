@@ -196,7 +196,10 @@ where
         if sequence < self.from || sequence > self.to {
             return None;
         }
-        Some(self.poller.ring_buffer.get(sequence))
+        // SAFETY: [from, to] is published (poll observed it) and the poller's
+        // gating sequence is not advanced until this batch commits, so the
+        // producer cannot wrap into the range while this borrow is alive.
+        Some(unsafe { self.poller.ring_buffer.get(sequence) })
     }
 
     /// Take the next event mutably. Returns `None` when the batch is exhausted.

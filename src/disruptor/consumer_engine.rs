@@ -254,8 +254,10 @@ pub fn run_sequential_readonly_loop<E, F, W>(
 
                 while next_sequence <= available_sequence {
                     let end_of_batch = next_sequence == available_sequence;
-                    // Immutable shared access: fan-out consumers do not mutate slots.
-                    let event = ring_buffer.get(next_sequence);
+                    // SAFETY: the barrier guarantees [next, available] is published,
+                    // and this consumer's gating sequence prevents producer wrap-around
+                    // until it advances. Fan-out consumers do not mutate slots.
+                    let event = unsafe { ring_buffer.get(next_sequence) };
                     if let Err(e) = on_event(event, next_sequence, end_of_batch) {
                         #[cfg(debug_assertions)]
                         {

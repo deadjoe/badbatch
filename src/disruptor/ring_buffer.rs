@@ -240,11 +240,20 @@ where
     /// # Returns
     /// A reference to the event at the specified sequence
     ///
+    /// # Safety
+    /// The ring buffer performs no access coordination itself. The caller must
+    /// guarantee, via the sequencing protocol (barrier/gating), that the slot at
+    /// `sequence` is published and cannot be written — by a producer claim or by
+    /// wrap-around — for as long as the returned reference is alive. Holding the
+    /// reference across a concurrent write is undefined behavior (soundness
+    /// audit 2026-07-18: this method was previously safe and allowed exactly
+    /// that misuse from safe code).
+    ///
     /// # Panics
     /// Panics if the masked sequence cannot be converted into a valid `usize`.
     #[inline]
     #[must_use]
-    pub fn get(&self, sequence: i64) -> &T {
+    pub unsafe fn get(&self, sequence: i64) -> &T {
         let index = self.slot_index(sequence);
         unsafe { self.storage.get_ref_unchecked(index) }
     }
@@ -482,8 +491,10 @@ impl<T> DataProvider<T> for RingBuffer<T>
 where
     T: Send + Sync,
 {
-    fn get(&self, sequence: i64) -> &T {
-        self.get(sequence)
+    unsafe fn get(&self, sequence: i64) -> &T {
+        // SAFETY: forwarded contract — caller guarantees the slot is published
+        // and not concurrently written (see trait docs).
+        unsafe { self.get(sequence) }
     }
 
     #[allow(clippy::mut_from_ref)]
@@ -586,7 +597,7 @@ mod tests {
 
         // Test read access
         {
-            let event = buffer.get(0);
+            let event = unsafe { buffer.get(0) };
             assert_eq!(event.value, 42);
         }
 
@@ -597,7 +608,7 @@ mod tests {
         }
 
         {
-            let event = buffer.get(0);
+            let event = unsafe { buffer.get(0) };
             assert_eq!(event.value, 100); // Should be the same slot
         }
     }
@@ -641,7 +652,7 @@ mod tests {
         }
 
         // Verify the value was set
-        let event = buffer.get(0);
+        let event = unsafe { buffer.get(0) };
         assert_eq!(event.value, 123);
     }
 
@@ -708,7 +719,7 @@ mod tests {
 
         // Test DataProvider trait implementation
         let provider: &dyn DataProvider<TestEvent> = &buffer;
-        let event = provider.get(0);
+        let event = unsafe { provider.get(0) };
         assert_eq!(event.value, 456);
     }
 
@@ -731,7 +742,7 @@ mod tests {
         // Slot 3: gets values 3, 7, 11 -> final value is 11
         for i in 0..4 {
             let expected_value = i + 8; // Last value written to each slot
-            let event = buffer.get(i);
+            let event = unsafe { buffer.get(i) };
             assert_eq!(event.value, expected_value);
         }
     }
@@ -746,11 +757,11 @@ mod tests {
         event.value = 999;
 
         // Verify negative sequence access
-        let event = buffer.get(-1);
+        let event = unsafe { buffer.get(-1) };
         assert_eq!(event.value, 999);
 
         // Test that -1 wraps to the same position as buffer_size - 1
-        let event2 = buffer.get(7); // 8 - 1 = 7
+        let event2 = unsafe { buffer.get(7) }; // 8 - 1 = 7
         assert_eq!(event2.value, 999);
     }
 
@@ -765,7 +776,7 @@ mod tests {
         event.value = 777;
 
         // Verify large sequence access
-        let event = buffer.get(large_seq);
+        let event = unsafe { buffer.get(large_seq) };
         assert_eq!(event.value, 777);
     }
 
@@ -811,7 +822,7 @@ mod tests {
 
         // Test that buffer can be sent between threads
         let handle = std::thread::spawn(move || {
-            let event = buffer.get(0);
+            let event = unsafe { buffer.get(0) };
             event.value
         });
 

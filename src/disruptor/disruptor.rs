@@ -153,14 +153,6 @@ where
     T: Send + Sync + std::fmt::Debug + 'static,
     W: WaitStrategy + 'static,
 {
-    /// Get the ring buffer
-    ///
-    /// # Returns
-    /// A reference to the ring buffer
-    pub fn get_ring_buffer(&self) -> &Arc<RingBuffer<T>> {
-        &self.ring_buffer
-    }
-
     /// Get the cursor sequence
     ///
     /// # Returns
@@ -555,15 +547,6 @@ mod tests {
     }
 
     #[test]
-    fn test_disruptor_get_ring_buffer() {
-        let factory = DefaultEventFactory::<TestEvent>::new();
-        let disruptor = Disruptor::with_defaults(factory, 256).unwrap();
-
-        let ring_buffer = disruptor.get_ring_buffer();
-        assert_eq!(ring_buffer.buffer_size(), 256);
-    }
-
-    #[test]
     fn test_disruptor_get_cursor() {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let disruptor = Disruptor::with_defaults(factory, 128).unwrap();
@@ -753,7 +736,7 @@ mod tests {
         let ring_buffer = RingBuffer::new(16, factory).unwrap();
 
         // Test get method
-        let event = ring_buffer.get(0);
+        let event = unsafe { ring_buffer.get(0) };
         assert_eq!(event.value, 0); // Default value
 
         // Test unchecked mutable access (the path used by producers/processors)
@@ -763,7 +746,7 @@ mod tests {
         }
 
         // Verify the change
-        let event = ring_buffer.get(0);
+        let event = unsafe { ring_buffer.get(0) };
         assert_eq!(event.value, 999);
     }
 }

@@ -237,8 +237,10 @@ where
                 while available >= next_sequence && !shutdown.load(Ordering::Acquire) {
                     let end_of_batch = available == next_sequence;
 
-                    // Get the event safely
-                    let event = ring_buffer.get(next_sequence);
+                    // SAFETY: the barrier guarantees the sequence is published and this
+                    // consumer's gating sequence prevents producer wrap-around until it
+                    // advances past this slot.
+                    let event = unsafe { ring_buffer.get(next_sequence) };
 
                     // Process the event
                     event_handler(event, next_sequence, end_of_batch);
@@ -283,8 +285,10 @@ where
                 while available >= next_sequence && !shutdown.load(Ordering::Acquire) {
                     let end_of_batch = available == next_sequence;
 
-                    // Get the event safely
-                    let event = ring_buffer.get(next_sequence);
+                    // SAFETY: the barrier guarantees the sequence is published and this
+                    // consumer's gating sequence prevents producer wrap-around until it
+                    // advances past this slot.
+                    let event = unsafe { ring_buffer.get(next_sequence) };
 
                     // Process the event with state
                     event_handler(&mut state, event, next_sequence, end_of_batch);

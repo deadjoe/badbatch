@@ -136,7 +136,8 @@ mod ring_buffer_properties {
             let normalized_seq = sequence.rem_euclid(size_i64);
 
             *buffer.get_mut(normalized_seq) = value;
-            prop_assert_eq!(*buffer.get(normalized_seq), value);
+            // SAFETY: single-threaded proptest, no concurrent writers.
+            prop_assert_eq!(*unsafe { buffer.get(normalized_seq) }, value);
         }
 
         #[test]
@@ -154,7 +155,8 @@ mod ring_buffer_properties {
                 let value = i64::try_from(i).expect("index fits within i64");
 
                 *buffer.get_mut(normalized) = value;
-                prop_assert_eq!(*buffer.get(normalized), value);
+                // SAFETY: single-threaded proptest, no concurrent writers.
+            prop_assert_eq!(*unsafe { buffer.get(normalized) }, value);
             }
         }
     }
