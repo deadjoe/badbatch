@@ -556,11 +556,19 @@ where
         self.producer.duplicate_for_multi()
     }
 
-    /// Try to publish one event; returns [`crate::disruptor::RingBufferFull`] if no slot is free.
+    /// Try to publish one event.
+    ///
+    /// # Errors
+    /// [`TryPublishError::Full`](crate::disruptor::producer::TryPublishError::Full)
+    /// on transient backpressure; a terminal
+    /// [`TryPublishError::Poisoned`](crate::disruptor::producer::TryPublishError::Poisoned)
+    /// or
+    /// [`TryPublishError::Shutdown`](crate::disruptor::producer::TryPublishError::Shutdown)
+    /// where retrying can never succeed.
     pub fn try_publish<F>(
         &self,
         update: F,
-    ) -> std::result::Result<i64, crate::disruptor::producer::RingBufferFull>
+    ) -> std::result::Result<i64, crate::disruptor::producer::TryPublishError>
     where
         F: FnOnce(&mut E),
     {
@@ -579,11 +587,19 @@ where
     }
 
     /// Try to publish a batch of `n` events.
+    ///
+    /// # Errors
+    /// [`TryPublishError::MissingFreeSlots`](crate::disruptor::producer::TryPublishError::MissingFreeSlots)
+    /// on transient backpressure; a terminal
+    /// [`TryPublishError::Poisoned`](crate::disruptor::producer::TryPublishError::Poisoned)
+    /// or
+    /// [`TryPublishError::Shutdown`](crate::disruptor::producer::TryPublishError::Shutdown)
+    /// where retrying can never succeed.
     pub fn try_batch_publish<F>(
         &self,
         n: usize,
         update: F,
-    ) -> std::result::Result<i64, crate::disruptor::producer::MissingFreeSlots>
+    ) -> std::result::Result<i64, crate::disruptor::producer::TryPublishError>
     where
         F: for<'a> FnOnce(crate::disruptor::ring_buffer::BatchIterMut<'a, E>),
     {
