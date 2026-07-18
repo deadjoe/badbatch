@@ -13,6 +13,29 @@ compiler, or when CI stabilizes on a new stable series. Patch toolchain updates
 
 ## [0.2.0] — 2026-07
 
+### Surface & validation cleanup (2026-07-18 audit P2 round)
+
+- **Dead surface removed.** `Cursored`, `Sequenced`, and `EventSink` traits
+  (no implementations or callers) are gone; `DataProvider` is re-exported
+  from `disruptor::`. The empty `full-benchmarks` feature is removed.
+- **Feature hygiene.** parking_lot's deadlock detector is opt-in via the new
+  `deadlock-detection` feature (was unconditional). The four diagnostic /
+  benchmark binaries (~4.3K lines) require the new `bench-tools` feature.
+  `panic = "abort"` is removed from the release profile — the P1 poisoning
+  design depends on unwinding.
+- **README is now executable.** Every Rust block compiles and runs as a
+  doctest (`#[doc = include_str!]`); the poller example's three
+  audit-confirmed errors are fixed, and all examples use the current
+  fallible-publish API.
+- **CI hardening.** New macOS ARM64 job (clippy + full tests + core-only);
+  `cargo audit` / `cargo deny` failures are hard failures under CI
+  (previously warnings).
+- **Docs accuracy.** Stale `# Panics` sections on the ring-buffer accessors
+  removed (mask+cast cannot panic); the DSL is documented as the
+  Java-compat surface and `ElegantConsumer` as legacy with its poisoning
+  gap called out; the DSL shutdown's fixed 1 ms sleep and redundant SeqCst
+  fence are removed.
+
 ### Failure & lifecycle semantics (2026-07-18 audit P1 round — breaking)
 
 Silent failure modes identified by the audit are now explicit, delivered

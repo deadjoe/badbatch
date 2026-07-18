@@ -1,12 +1,14 @@
-# CI gate for BadBatch (Linux).
+# CI gate for BadBatch (Linux + macOS).
 #
 # Jobs:
-#   test  — fmt, clippy, full suite via scripts/test-all.sh, core-only + stress
-#   loom  — small WorkerPool claim models (release)
-#   miri  — nightly Miri on ring_buffer + sequence (must override rust-toolchain.toml)
+#   test        — fmt, clippy, full suite via scripts/test-all.sh, core-only + stress (Linux)
+#   test-macos  — full test suite on Apple Silicon (the primary perf target platform)
+#   loom        — small WorkerPool claim models (release)
+#   miri        — nightly Miri on ring_buffer + sequence + soundness regressions
 #
 # The repo pins `stable` via rust-toolchain.toml. The Miri job sets
 # RUSTUP_TOOLCHAIN=nightly so cargo/miri do not fall back to stable (which has no miri).
+# audit/deny run hard-fail under BB_CI (2026-07-18 audit hardening).
 
 name: Tests
 
@@ -65,6 +67,34 @@ jobs:
       - name: Concurrency stress (claim + MPSC exactly-once, release)
         run: |
           cargo test --test worker_pool_claim_stress --test mpsc_exactly_once_stress --release --locked
+
+  test-macos:
+    name: Test (macOS ARM64 stable)
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-macos-stable
+          cache-on-failure: true
+
+      - name: Clippy (all targets, all features)
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Tests (lib + integration + doc)
+        run: cargo test --all-features --locked
+
+      - name: Core-only library tests (--no-default-features)
+        run: cargo test --lib --no-default-features --locked
 
   loom:
     name: Loom claim models

@@ -215,8 +215,12 @@ security_audit() {
     if cargo audit; then
         print_success "安全审计通过"
     else
-        print_warning "安全审计发现问题，请检查输出"
-        # 不退出，因为可能只是警告
+        if [ -n "$BB_CI" ]; then
+            print_error "CI 模式下安全审计失败（2026-07-18 审计整改：audit 硬失败）"
+            exit 1
+        else
+            print_warning "安全审计发现问题，请检查输出（CI 中将硬失败）"
+        fi
     fi
 }
 
@@ -232,7 +236,11 @@ dependency_check() {
     if cargo deny check; then
         print_success "依赖管理检查通过"
     else
-        print_warning "依赖管理检查发现问题，请检查输出"
+        if [ -n "$BB_CI" ]; then
+            print_error "CI 模式下依赖检查失败（2026-07-18 审计整改：deny 硬失败）"
+            exit 1
+        fi
+        print_warning "依赖管理检查发现问题，请检查输出（CI 中将硬失败）"
         # 不退出，因为可能只是警告
     fi
 }
