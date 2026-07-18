@@ -248,9 +248,6 @@ where
     /// reference across a concurrent write is undefined behavior (soundness
     /// audit 2026-07-18: this method was previously safe and allowed exactly
     /// that misuse from safe code).
-    ///
-    /// # Panics
-    /// Panics if the masked sequence cannot be converted into a valid `usize`.
     #[inline]
     #[must_use]
     pub unsafe fn get(&self, sequence: i64) -> &T {
@@ -265,9 +262,6 @@ where
     ///
     /// # Returns
     /// A mutable reference to the event at the specified sequence
-    ///
-    /// # Panics
-    /// Panics if the masked sequence cannot be converted into a valid `usize`.
     #[inline]
     #[must_use]
     pub fn get_mut(&mut self, sequence: i64) -> &mut T {
@@ -291,9 +285,6 @@ where
     /// This method is unsafe because it allows mutable access without checking
     /// for exclusive access. The caller must ensure that only one thread
     /// accesses the event mutably at a time.
-    ///
-    /// # Panics
-    /// Panics if the masked sequence cannot be converted into a valid `usize`.
     #[inline]
     #[must_use]
     pub unsafe fn get_mut_unchecked(&self, sequence: i64) -> *mut T {

@@ -87,8 +87,7 @@ pub mod event_poller;
 pub mod disruptor;
 
 // Re-export core types for convenience
-pub use sequence::Sequence;
-// pub use core_interfaces::{Cursored, Sequenced, DataProvider, EventSink}; // Temporarily disabled
+pub use core_interfaces::DataProvider;
 #[cfg(feature = "lmax-dsl")]
 pub use disruptor::Disruptor;
 pub use event_factory::{DefaultEventFactory, EventFactory};
@@ -100,6 +99,7 @@ pub use event_translator::{
 pub use exception_handler::{DefaultExceptionHandler, ErrorDecision, ExceptionHandler};
 pub use producer_type::ProducerType;
 pub use ring_buffer::{RingBuffer, SlotPadding};
+pub use sequence::Sequence;
 pub use sequence_barrier::{ProcessingSequenceBarrier, SequenceBarrier};
 pub use sequencer::{MultiProducerSequencer, Sequencer, SequencerEnum, SingleProducerSequencer};
 pub use wait_strategy::{
