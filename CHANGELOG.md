@@ -13,6 +13,45 @@ compiler, or when CI stabilizes on a new stable series. Patch toolchain updates
 
 ## [0.2.0] — 2026-07
 
+### Failure & lifecycle semantics (2026-07-18 audit P1 round — breaking)
+
+Silent failure modes identified by the audit are now explicit, delivered
+results. Five changes, each breaking for callers of the old signatures:
+
+- **Fallible publishing.** `Producer::publish` / `batch_publish` (and the
+  handle/`CloneableProducer` delegates) return `Result<i64>` with the
+  published sequence. Failed claims were previously logged via
+  `internal_error!` (silent in release without `BADBATCH_LOG`) and dropped —
+  `batch_publish(n > capacity)` lost the whole batch invisibly.
+- **Panic poisoning** (`DisruptorError::Poisoned`). A panicking consumer
+  thread (builder consumers, `BatchEventProcessor::run`) poisons the
+  producers: blocking claims fail fast — including from inside the
+  backpressure spin loop — instead of spinning forever on a dead gating
+  sequence. A panicking producer update closure (or DSL translator) poisons
+  the pipeline instead of exposing a never-written slot on the next publish.
+  `ElegantConsumer` (extras/legacy) is not yet covered.
+- **Handler error policy.** `ExceptionHandler::handle_event_exception`
+  returns an `ErrorDecision` (`Stop` / `Continue`). `DefaultExceptionHandler`
+  now stops the processor (LMAX `FatalExceptionHandler` semantics) and
+  poisons the producers; the old skip-and-continue behavior is opt-in via
+  `IgnoreExceptionHandler` or the new DSL entry point
+  `handle_events_with_exception_handler`. `on_batch_start` errors are fatal
+  instead of discarded.
+- **Draining shutdown.** `DisruptorHandle::shutdown()` drains the published
+  backlog before stopping (LMAX `shutdown()`), aborting early when the
+  pipeline is poisoned or a consumer already died; `shutdown_timeout(d)`
+  bounds the drain and reports Timeout/Poisoned/ShutdownError; `halt()` is
+  the explicit abrupt stop (old behavior). `Drop` performs a 2s bounded
+  drain instead of discarding the backlog.
+- **Poller partial commit.** Dropping an `EventBatch` acknowledges only the
+  events actually taken via `next_mut`; untaken events are redelivered.
+  `ack_all()` is the explicit full-batch acknowledgement (the old drop
+  behavior).
+
+Coverage: `tests/failure_semantics.rs`, `tests/shutdown_semantics.rs`,
+poller partial-commit unit tests, and reworked exception-policy integration
+tests.
+
 ### Soundness (2026-07-18 cross-audit — breaking)
 
 Four independent safe-API undefined-behavior holes, each reproduced under Miri
