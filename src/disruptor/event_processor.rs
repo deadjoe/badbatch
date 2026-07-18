@@ -45,11 +45,21 @@ pub trait EventProcessor: Send + Sync + std::fmt::Debug {
 
     /// Try to run one batch of event processing
     ///
-    /// This processes available events once and returns immediately.
-    /// Returns true if events were processed, false if no events available.
+    /// This processes available events once and returns immediately. The probe
+    /// *self-activates*: it claims the processor's running flag via CAS for the
+    /// duration of the call, so it is mutually exclusive with [`Self::run`] and
+    /// with concurrent probes — if the main loop owns the processor this returns
+    /// `Ok(false)` immediately. No prior `run()`/`on_start()` call is needed to
+    /// activate it; `on_start()` is a pure lifecycle callback and does not touch
+    /// the running flag.
+    ///
+    /// After a fatal failure ([`DisruptorError::Poisoned`]) the sequence freezes
+    /// at the failed event: subsequent probes re-attempt that event (and
+    /// typically fail again) rather than skipping it.
     ///
     /// # Returns
-    /// True if events were processed, false if no events available
+    /// True if events were processed, false if no events available or the
+    /// processor is currently owned by the main loop / another probe
     fn try_run_once(&self) -> Result<bool>;
 
     /// Notify of a timeout
@@ -209,6 +219,17 @@ where
     }
 }
 
+/// RAII guard that releases the `running` claim taken by
+/// [`BatchEventProcessor::try_run_once`] when the probe exits, on every path
+/// (early returns and errors included).
+struct RunningClaimGuard<'a>(&'a AtomicBool);
+
+impl Drop for RunningClaimGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 impl<T, H, W> EventProcessor for BatchEventProcessor<T, H, W>
 where
     T: Send + Sync + 'static,
@@ -259,13 +280,26 @@ where
     }
 
     fn try_run_once(&self) -> Result<bool> {
-        // Check if we're running
-        if !self.running.load(Ordering::Acquire) {
+        // Self-activate: claim the running flag for the duration of this probe.
+        // `run()` claims the same flag via CAS, so a probe is mutually exclusive
+        // with the main loop and with other probes. (Before the 2026-07-19 audit
+        // this method required `running` to be pre-set, but the only public
+        // flag-setting path was `run()` itself — making try_run_once unusable
+        // from safe single-threaded code.)
+        if self
+            .running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            // The main run() loop (or another in-flight probe) owns the processor.
             return Ok(false);
         }
+        // Release the claim on every exit path below, including early returns.
+        let _claim = RunningClaimGuard(&self.running);
 
-        // Exclusive handler access for the whole probe+process step. If the lock
-        // is contended the main run() loop is processing; report no work done.
+        // Exclusive handler access for the whole probe+process step. With the
+        // CAS above this is defence-in-depth: a contended lock means the main
+        // run() loop is mid-callback; report no work done.
         let Some(mut handler_guard) = self.event_handler.try_lock() else {
             return Ok(false);
         };
@@ -586,10 +620,12 @@ mod tests {
             )
         };
 
-        // Should return false when not running
+        // With an empty ring the self-activating probe claims the processor,
+        // finds nothing to do, and reports false (releasing the claim again).
         let result = processor.try_run_once();
         assert!(result.is_ok());
         assert!(!result.unwrap());
+        assert!(!processor.is_running());
     }
 
     #[test]
@@ -614,6 +650,8 @@ mod tests {
 
         processor.running.store(true, Ordering::Release);
 
+        // While the running flag is claimed (as run() would hold it), a probe
+        // must back off immediately instead of racing the owner.
         let start = Instant::now();
         let result = processor.try_run_once();
         let elapsed = start.elapsed();
@@ -621,8 +659,12 @@ mod tests {
         assert!(matches!(result, Ok(false)));
         assert!(
             elapsed < Duration::from_millis(5),
-            "try_run_once should probe immediately, elapsed={elapsed:?}"
+            "try_run_once should back off immediately, elapsed={elapsed:?}"
         );
+
+        // The probe must not have disturbed the owner's claim.
+        assert!(processor.is_running());
+        processor.running.store(false, Ordering::Release);
     }
 
     #[test]
@@ -876,8 +918,6 @@ mod tests {
         };
 
         processor.on_start();
-        // run() CAS sets running; manual try_run_once callers must mark running.
-        processor.running.store(true, Ordering::Release);
 
         for sequence in 0..=1 {
             let claimed = sequencer.next().unwrap();
@@ -934,7 +974,6 @@ mod tests {
         };
 
         processor.on_start();
-        processor.running.store(true, Ordering::Release);
 
         for sequence in 0..=1 {
             let claimed = sequencer.next().unwrap();
@@ -1137,8 +1176,6 @@ mod tests {
                 Box::new(DefaultExceptionHandler::new()),
             )
         };
-        // Mark running so try_run_once proceeds.
-        processor.running.store(true, Ordering::Release);
 
         let result = processor.try_run_once();
         assert!(
