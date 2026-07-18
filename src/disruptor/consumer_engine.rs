@@ -160,7 +160,14 @@ pub fn run_sequential_batch_loop_with_exceptions<E, H, W>(
 
                 consumer_sequence.set(available_sequence);
             }
-            Err(_) if !stop.should_continue() => break,
+            // Barrier alert / shutdown is terminal: re-waiting just spins on the
+            // same Alert. Also exit when the stop flag flipped mid-wait.
+            Err(e)
+                if matches!(e, DisruptorError::Alert | DisruptorError::Shutdown)
+                    || !stop.should_continue() =>
+            {
+                break;
+            }
             Err(_) => {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
@@ -208,7 +215,12 @@ pub fn run_work_processor_loop<E, H, W>(
             }
             match stop.wait_for(sequence_barrier, claimed) {
                 Ok(available) => cached_available = available,
-                Err(_) if !stop.should_continue() => break 'work,
+                Err(e)
+                    if matches!(e, DisruptorError::Alert | DisruptorError::Shutdown)
+                        || !stop.should_continue() =>
+                {
+                    break 'work;
+                }
                 Err(_) => std::hint::spin_loop(),
             }
         }
@@ -293,7 +305,12 @@ pub fn run_sequential_readonly_loop<E, F, W>(
 
                 consumer_sequence.set(available_sequence);
             }
-            Err(_) if !stop.should_continue() => break,
+            Err(e)
+                if matches!(e, DisruptorError::Alert | DisruptorError::Shutdown)
+                    || !stop.should_continue() =>
+            {
+                break;
+            }
             Err(_) => {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }

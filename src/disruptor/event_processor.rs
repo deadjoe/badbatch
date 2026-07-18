@@ -184,6 +184,14 @@ where
     fn process_events(&self) {
         self.on_start();
 
+        // Halt may race with on_start (start() returns as soon as `running` is
+        // true, which is set by `run()`'s CAS before on_start). Re-check here so
+        // we never enter the wait loop after an early halt undid the race window.
+        if !self.running.load(Ordering::Acquire) {
+            self.on_shutdown();
+            return;
+        }
+
         // One lock acquisition for the whole loop: no per-event cost.
         let mut handler = self.event_handler.lock();
         consumer_engine::run_sequential_batch_loop_with_exceptions(
@@ -244,6 +252,9 @@ where
             self.running.store(false, Ordering::Release);
             std::panic::resume_unwind(payload);
         }
+        // process_events → on_shutdown normally clears this; belt-and-suspenders
+        // so a clean exit always reports not-running.
+        self.running.store(false, Ordering::Release);
         Ok(())
     }
 
@@ -343,9 +354,13 @@ where
         let Some(mut handler) = self.event_handler.try_lock() else {
             return;
         };
-        // Clear any previous alerts triggered during shutdown/halt cycles
-        self.sequence_barrier.clear_alert();
-        self.running.store(true, Ordering::Release);
+        // Do NOT clear_alert() or store running=true here.
+        // `run()` already CAS-sets running and clears the alert before this
+        // callback. Re-asserting those flags races with `halt()`: start() returns
+        // as soon as is_running() is true (post-CAS), so a quick shutdown can
+        // alert and set running=false, only for this callback to undo both and
+        // leave the consumer parked forever on an empty ring (seen hanging
+        // doctests for hours on BlockingWaitStrategy).
         if let Err(e) = handler.on_start() {
             self.exception_handler.handle_on_start_exception(e);
         }
