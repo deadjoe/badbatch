@@ -539,11 +539,17 @@ where
         self.next_n(1)
     }
 
+    #[inline]
     fn next_n(&self, n: i64) -> Result<i64> {
         if n < 1 || n > self.buffer_size_i64 {
             return Err(DisruptorError::InvalidSequence(n));
         }
-        if self.poisoned.load(Ordering::Acquire) {
+        // Relaxed: poisoning is a terminal monotonic flag; coherence guarantees
+        // eventual visibility and no data depends on its ordering. An Acquire
+        // load here pairs a per-publish STLR (cursor Release store) with an
+        // LDAR, creating a StoreLoad barrier per event on ARM that cost ~5x
+        // single-event throughput (P3 bisection, 2026-07-19).
+        if self.poisoned.load(Ordering::Relaxed) {
             return Err(DisruptorError::Poisoned);
         }
 
@@ -567,8 +573,8 @@ where
                 wrap_point > min_sequence
             } {
                 // A dead consumer never advances its gating sequence; fail fast
-                // instead of spinning forever (2026-07-18 audit).
-                if self.poisoned.load(Ordering::Acquire) {
+                // instead of spinning forever. Relaxed: see entry check above.
+                if self.poisoned.load(Ordering::Relaxed) {
                     return Err(DisruptorError::Poisoned);
                 }
                 std::hint::spin_loop();
@@ -587,13 +593,15 @@ where
         self.try_next_n(1)
     }
 
+    #[inline]
     fn try_next_n(&self, n: i64) -> Option<i64> {
         // Same bounds as next_n: a claim larger than the buffer can never succeed
         // and would alias ring slots within a single batch if allowed through.
         if n < 1 || n > self.buffer_size_i64 {
             return None;
         }
-        if self.poisoned.load(Ordering::Acquire) {
+        // Relaxed: terminal monotonic flag (see next_n).
+        if self.poisoned.load(Ordering::Relaxed) {
             return None;
         }
 
@@ -1057,6 +1065,7 @@ where
         self.next_n(1)
     }
 
+    #[inline]
     fn next_n(&self, n: i64) -> Result<i64> {
         if n < 1 || n > self.buffer_size_i64 {
             return Err(DisruptorError::InvalidSequence(n));
@@ -1070,8 +1079,10 @@ where
         // Try claiming the sequence using CAS
         loop {
             // A dead consumer never advances its gating sequence; fail fast
-            // instead of spinning forever (2026-07-18 audit).
-            if self.poisoned.load(Ordering::Acquire) {
+            // instead of spinning forever (2026-07-18 audit). Relaxed: terminal
+            // monotonic flag; an Acquire here inserts a StoreLoad barrier per
+            // claim on ARM (see SingleProducerSequencer::next_n).
+            if self.poisoned.load(Ordering::Relaxed) {
                 return Err(DisruptorError::Poisoned);
             }
 
@@ -1115,13 +1126,15 @@ where
         self.try_next_n(1)
     }
 
+    #[inline]
     fn try_next_n(&self, n: i64) -> Option<i64> {
         // Same bounds as next_n: a claim larger than the buffer can never succeed
         // and would alias ring slots within a single batch if allowed through.
         if n < 1 || n > self.buffer_size_i64 {
             return None;
         }
-        if self.poisoned.load(Ordering::Acquire) {
+        // Relaxed: terminal monotonic flag (see next_n).
+        if self.poisoned.load(Ordering::Relaxed) {
             return None;
         }
 
