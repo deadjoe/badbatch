@@ -99,10 +99,11 @@ where
         // Create the appropriate sequencer based on producer type
         let wait_strategy = Arc::new(wait_strategy);
         let sequencer: SequencerEnum<W> = match producer_type {
-            ProducerType::Single => SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
-                buffer_size,
-                wait_strategy,
-            ))),
+            // SAFETY: the DSL publishes through &mut self / publish_event on one
+            // Disruptor value; the single-producer claim path has one driver.
+            ProducerType::Single => SequencerEnum::Single(Arc::new(unsafe {
+                SingleProducerSequencer::new(buffer_size, wait_strategy)
+            })),
             ProducerType::Multi => SequencerEnum::Multi(Arc::new(MultiProducerSequencer::new(
                 buffer_size,
                 wait_strategy,

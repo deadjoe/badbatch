@@ -170,10 +170,28 @@ where
 /// # Threading model
 ///
 /// `SimpleProducer` is **`Send` but not `Sync`**: one publishing thread owns each handle.
-/// - **Single-producer**: never share the handle across threads.
-/// - **Multi-producer**: `Clone` a handle per publishing thread (handles share the sequencer).
+/// - **Single-producer**: exactly one handle exists; it is deliberately not `Clone`
+///   and single-mode builds expose no way to create a second one.
+/// - **Multi-producer**: obtain one handle per publishing thread from the
+///   multi-mode `DisruptorHandle::create_producer` (handles share the sequencer).
 ///
 /// This encodes LMAX's exclusive-publisher discipline in the type system instead of comments.
+///
+/// Cloning a producer handle must not compile — a second handle over a
+/// single-producer sequencer races on its non-atomic claim state:
+///
+/// ```compile_fail
+/// use badbatch::disruptor::{
+///     open_single_producer_poller, BusySpinWaitStrategy, DefaultEventFactory,
+/// };
+/// let (producer, _poller, _shutdown) = open_single_producer_poller(
+///     8,
+///     DefaultEventFactory::<i64>::new(),
+///     BusySpinWaitStrategy,
+/// )
+/// .unwrap();
+/// let second = producer.clone(); // ERROR: SimpleProducer is not Clone
+/// ```
 #[derive(Debug)]
 pub struct SimpleProducer<T, W>
 where
@@ -196,20 +214,6 @@ where
 {
 }
 
-impl<T, W> Clone for SimpleProducer<T, W>
-where
-    T: Send + Sync,
-    W: WaitStrategy + 'static,
-{
-    fn clone(&self) -> Self {
-        Self {
-            ring_buffer: Arc::clone(&self.ring_buffer),
-            sequencer: self.sequencer.clone(),
-            _not_sync: PhantomData,
-        }
-    }
-}
-
 impl<T, W> SimpleProducer<T, W>
 where
     T: Send + Sync,
@@ -217,16 +221,40 @@ where
 {
     /// Create a new simple producer
     ///
+    /// Crate-private on purpose (soundness audit 2026-07-18): pairing an
+    /// arbitrary ring buffer with an arbitrary sequencer from safe code allowed
+    /// two producers with independent sequencers to claim the same slots.
+    /// Producers are obtained through the builder, `CloneableProducer`, or
+    /// [`crate::disruptor::open_single_producer_poller`].
+    ///
     /// # Arguments
     /// * `ring_buffer` - The ring buffer to publish to
     /// * `sequencer` - The sequencer for coordinating sequence allocation
     ///
     /// # Returns
     /// A new SimpleProducer instance
-    pub fn new(ring_buffer: Arc<RingBuffer<T>>, sequencer: SequencerEnum<W>) -> Self {
+    pub(crate) fn new(ring_buffer: Arc<RingBuffer<T>>, sequencer: SequencerEnum<W>) -> Self {
         Self {
             ring_buffer,
             sequencer,
+            _not_sync: PhantomData,
+        }
+    }
+
+    /// Duplicate this handle for another publishing thread.
+    ///
+    /// Crate-private capability: callers must guarantee the underlying sequencer
+    /// is the multi-producer variant. `SimpleProducer` deliberately does not
+    /// implement `Clone` — a cloned handle over a `SingleProducerSequencer`
+    /// races on its non-atomic claim state (soundness audit 2026-07-18).
+    pub(crate) fn duplicate_for_multi(&self) -> Self {
+        debug_assert!(
+            matches!(self.sequencer, SequencerEnum::Multi(_)),
+            "duplicate_for_multi requires a multi-producer sequencer"
+        );
+        Self {
+            ring_buffer: Arc::clone(&self.ring_buffer),
+            sequencer: self.sequencer.clone(),
             _not_sync: PhantomData,
         }
     }
@@ -374,10 +402,9 @@ mod tests {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let ring_buffer =
             Arc::new(RingBuffer::new(8, factory).expect("Failed to create ring buffer"));
-        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
-            8,
-            Arc::new(BusySpinWaitStrategy),
-        )));
+        let sequencer = SequencerEnum::Single(Arc::new(unsafe {
+            SingleProducerSequencer::new(8, Arc::new(BusySpinWaitStrategy))
+        }));
         SimpleProducer::new(ring_buffer, sequencer)
     }
 
@@ -595,10 +622,9 @@ mod tests {
         let factory = DefaultEventFactory::<TestEvent>::new();
         let ring_buffer =
             Arc::new(RingBuffer::new(1024, factory).expect("Failed to create ring buffer"));
-        let sequencer = SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
-            1024,
-            Arc::new(BusySpinWaitStrategy),
-        )));
+        let sequencer = SequencerEnum::Single(Arc::new(unsafe {
+            SingleProducerSequencer::new(1024, Arc::new(BusySpinWaitStrategy))
+        }));
         let mut producer = SimpleProducer::new(ring_buffer, sequencer);
 
         // Test large batch

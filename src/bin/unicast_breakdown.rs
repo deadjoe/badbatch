@@ -477,10 +477,9 @@ where
                 .map_err(|error| format!("failed to create ring buffer: {error:?}"))?,
         );
         let wait_strategy_arc = Arc::new(wait_strategy);
-        let sequencer = Arc::new(SingleProducerSequencer::new(
-            buffer_size,
-            Arc::clone(&wait_strategy_arc),
-        ));
+        let sequencer = Arc::new(unsafe {
+            SingleProducerSequencer::new(buffer_size, Arc::clone(&wait_strategy_arc))
+        });
         let consumer_sequence = Arc::new(Sequence::new_with_initial_value());
         sequencer.add_gating_sequences(std::slice::from_ref(&consumer_sequence));
         let barrier: Arc<dyn SequenceBarrier> = Arc::new(ProcessingSequenceBarrier::new(
@@ -542,10 +541,9 @@ where
             .map_err(|error| format!("failed to create comparison ring buffer: {error:?}"))?,
         );
         let wait_strategy_arc = Arc::new(wait_strategy);
-        let sequencer = Arc::new(SingleProducerSequencer::new(
-            buffer_size,
-            Arc::clone(&wait_strategy_arc),
-        ));
+        let sequencer = Arc::new(unsafe {
+            SingleProducerSequencer::new(buffer_size, Arc::clone(&wait_strategy_arc))
+        });
         let consumer_sequence = Arc::new(Sequence::new_with_initial_value());
         sequencer.add_gating_sequences(std::slice::from_ref(&consumer_sequence));
         let barrier: Arc<dyn SequenceBarrier> = Arc::new(ProcessingSequenceBarrier::new(
@@ -609,10 +607,9 @@ where
             })?,
         );
         let wait_strategy_arc = Arc::new(wait_strategy);
-        let sequencer = Arc::new(SingleProducerSequencer::new(
-            buffer_size,
-            Arc::clone(&wait_strategy_arc),
-        ));
+        let sequencer = Arc::new(unsafe {
+            SingleProducerSequencer::new(buffer_size, Arc::clone(&wait_strategy_arc))
+        });
         let consumer_sequence = Arc::new(Sequence::new_with_initial_value());
         sequencer.add_gating_sequences(std::slice::from_ref(&consumer_sequence));
         let barrier: Arc<dyn SequenceBarrier> = Arc::new(ProcessingSequenceBarrier::new(
@@ -676,10 +673,9 @@ where
             })?,
         );
         let wait_strategy_arc = Arc::new(wait_strategy);
-        let sequencer = Arc::new(SingleProducerSequencer::new(
-            buffer_size,
-            Arc::clone(&wait_strategy_arc),
-        ));
+        let sequencer = Arc::new(unsafe {
+            SingleProducerSequencer::new(buffer_size, Arc::clone(&wait_strategy_arc))
+        });
         let consumer_sequence = Arc::new(Sequence::new_with_initial_value());
         sequencer.add_gating_sequences(std::slice::from_ref(&consumer_sequence));
         let barrier: Arc<dyn SequenceBarrier> = Arc::new(ProcessingSequenceBarrier::new(
@@ -1117,7 +1113,9 @@ fn run_claim_only<W>(
 where
     W: WaitStrategy + Send + Sync + Clone + 'static,
 {
-    let sequencer = SingleProducerSequencer::new(config.buffer_size, Arc::new(wait_strategy));
+    // SAFETY: this benchmark drives all claim calls from a single thread.
+    let sequencer =
+        unsafe { SingleProducerSequencer::new(config.buffer_size, Arc::new(wait_strategy)) };
 
     let start = Instant::now();
     let mut last_sequence = -1_i64;
@@ -1158,7 +1156,9 @@ where
         RingBuffer::new(config.buffer_size, DefaultEventFactory::<MicroEvent>::new())
             .map_err(|error| format!("claim-write ring buffer failed: {error:?}"))?,
     );
-    let sequencer = SingleProducerSequencer::new(config.buffer_size, Arc::new(wait_strategy));
+    // SAFETY: this benchmark drives all claim calls from a single thread.
+    let sequencer =
+        unsafe { SingleProducerSequencer::new(config.buffer_size, Arc::new(wait_strategy)) };
 
     let start = Instant::now();
     for value in 0..config.events_total {
@@ -1201,7 +1201,9 @@ where
         RingBuffer::new(config.buffer_size, DefaultEventFactory::<MicroEvent>::new())
             .map_err(|error| format!("claim-write-publish ring buffer failed: {error:?}"))?,
     );
-    let sequencer = SingleProducerSequencer::new(config.buffer_size, Arc::new(wait_strategy));
+    // SAFETY: this benchmark drives all claim calls from a single thread.
+    let sequencer =
+        unsafe { SingleProducerSequencer::new(config.buffer_size, Arc::new(wait_strategy)) };
 
     let start = Instant::now();
     for value in 0..config.events_total {

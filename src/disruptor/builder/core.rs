@@ -58,11 +58,6 @@ where
         }
     }
 
-    /// Ring buffer capacity (power of two).
-    pub fn buffer_size(&self) -> usize {
-        self.ring_buffer.buffer_size()
-    }
-
     /// Number of started consumer threads.
     pub fn consumer_count(&self) -> usize {
         self.consumers.len()
@@ -94,7 +89,10 @@ where
     }
 
     /// Create a producer bound to this core's ring buffer and sequencer.
-    pub fn create_producer(&self) -> SimpleProducer<E, W> {
+    ///
+    /// Crate-private: callers (handle construction, multi-mode create_producer)
+    /// are responsible for respecting the single-producer exclusivity invariant.
+    pub(crate) fn create_producer(&self) -> SimpleProducer<E, W> {
         SimpleProducer::new(self.ring_buffer.clone(), self.sequencer.clone())
     }
 }
@@ -126,10 +124,11 @@ where
             Arc::clone(&wait_strategy_arc),
         )))
     } else {
-        SequencerEnum::Single(Arc::new(SingleProducerSequencer::new(
-            size,
-            Arc::clone(&wait_strategy_arc),
-        )))
+        // SAFETY: single-mode builds hand out exactly one producer handle
+        // (not Clone, no create_producer), so claim methods have one driver.
+        SequencerEnum::Single(Arc::new(unsafe {
+            SingleProducerSequencer::new(size, Arc::clone(&wait_strategy_arc))
+        }))
     };
 
     let shutdown_flag = Arc::new(AtomicBool::new(false));

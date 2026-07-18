@@ -393,7 +393,17 @@ where
     ///
     /// # Returns
     /// A new SingleProducerSequencer instance
-    pub fn new(buffer_size: usize, wait_strategy: Arc<W>) -> Self {
+    ///
+    /// # Safety
+    /// The claim state (`next_value`/`cached_value`) is deliberately not
+    /// synchronized. The caller must guarantee that the claim methods
+    /// (`next`, `next_n`, `try_next`, `try_next_n`, `has_available_capacity`,
+    /// `remaining_capacity`) are only ever driven by **one thread at a time**
+    /// for the lifetime of this sequencer. Driving them from two threads is a
+    /// data race (soundness audit 2026-07-18). Read-side methods used by
+    /// barriers/consumers (`is_available`, cursor access, gating management)
+    /// are unrestricted.
+    pub unsafe fn new(buffer_size: usize, wait_strategy: Arc<W>) -> Self {
         let buffer_size_i64 = i64::try_from(buffer_size).expect("buffer size must fit into i64");
         let needs_signal = wait_strategy.needs_signal();
         Self {
@@ -1248,7 +1258,7 @@ mod tests {
     #[test]
     fn test_single_producer_sequencer_creation() {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = SingleProducerSequencer::new(1024, wait_strategy);
+        let sequencer = unsafe { SingleProducerSequencer::new(1024, wait_strategy) };
 
         assert_eq!(sequencer.buffer_size, 1024);
     }
@@ -1256,7 +1266,7 @@ mod tests {
     #[test]
     fn test_single_producer_sequencer_next() {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = SingleProducerSequencer::new(8, wait_strategy);
+        let sequencer = unsafe { SingleProducerSequencer::new(8, wait_strategy) };
 
         // Test basic sequence claiming
         let seq1 = sequencer.next().unwrap();
@@ -1269,7 +1279,7 @@ mod tests {
     #[test]
     fn test_single_producer_sequencer_next_n() {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = SingleProducerSequencer::new(8, wait_strategy);
+        let sequencer = unsafe { SingleProducerSequencer::new(8, wait_strategy) };
 
         // Test claiming multiple sequences
         let seq = sequencer.next_n(3).unwrap();
@@ -1290,7 +1300,7 @@ mod tests {
     #[test]
     fn test_single_producer_sequencer_try_next() {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = SingleProducerSequencer::new(8, wait_strategy);
+        let sequencer = unsafe { SingleProducerSequencer::new(8, wait_strategy) };
 
         // Test try_next success
         let seq = sequencer.try_next().unwrap();
@@ -1311,7 +1321,7 @@ mod tests {
     #[test]
     fn test_single_producer_sequencer_publish() {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = SingleProducerSequencer::new(8, wait_strategy);
+        let sequencer = unsafe { SingleProducerSequencer::new(8, wait_strategy) };
 
         let seq = sequencer.next().unwrap();
         assert!(!sequencer.is_available(seq));
@@ -1328,7 +1338,7 @@ mod tests {
     #[test]
     fn test_single_producer_sequencer_gating_sequences() {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = SingleProducerSequencer::new(8, wait_strategy);
+        let sequencer = unsafe { SingleProducerSequencer::new(8, wait_strategy) };
 
         let gating_seq1 = Arc::new(Sequence::new(5));
         let gating_seq2 = Arc::new(Sequence::new(3));
@@ -1360,7 +1370,7 @@ mod tests {
     #[test]
     fn test_single_producer_sequencer_remove_gating_sequence_concurrent() {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = Arc::new(SingleProducerSequencer::new(8, wait_strategy));
+        let sequencer = Arc::new(unsafe { SingleProducerSequencer::new(8, wait_strategy) });
 
         let gating_seq = Arc::new(Sequence::new(3));
         sequencer.add_gating_sequences(std::slice::from_ref(&gating_seq));
@@ -1399,7 +1409,7 @@ mod tests {
     #[test]
     fn test_single_producer_sequencer_capacity() {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = SingleProducerSequencer::new(8, wait_strategy);
+        let sequencer = unsafe { SingleProducerSequencer::new(8, wait_strategy) };
 
         // Test remaining capacity with no consumers
         let capacity = sequencer.remaining_capacity();
@@ -1429,7 +1439,7 @@ mod tests {
     #[test]
     fn test_single_producer_sequencer_barrier() {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
-        let sequencer = Arc::new(SingleProducerSequencer::new(8, wait_strategy));
+        let sequencer = Arc::new(unsafe { SingleProducerSequencer::new(8, wait_strategy) });
 
         let dep_seq = Arc::new(Sequence::new(0));
         let barrier = sequencer.new_barrier_typed(vec![dep_seq]);
@@ -1961,7 +1971,7 @@ mod tests {
 
     #[test]
     fn test_single_try_next_n_rejects_over_capacity_without_gating() {
-        let sequencer = SingleProducerSequencer::new(8, Arc::new(BusySpinWaitStrategy));
+        let sequencer = unsafe { SingleProducerSequencer::new(8, Arc::new(BusySpinWaitStrategy)) };
 
         assert_eq!(sequencer.try_next_n(9), None);
         assert_eq!(sequencer.try_next_n(1000), None);
@@ -1989,7 +1999,7 @@ mod tests {
 
     #[test]
     fn test_single_try_next_n_respects_gating_backpressure() {
-        let sequencer = SingleProducerSequencer::new(8, Arc::new(BusySpinWaitStrategy));
+        let sequencer = unsafe { SingleProducerSequencer::new(8, Arc::new(BusySpinWaitStrategy)) };
         let consumer = Arc::new(Sequence::new(-1));
         sequencer.add_gating_sequences(std::slice::from_ref(&consumer));
 
@@ -2018,7 +2028,7 @@ mod tests {
 
     #[test]
     fn test_remaining_capacity_without_gating_stays_bounded() {
-        let single = SingleProducerSequencer::new(8, Arc::new(BusySpinWaitStrategy));
+        let single = unsafe { SingleProducerSequencer::new(8, Arc::new(BusySpinWaitStrategy)) };
         assert_eq!(single.remaining_capacity(), 8);
         single.try_next_n(4);
         // No gating sequences: producer gates on itself, capacity stays full.

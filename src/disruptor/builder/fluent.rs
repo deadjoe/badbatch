@@ -15,7 +15,7 @@ use super::consumer::{
     ConsumerInfo, HasConsumers, NoConsumers,
 };
 use super::core::create_disruptor_core;
-use super::handle::DisruptorHandle;
+use super::handle::{DisruptorHandle, MultiProducerMode, SingleProducerMode};
 use crate::disruptor::{
     event_handler::ClosureEventHandler,
     producer::{Producer, SimpleProducer},
@@ -323,8 +323,11 @@ where
     F: Fn() -> E + Send + Sync + 'static,
     W: WaitStrategy + Clone + 'static,
 {
-    /// Assemble the disruptor, start consumers, and return a handle.
-    pub fn build(self) -> DisruptorHandle<E, W> {
+    /// Assemble the disruptor, start consumers, and return a single-mode handle.
+    ///
+    /// The returned handle owns the only producer handle; single mode exposes
+    /// no `create_producer`.
+    pub fn build(self) -> DisruptorHandle<E, W, SingleProducerMode> {
         let core = create_disruptor_core(
             self.shared.size,
             self.event_factory,
@@ -381,8 +384,11 @@ where
     F: Fn() -> E + Send + Sync + 'static,
     W: WaitStrategy + Clone + 'static,
 {
-    /// Assemble the disruptor, start consumers, and return a handle.
-    pub fn build(self) -> DisruptorHandle<E, W> {
+    /// Assemble the disruptor, start consumers, and return a multi-mode handle.
+    ///
+    /// Multi-mode handles create one producer per publishing thread via
+    /// [`DisruptorHandle::create_producer`].
+    pub fn build(self) -> DisruptorHandle<E, W, MultiProducerMode> {
         let core = create_disruptor_core(
             self.shared.size,
             self.event_factory,
@@ -504,7 +510,6 @@ impl_dependent!(MultiProducerBuilder, + Clone);
 ///
 /// Each clone is an independent [`SimpleProducer`] handle (Arc clones only) for
 /// concurrent publishing on the multi-producer sequencer.
-#[derive(Clone)]
 pub struct CloneableProducer<E, W>
 where
     E: Send + Sync,
@@ -513,13 +518,34 @@ where
     producer: SimpleProducer<E, W>,
 }
 
+impl<E, W> Clone for CloneableProducer<E, W>
+where
+    E: Send + Sync,
+    W: WaitStrategy + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            producer: self.producer.duplicate_for_multi(),
+        }
+    }
+}
+
 impl<E, W> CloneableProducer<E, W>
 where
     E: Send + Sync,
     W: WaitStrategy + 'static,
 {
     /// Create a cloneable producer from a shared ring buffer and sequencer.
-    pub fn new(ring_buffer: Arc<RingBuffer<E>>, sequencer: SequencerEnum<W>) -> Self {
+    ///
+    /// Crate-private (soundness audit 2026-07-18): the sequencer must be the
+    /// multi-producer variant; safe external construction over a single-producer
+    /// sequencer would allow concurrent claims on unsynchronized state.
+    #[allow(dead_code)]
+    pub(crate) fn new(ring_buffer: Arc<RingBuffer<E>>, sequencer: SequencerEnum<W>) -> Self {
+        debug_assert!(
+            matches!(sequencer, SequencerEnum::Multi(_)),
+            "CloneableProducer requires a multi-producer sequencer"
+        );
         Self {
             producer: SimpleProducer::new(ring_buffer, sequencer),
         }
@@ -527,7 +553,7 @@ where
 
     /// Create a [`SimpleProducer`] handle (Arc-clones the ring buffer and sequencer).
     pub fn create_producer(&self) -> SimpleProducer<E, W> {
-        self.producer.clone()
+        self.producer.duplicate_for_multi()
     }
 
     /// Try to publish one event; returns [`crate::disruptor::RingBufferFull`] if no slot is free.
@@ -538,7 +564,7 @@ where
     where
         F: FnOnce(&mut E),
     {
-        self.producer.clone().try_publish(update)
+        self.producer.duplicate_for_multi().try_publish(update)
     }
 
     /// Publish one event, spinning until a slot is available.
@@ -546,7 +572,7 @@ where
     where
         F: FnOnce(&mut E),
     {
-        self.producer.clone().publish(update);
+        self.producer.duplicate_for_multi().publish(update);
     }
 
     /// Try to publish a batch of `n` events.
@@ -558,7 +584,9 @@ where
     where
         F: for<'a> FnOnce(crate::disruptor::ring_buffer::BatchIterMut<'a, E>),
     {
-        self.producer.clone().try_batch_publish(n, update)
+        self.producer
+            .duplicate_for_multi()
+            .try_batch_publish(n, update)
     }
 
     /// Publish a batch of `n` events, spinning until space is available.
@@ -566,6 +594,6 @@ where
     where
         F: for<'a> FnOnce(crate::disruptor::ring_buffer::BatchIterMut<'a, E>),
     {
-        self.producer.clone().batch_publish(n, update);
+        self.producer.duplicate_for_multi().batch_publish(n, update);
     }
 }

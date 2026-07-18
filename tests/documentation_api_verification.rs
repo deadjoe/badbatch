@@ -177,24 +177,25 @@ mod design_md_verification_tests {
         let _ring_buffer = RingBuffer::new(1024, factory).unwrap();
 
         // Test Sequencer types (DESIGN.md lines 74-82, 94-103)
-        let _single_sequencer =
-            SingleProducerSequencer::new(1024, Arc::new(badbatch::disruptor::BusySpinWaitStrategy));
+        // SAFETY: constructed and dropped on this thread; no claim calls race.
+        let _single_sequencer = unsafe {
+            SingleProducerSequencer::new(1024, Arc::new(badbatch::disruptor::BusySpinWaitStrategy))
+        };
         let _multi_sequencer =
             MultiProducerSequencer::new(1024, Arc::new(badbatch::disruptor::BusySpinWaitStrategy));
     }
 
     #[test]
     fn test_design_md_producer_api() {
-        // Test Producer API from DESIGN.md lines 117-123
-        use badbatch::disruptor::{Producer, SimpleProducer};
+        // Test Producer API from DESIGN.md lines 117-123.
+        // SimpleProducer::new is crate-private since the 2026-07-18 soundness
+        // audit; producers come from the builder or the poller bundle.
+        use badbatch::disruptor::{open_single_producer_poller, Producer};
 
         let factory = DefaultEventFactory::<i64>::new();
-        let ring_buffer = Arc::new(RingBuffer::new(1024, factory).unwrap());
-        let sequencer = badbatch::disruptor::SequencerEnum::Single(Arc::new(
-            SingleProducerSequencer::new(1024, Arc::new(badbatch::disruptor::BusySpinWaitStrategy)),
-        ));
-
-        let mut producer = SimpleProducer::new(ring_buffer, sequencer);
+        let (mut producer, _poller, _shutdown) =
+            open_single_producer_poller(1024, factory, badbatch::disruptor::BusySpinWaitStrategy)
+                .unwrap();
 
         // Test the Producer trait methods
         producer.publish(|event| {

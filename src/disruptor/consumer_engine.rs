@@ -319,7 +319,7 @@ mod tests {
         let factory = DefaultEventFactory::<Ev>::new();
         let ring = Arc::new(RingBuffer::new(8, factory).unwrap());
         let wait = Arc::new(BusySpinWaitStrategy);
-        let sequencer = Arc::new(SingleProducerSequencer::new(8, Arc::clone(&wait)));
+        let sequencer = Arc::new(unsafe { SingleProducerSequencer::new(8, Arc::clone(&wait)) });
         let seq_enum = SequencerEnum::Single(Arc::clone(&sequencer));
         let barrier = ProcessingSequenceBarrier::new(
             sequencer.get_cursor(),
