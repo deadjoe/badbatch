@@ -31,6 +31,22 @@ paths (inline-threshold regression on `next_n` + per-event Acquire load
 pairing STLR/LDAR into a StoreLoad barrier on ARM). Fixed in `fa04ba6`; see
 that commit message before adding anything to the claim hot path.
 
+### Java LMAX head-to-head + poison A/B (same session, completed)
+
+Full H2H at `fa04ba6` finished successfully; checked-in summary is
+[`H2H_POST_AUDIT.md`](./H2H_POST_AUDIT.md) (raw dir is gitignored).
+
+| scenario | rust/java | note |
+|----------|----------:|------|
+| unicast | 0.19× | Java CV 0.30 — noisy, not a stable ranking |
+| unicast_batch | 0.88× | competitive |
+| mpsc_batch | **1.31×** | Rust ahead on this machine |
+| pipeline | 0.43× | stable deficit vs LMAX multi-stage |
+
+`unicast_breakdown` end-to-end A/B (da1097e vs fa04ba6, 2M events): new code
+≥ old under busy-spin and yielding — poison flag cost is not visible after
+the P3 hot-path fix. **Do not** advertise a global “beats Java” ratio.
+
 ## Original capture (commits `5c1d84a` / `71d3bab`)
 
 Recorded on the development machine after commits `5c1d84a` / `71d3bab` (consumer engine + monomorphization + WorkerPool).
