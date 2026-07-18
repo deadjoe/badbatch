@@ -8,7 +8,7 @@
 
 use badbatch::disruptor::{
     build_single_producer, open_single_producer_poller, BusySpinWaitStrategy, DefaultEventFactory,
-    DisruptorError, Producer,
+    DisruptorError, Producer, TryPublishError,
 };
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::{Duration, Instant};
@@ -69,10 +69,12 @@ fn producer_closure_panic_poisons_pipeline() {
         Err(DisruptorError::Poisoned) => {}
         other => panic!("expected Poisoned, got {other:?}"),
     }
-    assert!(
-        producer.try_publish(|event| event.value = 1).is_err(),
-        "try_publish must also fail on a poisoned pipeline"
-    );
+    // The try path must report the terminal state distinctly from transient
+    // backpressure (R1, 2026-07-19 audit) — this used to be `RingBufferFull`.
+    match producer.try_publish(|event| event.value = 1) {
+        Err(TryPublishError::Poisoned) => {}
+        other => panic!("expected TryPublishError::Poisoned, got {other:?}"),
+    }
 }
 
 /// Batch claims larger than the ring fail loudly through the blocking path

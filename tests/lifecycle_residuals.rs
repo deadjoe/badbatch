@@ -5,7 +5,7 @@
 use badbatch::disruptor::event_translator::ClosureEventTranslator;
 use badbatch::disruptor::{
     build_single_producer, BusySpinWaitStrategy, DefaultEventFactory, Disruptor, DisruptorError,
-    EventHandler, ProducerType, Result as DisruptorResult,
+    EventHandler, ProducerType, Result as DisruptorResult, TryPublishError,
 };
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -31,7 +31,12 @@ fn publish_after_halt_returns_shutdown() {
         Err(DisruptorError::Shutdown) => {}
         other => panic!("expected Shutdown after halt, got {other:?}"),
     }
-    assert!(handle.try_publish(|e| e.value = 3).is_err());
+    // The try path must distinguish the terminal state too (R1, 2026-07-19
+    // audit): after halt the answer is Shutdown, not "ring full".
+    match handle.try_publish(|e| e.value = 3) {
+        Err(TryPublishError::Shutdown) => {}
+        other => panic!("expected TryPublishError::Shutdown after halt, got {other:?}"),
+    }
 }
 
 /// After draining `shutdown()`, publish is likewise rejected.
@@ -75,17 +80,12 @@ impl EventHandler<Event> for CountingHandler {
 fn dsl_shutdown_drains_published_backlog() {
     let seen = Arc::new(AtomicI64::new(0));
     let factory = DefaultEventFactory::<Event>::new();
-    let mut disruptor = Disruptor::new(
-        factory,
-        64,
-        ProducerType::Single,
-        BusySpinWaitStrategy,
-    )
-    .unwrap()
-    .handle_events_with(CountingHandler {
-        seen: Arc::clone(&seen),
-    })
-    .build();
+    let mut disruptor = Disruptor::new(factory, 64, ProducerType::Single, BusySpinWaitStrategy)
+        .unwrap()
+        .handle_events_with(CountingHandler {
+            seen: Arc::clone(&seen),
+        })
+        .build();
 
     disruptor.start().unwrap();
 
