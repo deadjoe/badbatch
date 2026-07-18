@@ -638,7 +638,8 @@ fn test_core_interfaces_activation() {
 
     // Test DataProvider interface
     let data_provider: &dyn DataProvider<TestEvent> = &ring_buffer;
-    let event = data_provider.get(0);
+    // SAFETY: single-threaded test, no concurrent writers.
+    let event = unsafe { data_provider.get(0) };
     assert_eq!(event.value, -1); // Default value for TestEvent
 
     println!("✅ Core interfaces activation test passed:");

@@ -78,7 +78,13 @@ pub trait DataProvider<T>: Send + Sync {
     ///
     /// # Returns
     /// A reference to the event at the specified sequence
-    fn get(&self, sequence: i64) -> &T;
+    ///
+    /// # Safety
+    /// The caller must guarantee, via the sequencing protocol, that the slot at
+    /// `sequence` is published and will not be written (by a producer claim or
+    /// wrap-around) for as long as the returned reference is alive. Holding the
+    /// reference across a concurrent write is undefined behavior.
+    unsafe fn get(&self, sequence: i64) -> &T;
 
     /// Get mutable access to an event at the specified sequence
     ///
@@ -424,7 +430,7 @@ mod tests {
     }
 
     impl DataProvider<TestEvent> for TestDataProvider {
-        fn get(&self, sequence: i64) -> &TestEvent {
+        unsafe fn get(&self, sequence: i64) -> &TestEvent {
             let len = self.events.len();
             let len_i64 = i64::try_from(len).expect("events length fits in i64");
             let normalized = sequence.rem_euclid(len_i64);
@@ -590,14 +596,14 @@ mod tests {
         let provider = TestDataProvider::new(4);
 
         // Test get method
-        let event0 = provider.get(0);
+        let event0 = unsafe { provider.get(0) };
         assert_eq!(event0.value.load(Ordering::Relaxed), 0);
 
-        let event1 = provider.get(1);
+        let event1 = unsafe { provider.get(1) };
         assert_eq!(event1.value.load(Ordering::Relaxed), 1);
 
         // Test wrapping behavior
-        let event4 = provider.get(4); // Should wrap to index 0
+        let event4 = unsafe { provider.get(4) }; // Should wrap to index 0
         assert_eq!(event4.value.load(Ordering::Relaxed), 0);
 
         // Test get_mut method
@@ -606,7 +612,7 @@ mod tests {
             event_mut.value.store(999, Ordering::Relaxed);
         }
 
-        let event2 = provider.get(2);
+        let event2 = unsafe { provider.get(2) };
         assert_eq!(event2.value.load(Ordering::Relaxed), 999);
     }
 

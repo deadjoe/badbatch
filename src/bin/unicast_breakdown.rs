@@ -752,7 +752,8 @@ fn spawn_direct_consumer(
                         let mut local_checksum = 0_i64;
                         let mut local_processed = 0_u64;
                         while next_sequence <= available_sequence {
-                            let event = ring_buffer.get(next_sequence);
+                            // SAFETY: barrier guarantees publication; gating prevents wrap-around.
+                            let event = unsafe { ring_buffer.get(next_sequence) };
                             local_checksum = local_checksum.wrapping_add(event.value);
                             local_processed += 1;
                             next_sequence += 1;
@@ -807,7 +808,8 @@ fn spawn_direct_comparison_consumer(
                         let mut local_checksum = 0_i64;
                         let mut local_processed = 0_u64;
                         while next_sequence <= available_sequence {
-                            let event = ring_buffer.get(next_sequence);
+                            // SAFETY: barrier guarantees publication; gating prevents wrap-around.
+                            let event = unsafe { ring_buffer.get(next_sequence) };
                             local_checksum = local_checksum.wrapping_add(event.value);
                             local_processed += 1;
                             next_sequence += 1;
@@ -862,7 +864,8 @@ fn spawn_direct_padded_comparison_consumer(
                         let mut local_checksum = 0_i64;
                         let mut local_processed = 0_u64;
                         while next_sequence <= available_sequence {
-                            let event = ring_buffer.get(next_sequence);
+                            // SAFETY: barrier guarantees publication; gating prevents wrap-around.
+                        let event = unsafe { ring_buffer.get(next_sequence) };
                             local_checksum = local_checksum.wrapping_add(event.value);
                             local_processed += 1;
                             next_sequence += 1;
@@ -919,7 +922,8 @@ fn spawn_direct_padded128_comparison_consumer(
                         let mut local_checksum = 0_i64;
                         let mut local_processed = 0_u64;
                         while next_sequence <= available_sequence {
-                            let event = ring_buffer.get(next_sequence);
+                            // SAFETY: barrier guarantees publication; gating prevents wrap-around.
+                        let event = unsafe { ring_buffer.get(next_sequence) };
                             local_checksum = local_checksum.wrapping_add(event.value);
                             local_processed += 1;
                             next_sequence += 1;
@@ -1489,7 +1493,9 @@ fn wait_for_processed(
 fn checksum_ring_buffer(ring_buffer: &RingBuffer<MicroEvent>, events_total: u64) -> i64 {
     let mut checksum = 0_i64;
     for sequence in 0..events_total {
-        checksum = checksum.wrapping_add(ring_buffer.get(sequence as i64).value);
+        // SAFETY: called after producer/consumer threads have joined; no
+        // concurrent access to the ring remains.
+        checksum = checksum.wrapping_add(unsafe { ring_buffer.get(sequence as i64) }.value);
     }
     checksum
 }

@@ -201,7 +201,7 @@ mod tests {
     }
 
     impl DataProvider<i32> for TestDataProvider {
-        fn get(&self, sequence: i64) -> &i32 {
+        unsafe fn get(&self, sequence: i64) -> &i32 {
             let len = self.data.len();
             let len_i64 = i64::try_from(len).expect("data length fits in i64");
             let normalized = sequence.rem_euclid(len_i64);
@@ -233,14 +233,15 @@ mod tests {
             data: vec![1, 2, 3, 4, 5],
         };
 
-        assert_eq!(*provider.get(0), 1);
-        assert_eq!(*provider.get(2), 3);
-        assert_eq!(*provider.get(7), 3); // Wraps around
-
+        // SAFETY: single-threaded test, no concurrent writers.
         unsafe {
-            *provider.get_mut(7) = 99;
-        }
+            assert_eq!(*provider.get(0), 1);
+            assert_eq!(*provider.get(2), 3);
+            assert_eq!(*provider.get(7), 3); // Wraps around
 
-        assert_eq!(*provider.get(2), 99);
+            *provider.get_mut(7) = 99;
+
+            assert_eq!(*provider.get(2), 99);
+        }
     }
 }
