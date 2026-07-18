@@ -19,7 +19,7 @@ path = "src/lib.rs"
 thiserror = "2.0"
 
 # Synchronization primitives
-parking_lot = { version = "0.12", features = ["deadlock_detection"] }
+parking_lot = "0.12"
 crossbeam-utils = "0.8"
 arc-swap = "1.9"
 core_affinity = "0.8"
@@ -43,14 +43,23 @@ loom = "0.7"
 default = ["lmax-dsl", "extras"]
 lmax-dsl = []
 extras = []
-full-benchmarks = []
+# Opt-in lock diagnostics: enables parking_lot's deadlock detector (extra
+# dependencies + background lock tracking). Never enable in production builds.
+deadlock-detection = ["parking_lot/deadlock_detection"]
+# Diagnostic / benchmark binaries (h2h_rust, baseline_metrics, *_breakdown).
+# ~4.3K lines that only benchmark scripts need; gated so library builds and
+# `cargo build --bins` in CI/dev stay lean.
+bench-tools = []
 
 [profile.release]
 # Optimize for performance
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# No `panic = "abort"`: the failure-propagation design (2026-07-18 audit)
+# poisons the pipeline via unwinding (catch_unwind in consumer threads,
+# drop guards on producer claim windows). Root applications that want abort
+# semantics can set it in their own profile.
 
 [profile.bench]
 # Optimize benchmarks
@@ -67,6 +76,27 @@ missing_docs = "warn"
 all = "deny"
 pedantic = { level = "warn", priority = -1 }
 uninlined_format_args = "deny"
+
+# Diagnostic / benchmark binaries — built only with `--features bench-tools`
+[[bin]]
+name = "h2h_rust"
+path = "src/bin/h2h_rust.rs"
+required-features = ["bench-tools"]
+
+[[bin]]
+name = "baseline_metrics"
+path = "src/bin/baseline_metrics.rs"
+required-features = ["bench-tools"]
+
+[[bin]]
+name = "unicast_breakdown"
+path = "src/bin/unicast_breakdown.rs"
+required-features = ["bench-tools"]
+
+[[bin]]
+name = "pipeline_breakdown"
+path = "src/bin/pipeline_breakdown.rs"
+required-features = ["bench-tools"]
 
 # Benchmark configurations
 [[bench]]
