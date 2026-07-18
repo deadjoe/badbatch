@@ -155,6 +155,13 @@ pub enum DisruptorError {
     /// Returned when shutdown encounters an unrecoverable error.
     #[error("Shutdown error: {0}")]
     ShutdownError(String),
+
+    /// Returned when the pipeline is poisoned: a consumer thread panicked or a
+    /// producer's update closure panicked between claim and publish. Publishing
+    /// fails instead of spinning forever on a gating sequence that will never
+    /// advance (or exposing a never-written slot).
+    #[error("Pipeline poisoned by a panicked producer or consumer")]
+    Poisoned,
 }
 
 /// Result type for Disruptor operations

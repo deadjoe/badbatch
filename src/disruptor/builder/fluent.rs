@@ -568,11 +568,14 @@ where
     }
 
     /// Publish one event, spinning until a slot is available.
-    pub fn publish<F>(&self, update: F)
+    ///
+    /// # Errors
+    /// Propagates the claim error (2026-07-18 audit: no silent drops).
+    pub fn publish<F>(&self, update: F) -> crate::disruptor::Result<i64>
     where
         F: FnOnce(&mut E),
     {
-        self.producer.duplicate_for_multi().publish(update);
+        self.producer.duplicate_for_multi().publish(update)
     }
 
     /// Try to publish a batch of `n` events.
@@ -590,10 +593,13 @@ where
     }
 
     /// Publish a batch of `n` events, spinning until space is available.
-    pub fn batch_publish<F>(&self, n: usize, update: F)
+    ///
+    /// # Errors
+    /// Propagates the claim error (2026-07-18 audit: no silent drops).
+    pub fn batch_publish<F>(&self, n: usize, update: F) -> crate::disruptor::Result<i64>
     where
         F: for<'a> FnOnce(crate::disruptor::ring_buffer::BatchIterMut<'a, E>),
     {
-        self.producer.duplicate_for_multi().batch_publish(n, update);
+        self.producer.duplicate_for_multi().batch_publish(n, update)
     }
 }

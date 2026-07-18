@@ -21,13 +21,13 @@ fn test_disruptor_handle_publishing() {
         .build();
 
     // Test single event publishing
-    disruptor_handle.publish(|event| {
+    let _ = disruptor_handle.publish(|event| {
         event.value = 42;
         event.data = "test".to_string();
     });
 
     // Test batch publishing
-    disruptor_handle.batch_publish(3, |batch| {
+    let _ = disruptor_handle.batch_publish(3, |batch| {
         for (i, event) in batch.enumerate() {
             event.value = i as i64;
             event.data = format!("batch_{i}");
@@ -55,7 +55,7 @@ fn test_disruptor_handle_shutdown() {
 
     // Publish some events
     for i in 0..3 {
-        disruptor_handle.publish(|event| {
+        let _ = disruptor_handle.publish(|event| {
             event.value = i;
             event.data = format!("event_{i}");
         });
@@ -94,7 +94,7 @@ fn test_disruptor_handle_into_producer_restores_capacity() {
 
     // Publish a few events so the consumer advances the gating sequence
     for i in 0..4 {
-        handle.publish(|event| {
+        let _ = handle.publish(|event| {
             event.value = i as i64;
         });
     }

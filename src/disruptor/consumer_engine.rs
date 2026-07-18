@@ -333,7 +333,7 @@ mod tests {
 
         let mut producer = SimpleProducer::new(Arc::clone(&ring), seq_enum);
         for i in 0..5 {
-            producer.publish(|e| e.v = i);
+            let _ = producer.publish(|e| e.v = i);
         }
 
         let count = Arc::new(AtomicUsize::new(0));

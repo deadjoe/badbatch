@@ -10,7 +10,7 @@ use arc_swap::ArcSwap;
 use crossbeam_utils::CachePadded;
 use std::cell::UnsafeCell;
 use std::convert::TryFrom;
-use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Trait for sequencers that coordinate access to the ring buffer
@@ -134,6 +134,20 @@ pub trait Sequencer: Send + Sync + std::fmt::Debug {
     /// # Returns
     /// True if the buffer has capacity, false otherwise
     fn has_available_capacity(&self, required_capacity: usize) -> bool;
+
+    /// Poison the pipeline: a consumer thread or a producer update closure
+    /// panicked. Blocking claim calls return [`crate::disruptor::DisruptorError::Poisoned`]
+    /// and try-claims fail, instead of spinning on a gating sequence that will
+    /// never advance (or exposing a never-written slot).
+    ///
+    /// Default is a no-op so external `Sequencer` implementations keep
+    /// compiling; the built-in sequencers override it.
+    fn poison(&self) {}
+
+    /// Whether [`Sequencer::poison`] has been called.
+    fn is_poisoned(&self) -> bool {
+        false
+    }
 }
 
 /// Enum-based sequencer dispatch that eliminates vtable indirection.
@@ -276,6 +290,16 @@ where
     fn has_available_capacity(&self, required_capacity: usize) -> bool {
         dispatch_sequencer!(self, has_available_capacity, required_capacity)
     }
+
+    #[inline]
+    fn poison(&self) {
+        dispatch_sequencer!(self, poison);
+    }
+
+    #[inline]
+    fn is_poisoned(&self) -> bool {
+        dispatch_sequencer!(self, is_poisoned)
+    }
 }
 
 fn add_gating_sequences_rcu(
@@ -374,6 +398,9 @@ where
     /// Cached minimum gating sequence (equivalent to LMAX cachedValue).
     /// Same single-publisher exclusivity as `next_value`.
     cached_value: UnsafeCell<i64>,
+    /// Set when a consumer thread or a producer update closure panicked.
+    /// Claim methods fail fast instead of spinning on a dead gating sequence.
+    poisoned: AtomicBool,
 }
 
 // SAFETY: `next_value` / `cached_value` are only read/written by the single publisher
@@ -415,6 +442,7 @@ where
             gating_sequences: ArcSwap::from_pointee(Vec::new()),
             next_value: UnsafeCell::new(-1),
             cached_value: UnsafeCell::new(-1),
+            poisoned: AtomicBool::new(false),
         }
     }
 
@@ -515,6 +543,9 @@ where
         if n < 1 || n > self.buffer_size_i64 {
             return Err(DisruptorError::InvalidSequence(n));
         }
+        if self.poisoned.load(Ordering::Acquire) {
+            return Err(DisruptorError::Poisoned);
+        }
 
         // This follows the exact LMAX Disruptor SingleProducerSequencer.next(int n) logic.
         // SAFETY: single-publisher exclusive access.
@@ -535,6 +566,11 @@ where
                 min_sequence = self.gating_minimum(next_value);
                 wrap_point > min_sequence
             } {
+                // A dead consumer never advances its gating sequence; fail fast
+                // instead of spinning forever (2026-07-18 audit).
+                if self.poisoned.load(Ordering::Acquire) {
+                    return Err(DisruptorError::Poisoned);
+                }
                 std::hint::spin_loop();
             }
 
@@ -555,6 +591,9 @@ where
         // Same bounds as next_n: a claim larger than the buffer can never succeed
         // and would alias ring slots within a single batch if allowed through.
         if n < 1 || n > self.buffer_size_i64 {
+            return None;
+        }
+        if self.poisoned.load(Ordering::Acquire) {
             return None;
         }
 
@@ -623,6 +662,17 @@ where
     fn has_available_capacity(&self, required_capacity: usize) -> bool {
         self.has_available_capacity_internal(required_capacity, false)
     }
+
+    fn poison(&self) {
+        self.poisoned.store(true, Ordering::Release);
+        // Wake any consumers blocked in a wait strategy so they observe the
+        // failure promptly (producers spin and check the flag themselves).
+        self.wait_strategy.signal_all_when_blocking();
+    }
+
+    fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
 }
 
 /// Multi producer sequencer with bitmap optimization
@@ -684,6 +734,9 @@ where
     cached_gating_sequence: CachePadded<AtomicI64>,
     /// Legacy available buffer for backward compatibility with small buffers (< 64)
     available_buffer: Vec<AtomicI32>,
+    /// Set when a consumer thread or a producer update closure panicked.
+    /// Claim methods fail fast instead of spinning on a dead gating sequence.
+    poisoned: AtomicBool,
 }
 
 impl<W> MultiProducerSequencer<W>
@@ -744,6 +797,7 @@ where
             index_shift: buffer_size.trailing_zeros(),
             cached_gating_sequence: CachePadded::new(AtomicI64::new(-1)),
             available_buffer,
+            poisoned: AtomicBool::new(false),
         }
     }
 
@@ -1015,6 +1069,12 @@ where
 
         // Try claiming the sequence using CAS
         loop {
+            // A dead consumer never advances its gating sequence; fail fast
+            // instead of spinning forever (2026-07-18 audit).
+            if self.poisoned.load(Ordering::Acquire) {
+                return Err(DisruptorError::Poisoned);
+            }
+
             current = self.cursor.get();
             next = current + n;
 
@@ -1059,6 +1119,9 @@ where
         // Same bounds as next_n: a claim larger than the buffer can never succeed
         // and would alias ring slots within a single batch if allowed through.
         if n < 1 || n > self.buffer_size_i64 {
+            return None;
+        }
+        if self.poisoned.load(Ordering::Acquire) {
             return None;
         }
 
@@ -1190,6 +1253,17 @@ where
         let guard = self.gating_sequences.load();
         let cursor_value = self.cursor.get();
         self.has_available_capacity_internal(&guard, required_capacity, cursor_value)
+    }
+
+    fn poison(&self) {
+        self.poisoned.store(true, Ordering::Release);
+        // Wake any consumers blocked in a wait strategy so they observe the
+        // failure promptly (producers spin and check the flag themselves).
+        self.wait_strategy.signal_all_when_blocking();
+    }
+
+    fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
     }
 }
 

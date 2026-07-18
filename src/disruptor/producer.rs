@@ -7,7 +7,7 @@
 //! component, following the LMAX Disruptor design principles.
 
 use crate::disruptor::sequencer::SequencerEnum;
-use crate::disruptor::{ring_buffer::BatchIterMut, RingBuffer, Sequencer, WaitStrategy};
+use crate::disruptor::{ring_buffer::BatchIterMut, Result, RingBuffer, Sequencer, WaitStrategy};
 use std::convert::TryFrom;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -110,6 +110,12 @@ where
     ///
     /// Spins until there is an available slot in case the ring buffer is full.
     ///
+    /// # Errors
+    /// Returns the underlying claim error instead of silently dropping the
+    /// event (2026-07-18 audit): currently this means the sequencer rejected
+    /// the claim (invalid state or a failed/poisoned pipeline). On success the
+    /// published sequence number is returned.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -124,10 +130,10 @@ where
     ///     })
     ///     .build();
     ///
-    /// producer.publish(|e| { e.price = 42.0; });
+    /// let sequence = producer.publish(|e| { e.price = 42.0; }).unwrap();
     /// # drop(producer); // Clean shutdown
     /// ```
-    fn publish<F>(&mut self, update: F)
+    fn publish<F>(&mut self, update: F) -> Result<i64>
     where
         F: FnOnce(&mut E);
 
@@ -135,6 +141,12 @@ where
     ///
     /// Spins until there are enough available slots in the ring buffer.
     ///
+    /// # Errors
+    /// Returns the underlying claim error instead of silently dropping the
+    /// batch (2026-07-18 audit): a batch larger than the ring buffer or a
+    /// failed/poisoned pipeline yields an error and the update closure never
+    /// runs. On success the highest published sequence number is returned.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -149,14 +161,14 @@ where
     ///     })
     ///     .build();
     ///
-    /// producer.batch_publish(3, |iter| {
+    /// let last = producer.batch_publish(3, |iter| {
     ///     for e in iter {
     ///         e.price = 42.0;
     ///     }
-    /// });
+    /// }).unwrap();
     /// # drop(producer); // Clean shutdown
     /// ```
-    fn batch_publish<'a, F>(&'a mut self, n: usize, update: F)
+    fn batch_publish<'a, F>(&'a mut self, n: usize, update: F) -> Result<i64>
     where
         E: 'a,
         F: FnOnce(BatchIterMut<'a, E>);
@@ -212,6 +224,19 @@ where
     T: Send + Sync,
     W: WaitStrategy + 'static,
 {
+}
+
+/// Poisons the sequencer if dropped while unwinding: a claim was made but the
+/// user's update closure panicked before publish, so the slot would otherwise
+/// be exposed as a never-written event on the next publish (2026-07-18 audit).
+pub(crate) struct PoisonOnPanic<'a, W: WaitStrategy + 'static>(pub(crate) &'a SequencerEnum<W>);
+
+impl<W: WaitStrategy + 'static> Drop for PoisonOnPanic<'_, W> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.poison();
+        }
+    }
 }
 
 impl<T, W> SimpleProducer<T, W>
@@ -284,7 +309,9 @@ where
         // Get the event at the claimed sequence and update it
         // SAFETY: We have exclusive access to this sequence from the sequencer
         let event = unsafe { &mut *self.ring_buffer.get_mut_unchecked(sequence) };
+        let poison_guard = PoisonOnPanic(&self.sequencer);
         update(event);
+        drop(poison_guard);
 
         // Publish the sequence to make it available to consumers
         self.sequencer.publish(sequence);
@@ -316,49 +343,44 @@ where
             self.ring_buffer
                 .batch_iter_mut(start_sequence, end_sequence)
         };
+        let poison_guard = PoisonOnPanic(&self.sequencer);
         update(iter);
+        drop(poison_guard);
 
         // Publish the entire range to make it available to consumers
         self.sequencer.publish_range(start_sequence, end_sequence);
         Ok(end_sequence)
     }
 
-    fn publish<F>(&mut self, update: F)
+    fn publish<F>(&mut self, update: F) -> Result<i64>
     where
         F: FnOnce(&mut T),
     {
-        // Claim the next sequence from the sequencer (blocking)
-        let sequence = match self.sequencer.next() {
-            Ok(seq) => seq,
-            Err(e) => {
-                crate::internal_error!("Failed to claim sequence: {e:?}");
-                return;
-            }
-        };
+        // Claim the next sequence from the sequencer (blocking). Claim errors
+        // are delivered to the caller, never logged-and-dropped (2026-07-18 audit).
+        let sequence = self.sequencer.next()?;
 
         // Get the event at the claimed sequence and update it
         // SAFETY: We have exclusive access to this sequence from the sequencer
         let event = unsafe { &mut *self.ring_buffer.get_mut_unchecked(sequence) };
+        let poison_guard = PoisonOnPanic(&self.sequencer);
         update(event);
+        drop(poison_guard);
 
         // Publish the sequence to make it available to consumers
         self.sequencer.publish(sequence);
+        Ok(sequence)
     }
 
-    fn batch_publish<'a, F>(&'a mut self, n: usize, update: F)
+    fn batch_publish<'a, F>(&'a mut self, n: usize, update: F) -> Result<i64>
     where
         T: 'a,
         F: FnOnce(BatchIterMut<'a, T>),
     {
-        // Claim n sequences from the sequencer (blocking)
+        // Claim n sequences from the sequencer (blocking). Claim errors are
+        // delivered to the caller, never logged-and-dropped (2026-07-18 audit).
         let batch_size = i64::try_from(n).expect("batch size must fit in i64");
-        let end_sequence = match self.sequencer.next_n(batch_size) {
-            Ok(seq) => seq,
-            Err(e) => {
-                crate::internal_error!("Failed to claim batch sequences: {e:?}");
-                return;
-            }
-        };
+        let end_sequence = self.sequencer.next_n(batch_size)?;
         let start_sequence = end_sequence - (batch_size - 1);
 
         // SAFETY: We have exclusive access to this sequence range from the sequencer
@@ -366,10 +388,13 @@ where
             self.ring_buffer
                 .batch_iter_mut(start_sequence, end_sequence)
         };
+        let poison_guard = PoisonOnPanic(&self.sequencer);
         update(iter);
+        drop(poison_guard);
 
         // Publish the entire range to make it available to consumers
         self.sequencer.publish_range(start_sequence, end_sequence);
+        Ok(end_sequence)
     }
 }
 
@@ -464,7 +489,7 @@ mod tests {
         let mut producer = create_test_producer();
 
         // Publish an event (should not block for first few events)
-        producer.publish(|event| {
+        let _ = producer.publish(|event| {
             event.value = 100;
             event.data = "blocking_test".to_string();
         });
@@ -513,7 +538,7 @@ mod tests {
         let mut producer = create_test_producer();
 
         // Publish a batch (should not block for first batch)
-        producer.batch_publish(2, |iter| {
+        let _ = producer.batch_publish(2, |iter| {
             for (i, event) in iter.enumerate() {
                 event.value = i64::try_from(i + 10).expect("index fits in i64");
                 event.data = format!("blocking_batch_{i}");
@@ -566,7 +591,7 @@ mod tests {
         assert_eq!(result1.unwrap(), 0);
 
         // publish - publishes to sequence 1
-        Producer::publish(&mut producer, |event| {
+        let _ = Producer::publish(&mut producer, |event| {
             event.value = 2;
         });
         assert_eq!(producer.current_sequence(), 1);
@@ -581,7 +606,7 @@ mod tests {
         assert_eq!(result2.unwrap(), 3); // End sequence of batch
 
         // batch_publish - publishes 1 event to sequence 4
-        Producer::batch_publish(&mut producer, 1, |iter| {
+        let _ = Producer::batch_publish(&mut producer, 1, |iter| {
             for event in iter {
                 event.value = 99;
             }

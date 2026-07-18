@@ -113,12 +113,12 @@ fn corrected_modern_disruptor_rs_example() {
         .build();
 
     // Publish events with closures (this works as documented)
-    producer.publish(|event| {
+    let _ = producer.publish(|event| {
         event.value = 42;
     });
 
     // Batch publishing (this works as documented)
-    producer.batch_publish(5, |batch| {
+    let _ = producer.batch_publish(5, |batch| {
         for (i, event) in batch.enumerate() {
             event.value = i as i64;
         }
@@ -171,7 +171,7 @@ fn alternative_modern_api_with_adapter() {
     .build();
 
     // This API works exactly the same as the corrected version above
-    producer.publish(|event| {
+    let _ = producer.publish(|event| {
         event.value = 42;
     });
 }

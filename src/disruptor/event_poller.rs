@@ -323,7 +323,7 @@ mod tests {
 
         assert_eq!(poller.poll().err(), Some(Polling::Idle));
 
-        producer.publish(|e| e.v = 7);
+        let _ = producer.publish(|e| e.v = 7);
 
         {
             let mut batch = poller.poll().expect("events");
@@ -355,7 +355,7 @@ mod tests {
                 e.x += 1;
             })
             .build();
-        d.publish(|e| e.x = 1);
+        let _ = d.publish(|e| e.x = 1);
         d.shutdown();
     }
 }

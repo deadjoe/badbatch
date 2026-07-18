@@ -466,7 +466,7 @@ where
             while published < cfg.events_total {
                 let chunk = (cfg.batch_size as u64).min(cfg.events_total - published) as usize;
                 let base = published;
-                handle.batch_publish(chunk, |iter| {
+                let _ = handle.batch_publish(chunk, |iter| {
                     for (j, e) in iter.enumerate() {
                         e.value = (base + j as u64) as i64;
                         e.stage1_value = 0;
@@ -478,7 +478,7 @@ where
             }
         } else {
             for v in 0..cfg.events_total {
-                handle.publish(|e| {
+                let _ = handle.publish(|e| {
                     e.value = v as i64;
                     e.stage1_value = 0;
                     e.stage2_value = 0;
@@ -563,7 +563,7 @@ where
                 while published < range_end {
                     let chunk = batch.min((range_end - published) as usize);
                     let base = published;
-                    prod.batch_publish(chunk, |iter| {
+                    let _ = prod.batch_publish(chunk, |iter| {
                         for (j, e) in iter.enumerate() {
                             e.value = (base + j as u64) as i64;
                             e.stage1_value = 0;
@@ -649,7 +649,7 @@ where
 
         let start = Instant::now();
         for v in 0..cfg.events_total {
-            handle.publish(|e| {
+            let _ = handle.publish(|e| {
                 e.value = v as i64;
                 e.stage1_value = 0;
                 e.stage2_value = 0;

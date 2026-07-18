@@ -57,7 +57,7 @@ fn test_and_then_dependency_chain() {
 
     // Publish some events
     for i in 0..5 {
-        disruptor_handle.publish(|event| {
+        let _ = disruptor_handle.publish(|event| {
             event.value = i;
         });
     }
@@ -142,7 +142,7 @@ fn test_stateful_event_handler() {
 
     // Publish some events
     for i in 0..10 {
-        disruptor_handle.publish(|event| {
+        let _ = disruptor_handle.publish(|event| {
             event.value = i; // This will be overwritten by the handler
         });
     }
@@ -202,10 +202,10 @@ fn test_multi_producer_stateful_event_handler() {
     let mut producer2 = disruptor_handle.create_producer();
 
     for i in 0..5 {
-        producer1.publish(|event| {
+        let _ = producer1.publish(|event| {
             event.value = i;
         });
-        producer2.publish(|event| {
+        let _ = producer2.publish(|event| {
             event.value = i + 10;
         });
     }
@@ -279,7 +279,7 @@ fn test_mixed_handler_types() {
 
     // Publish some events
     for i in 0..5 {
-        disruptor_handle.publish(|event| {
+        let _ = disruptor_handle.publish(|event| {
             event.value = i;
         });
     }
@@ -366,7 +366,7 @@ fn test_simple_dependency_chain() {
 
     // Publish just one event to test dependency chain
     for i in 0..1 {
-        disruptor_handle.publish(|event| {
+        let _ = disruptor_handle.publish(|event| {
             event.value = i;
             event.data = String::new();
         });
@@ -457,7 +457,7 @@ fn test_dependency_chain_debug() {
 
     // Publish just one event to make debugging easier
     println!("📤 Publishing single event...");
-    disruptor_handle.publish(|event| {
+    let _ = disruptor_handle.publish(|event| {
         event.value = 42;
         event.data = "debug_event".to_string();
     });
@@ -577,7 +577,7 @@ fn test_four_stage_dependency_chain() {
     println!("📤 Publishing {num_events} events...");
 
     for i in 0..num_events {
-        disruptor_handle.publish(|event| {
+        let _ = disruptor_handle.publish(|event| {
             event.value = i;
             event.data = String::new();
         });
@@ -688,7 +688,7 @@ fn test_dependency_chain_validation() {
     println!("📤 Publishing {num_events} events...");
 
     for i in 0..num_events {
-        disruptor_handle.publish(|event| {
+        let _ = disruptor_handle.publish(|event| {
             event.value = i;
             event.data = String::new();
         });
@@ -801,7 +801,7 @@ fn test_robust_dependency_chain_multiple_events() {
     println!("📤 Publishing {num_events} events with delays...");
 
     for i in 0..num_events {
-        disruptor_handle.publish(|event| {
+        let _ = disruptor_handle.publish(|event| {
             event.value = i;
             event.data = format!("event_{i}");
         });

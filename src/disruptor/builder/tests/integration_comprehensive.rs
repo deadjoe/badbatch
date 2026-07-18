@@ -71,7 +71,7 @@ fn test_final_comprehensive_validation() {
 
     // Publish some events
     for i in 0..5 {
-        disruptor_handle.publish(|event| {
+        let _ = disruptor_handle.publish(|event| {
             event.value = i;
         });
     }
@@ -116,7 +116,7 @@ fn test_final_comprehensive_validation() {
 
     // Publish events
     for i in 0..3 {
-        disruptor_handle.publish(|event| {
+        let _ = disruptor_handle.publish(|event| {
             event.value = i;
         });
     }
@@ -180,7 +180,7 @@ fn test_unified_api_design() {
 
     // Publish some events
     for i in 0..5 {
-        builder_disruptor.publish(|event| {
+        let _ = builder_disruptor.publish(|event| {
             event.value = i;
             event.data = format!("event_{i}");
         });
@@ -369,7 +369,7 @@ fn test_comprehensive_improvements() {
 
     // Publish test events
     for i in 0..8 {
-        disruptor_handle.publish(|event| {
+        let _ = disruptor_handle.publish(|event| {
             event.value = i;
             event.data = String::new(); // Initialize data field
         });

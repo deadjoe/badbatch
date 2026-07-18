@@ -167,6 +167,16 @@ where
         }
     }
 
+    /// Poison the producer side of the pipeline this barrier belongs to.
+    ///
+    /// Called by consumer threads when their handler panics or reports a fatal
+    /// error: blocking producer claims fail with
+    /// [`crate::disruptor::DisruptorError::Poisoned`] instead of spinning
+    /// forever on a gating sequence that will never advance (2026-07-18 audit).
+    pub fn poison_producers(&self) {
+        self.sequencer.poison();
+    }
+
     /// Resolve the highest contiguous published sequence after a wait.
     ///
     /// Single-producer sequencers publish in order, so the available sequence

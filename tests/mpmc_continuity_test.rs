@@ -113,7 +113,7 @@ fn test_mpmc_multi_producer() {
         let handle = thread::spawn(move || {
             for event_id in 0..events_per_producer {
                 // Use blocking publish to avoid ring buffer full errors
-                producer_clone.publish(|event| {
+                let _ = producer_clone.publish(|event| {
                     event.value = event_id as i64;
                     event.producer_id = producer_id as u32;
                 });
@@ -169,7 +169,7 @@ fn test_mpmc_sequence_continuity() {
 
     // Publish events sequentially for predictable testing
     for i in 0..8 {
-        producer.publish(|event| {
+        let _ = producer.publish(|event| {
             event.value = i;
         });
     }
@@ -223,7 +223,7 @@ fn test_mpmc_continuity_under_load() {
 
     // Use a single thread with blocking publishes to ensure all events get through
     for i in 0..num_events {
-        producer.publish(|event| {
+        let _ = producer.publish(|event| {
             event.value = i as i64;
             event.producer_id = 1;
         });
@@ -297,7 +297,7 @@ fn test_mpmc_slow_producer_does_not_leak_unpublished_events() {
     let claim_latch_clone = Arc::clone(&claim_latch);
     let release_latch_clone = Arc::clone(&release_latch);
     let producer_thread = std::thread::spawn(move || {
-        slow_producer.publish(|event| {
+        let _ = slow_producer.publish(|event| {
             // Signal that we have entered the critical section before initialization.
             {
                 let (lock, cvar) = &*claim_latch_clone;
@@ -381,7 +381,7 @@ fn test_mpmc_builder_api() {
 
     // Simple publishing test
     for i in 0..3 {
-        producer.publish(|event| {
+        let _ = producer.publish(|event| {
             event.value = i as i64;
         });
     }
