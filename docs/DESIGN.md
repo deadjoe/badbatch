@@ -117,16 +117,19 @@ Simplified, user-friendly publishing interfaces inspired by disruptor-rs.
 **Key Features:**
 - **Closure-Based**: `producer.publish(|event| { event.value = 42; })`
 - **Batch Support**: Efficient batch publishing with `BatchIterMut`
-- **Error Handling**: Clear error types (`RingBufferFull`, `MissingFreeSlots`)
+- **Error Handling**: Fallible blocking publishes (`Result<i64>`); the
+  non-blocking paths return `TryPublishError`, distinguishing transient
+  backpressure (`Full` / `MissingFreeSlots`) from terminal states
+  (`Poisoned` / `Shutdown`)
 - **Zero-Copy**: Direct access to ring buffer slots
 
 **API Design:**
 ```rust
 pub trait Producer<E> {
-    fn try_publish<F>(&mut self, update: F) -> Result<i64, RingBufferFull>;
-    fn try_batch_publish<F>(&mut self, n: usize, update: F) -> Result<i64, MissingFreeSlots>;
-    fn publish<F>(&mut self, update: F);
-    fn batch_publish<F>(&mut self, n: usize, update: F);
+    fn try_publish<F>(&mut self, update: F) -> Result<i64, TryPublishError>;
+    fn try_batch_publish<F>(&mut self, n: usize, update: F) -> Result<i64, TryPublishError>;
+    fn publish<F>(&mut self, update: F) -> Result<i64>;
+    fn batch_publish<F>(&mut self, n: usize, update: F) -> Result<i64>;
 }
 ```
 
