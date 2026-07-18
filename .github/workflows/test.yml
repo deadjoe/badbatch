@@ -148,12 +148,16 @@ jobs:
       - name: Miri — ring buffer / sequence / soundness subset
         # Full concurrent suites are too slow/noisy under Miri; focus on the
         # aliasing-critical ring buffer and sequence primitives that use unsafe,
-        # plus the 2026-07-18 soundness-audit regressions (claim bounds and the
-        # concurrent-lifecycle handler exclusivity test).
-        # Precise module filters avoid pulling in proptest (cwd isolation issues).
+        # plus soundness-audit regressions (claim bounds, handler exclusivity,
+        # poller prefix-ack, DSL immediate start/shutdown, try_run_once fatal).
+        # Precise filters avoid pulling in proptest (cwd isolation issues).
         run: |
           cargo miri test --lib disruptor::ring_buffer::tests
           cargo miri test --lib disruptor::sequence::tests -- --skip thread_safety
           cargo miri test --lib disruptor::sequencer::tests::test_single_try_next_n_rejects_over_capacity_without_gating
           cargo miri test --lib disruptor::sequencer::tests::test_multi_try_next_n_rejects_over_capacity_without_gating
           cargo miri test --lib disruptor::event_processor::tests::test_concurrent_on_start_is_sound
+          cargo miri test --lib disruptor::event_processor::tests::test_try_run_once_on_batch_start_failure_is_fatal
+          cargo miri test --lib disruptor::event_poller::tests::dropped_batch_commits_only_consumed_prefix
+          cargo miri test --lib disruptor::event_poller::tests::untouched_batch_drop_redelivers_everything
+          cargo miri test --lib disruptor::disruptor::tests::test_disruptor_immediate_start_shutdown_no_hang

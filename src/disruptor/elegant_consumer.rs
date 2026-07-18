@@ -3,9 +3,11 @@
 //! **Legacy/extras surface.** Lightweight helper for demos/experiments with
 //! automatic batch detection and clean shutdown. Prefer the monomorphized
 //! Builder (`build_*`) or [`crate::disruptor::EventPoller`] for
-//! production-shaped topologies: unlike those paths, `ElegantConsumer`
-//! threads are not covered by panic poisoning — a panicking handler here
-//! still stalls producer gating (2026-07-18 audit, known gap).
+//! production-shaped topologies.
+//!
+//! Handler panics are caught: the consumer stops and re-raises on join. Pass a
+//! [`PanicHook`] (e.g. `|_| sequencer.poison()`) via the `*_with_panic_hook`
+//! constructors so producers fail fast instead of spinning on a dead gate.
 //!
 //! Uses [`SimpleWaitStrategy`] (`backoff`); those ZSTs also implement full
 //! [`crate::disruptor::WaitStrategy`] for Builder use without adapters.
@@ -17,10 +19,15 @@ use crate::disruptor::{
 };
 use crossbeam_utils::CachePadded;
 use std::marker::PhantomData;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{
     atomic::{AtomicBool, AtomicI64, Ordering},
     Arc,
 };
+
+/// Optional hook invoked when an ElegantConsumer handler panics (before the
+/// panic is resumed). Typically wires to [`crate::disruptor::Sequencer::poison`].
+pub type PanicHook = Arc<dyn Fn() + Send + Sync>;
 
 /// Elegant consumer for processing events with automatic batch detection
 ///
@@ -62,22 +69,71 @@ where
         H: FnMut(&T, i64, bool) + Send + 'static,
         W: SimpleWaitStrategy + 'static,
     {
+        Self::spawn_plain(ring_buffer, event_handler, wait_strategy, None, None)
+    }
+
+    /// Like [`Self::new`], but invokes `panic_hook` if the handler panics
+    /// (e.g. close/poison the producer sequencer).
+    pub fn new_with_panic_hook<H, W>(
+        ring_buffer: Arc<RingBuffer<T>>,
+        event_handler: H,
+        wait_strategy: W,
+        panic_hook: PanicHook,
+    ) -> std::io::Result<Self>
+    where
+        H: FnMut(&T, i64, bool) + Send + 'static,
+        W: SimpleWaitStrategy + 'static,
+    {
+        Self::spawn_plain(
+            ring_buffer,
+            event_handler,
+            wait_strategy,
+            None,
+            Some(panic_hook),
+        )
+    }
+
+    fn spawn_plain<H, W>(
+        ring_buffer: Arc<RingBuffer<T>>,
+        event_handler: H,
+        wait_strategy: W,
+        core_id: Option<usize>,
+        panic_hook: Option<PanicHook>,
+    ) -> std::io::Result<Self>
+    where
+        H: FnMut(&T, i64, bool) + Send + 'static,
+        W: SimpleWaitStrategy + 'static,
+    {
         let sequence = Arc::new(CachePadded::new(AtomicI64::new(-1)));
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let sequence_clone = sequence.clone();
         let shutdown_clone = shutdown.clone();
 
-        let thread = ThreadBuilder::new()
-            .thread_name("elegant-consumer")
-            .spawn(move || {
-                let mut handler = event_handler;
-                let strategy = wait_strategy;
-                let ring = ring_buffer;
-                let seq = sequence_clone;
-                let shutdown_flag = shutdown_clone;
-                Self::consumer_loop(&ring, &mut handler, &strategy, &seq, &shutdown_flag);
-            })?;
+        let mut builder = ThreadBuilder::new().thread_name(if core_id.is_some() {
+            format!("elegant-consumer-core-{}", core_id.unwrap_or(0))
+        } else {
+            "elegant-consumer".to_string()
+        });
+        if let Some(core) = core_id {
+            builder = builder.pin_at_core(core);
+        }
+
+        let thread = builder.spawn(move || {
+            let mut handler = event_handler;
+            let strategy = wait_strategy;
+            let ring = ring_buffer;
+            let seq = sequence_clone;
+            let shutdown_flag = shutdown_clone;
+            Self::consumer_loop(
+                &ring,
+                &mut handler,
+                &strategy,
+                &seq,
+                &shutdown_flag,
+                panic_hook.as_ref(),
+            );
+        })?;
 
         Ok(Self {
             thread: Some(thread),
@@ -109,6 +165,51 @@ where
         I: FnOnce() -> S + Send + 'static,
         W: SimpleWaitStrategy + 'static,
     {
+        Self::spawn_with_state(
+            ring_buffer,
+            event_handler,
+            initialize_state,
+            wait_strategy,
+            None,
+        )
+    }
+
+    /// Like [`Self::with_state`], with a panic hook for producer poisoning.
+    pub fn with_state_and_panic_hook<H, S, I, W>(
+        ring_buffer: Arc<RingBuffer<T>>,
+        event_handler: H,
+        initialize_state: I,
+        wait_strategy: W,
+        panic_hook: PanicHook,
+    ) -> std::io::Result<Self>
+    where
+        H: FnMut(&mut S, &T, i64, bool) + Send + 'static,
+        S: Send + 'static,
+        I: FnOnce() -> S + Send + 'static,
+        W: SimpleWaitStrategy + 'static,
+    {
+        Self::spawn_with_state(
+            ring_buffer,
+            event_handler,
+            initialize_state,
+            wait_strategy,
+            Some(panic_hook),
+        )
+    }
+
+    fn spawn_with_state<H, S, I, W>(
+        ring_buffer: Arc<RingBuffer<T>>,
+        event_handler: H,
+        initialize_state: I,
+        wait_strategy: W,
+        panic_hook: Option<PanicHook>,
+    ) -> std::io::Result<Self>
+    where
+        H: FnMut(&mut S, &T, i64, bool) + Send + 'static,
+        S: Send + 'static,
+        I: FnOnce() -> S + Send + 'static,
+        W: SimpleWaitStrategy + 'static,
+    {
         let sequence = Arc::new(CachePadded::new(AtomicI64::new(-1)));
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -130,6 +231,7 @@ where
                     &strategy,
                     &seq,
                     &shutdown_flag,
+                    panic_hook.as_ref(),
                 );
             })?;
 
@@ -161,30 +263,34 @@ where
         H: FnMut(&T, i64, bool) + Send + 'static,
         W: SimpleWaitStrategy + 'static,
     {
-        let sequence = Arc::new(CachePadded::new(AtomicI64::new(-1)));
-        let shutdown = Arc::new(AtomicBool::new(false));
+        Self::spawn_plain(
+            ring_buffer,
+            event_handler,
+            wait_strategy,
+            Some(core_id),
+            None,
+        )
+    }
 
-        let sequence_clone = sequence.clone();
-        let shutdown_clone = shutdown.clone();
-
-        let thread = ThreadBuilder::new()
-            .pin_at_core(core_id)
-            .thread_name(format!("elegant-consumer-core-{core_id}"))
-            .spawn(move || {
-                let mut handler = event_handler;
-                let strategy = wait_strategy;
-                let ring = ring_buffer;
-                let seq = sequence_clone;
-                let shutdown_flag = shutdown_clone;
-                Self::consumer_loop(&ring, &mut handler, &strategy, &seq, &shutdown_flag);
-            })?;
-
-        Ok(Self {
-            thread: Some(thread),
-            sequence,
-            shutdown,
-            _phantom: PhantomData,
-        })
+    /// Like [`Self::with_affinity`], with a panic hook for producer poisoning.
+    pub fn with_affinity_and_panic_hook<H, W>(
+        ring_buffer: Arc<RingBuffer<T>>,
+        event_handler: H,
+        wait_strategy: W,
+        core_id: usize,
+        panic_hook: PanicHook,
+    ) -> std::io::Result<Self>
+    where
+        H: FnMut(&T, i64, bool) + Send + 'static,
+        W: SimpleWaitStrategy + 'static,
+    {
+        Self::spawn_plain(
+            ring_buffer,
+            event_handler,
+            wait_strategy,
+            Some(core_id),
+            Some(panic_hook),
+        )
     }
 
     /// Get the current sequence position of this consumer
@@ -220,6 +326,7 @@ where
         wait_strategy: &W,
         sequence: &Arc<CachePadded<AtomicI64>>,
         shutdown: &Arc<AtomicBool>,
+        panic_hook: Option<&PanicHook>,
     ) where
         H: FnMut(&T, i64, bool),
         W: SimpleWaitStrategy,
@@ -245,8 +352,18 @@ where
                     // advances past this slot.
                     let event = unsafe { ring_buffer.get(next_sequence) };
 
-                    // Process the event
-                    event_handler(event, next_sequence, end_of_batch);
+                    // Catch handler panics so we can stop cleanly and optionally
+                    // poison producers (audit residual for ElegantConsumer).
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        event_handler(event, next_sequence, end_of_batch);
+                    }));
+                    if let Err(payload) = result {
+                        shutdown.store(true, Ordering::Release);
+                        if let Some(hook) = panic_hook {
+                            hook();
+                        }
+                        std::panic::resume_unwind(payload);
+                    }
 
                     // Move to next sequence
                     next_sequence += 1;
@@ -266,6 +383,7 @@ where
         wait_strategy: &W,
         sequence: &Arc<CachePadded<AtomicI64>>,
         shutdown: &Arc<AtomicBool>,
+        panic_hook: Option<&PanicHook>,
     ) where
         H: FnMut(&mut S, &T, i64, bool),
         I: FnOnce() -> S,
@@ -293,8 +411,16 @@ where
                     // advances past this slot.
                     let event = unsafe { ring_buffer.get(next_sequence) };
 
-                    // Process the event with state
-                    event_handler(&mut state, event, next_sequence, end_of_batch);
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        event_handler(&mut state, event, next_sequence, end_of_batch);
+                    }));
+                    if let Err(payload) = result {
+                        shutdown.store(true, Ordering::Release);
+                        if let Some(hook) = panic_hook {
+                            hook();
+                        }
+                        std::panic::resume_unwind(payload);
+                    }
 
                     // Move to next sequence
                     next_sequence += 1;
@@ -719,5 +845,43 @@ mod tests {
             !batch_events.is_empty(),
             "Should have processed some events"
         );
+    }
+
+    /// Residual: panicking handlers must invoke the optional poison hook and
+    /// re-raise so join fails (producers can fail fast instead of spinning).
+    #[test]
+    fn test_panic_hook_invoked_on_handler_panic() {
+        use std::time::{Duration, Instant};
+
+        let factory = ClosureEventFactory::new(|| TestEvent { value: 0 });
+        let ring_buffer = Arc::new(RingBuffer::new(8, factory).unwrap());
+
+        let hook_fired = Arc::new(AtomicBool::new(false));
+        let hook_flag = Arc::clone(&hook_fired);
+        let consumer = ElegantConsumer::new_with_panic_hook(
+            ring_buffer,
+            |_event: &TestEvent, _seq, _eob| {
+                panic!("handler boom");
+            },
+            BusySpin,
+            Arc::new(move || {
+                hook_flag.store(true, Ordering::Release);
+            }),
+        )
+        .unwrap();
+
+        // Do not call shutdown() first — it sets the stop flag and can race
+        // ahead of the first handler invocation. Wait for the panic path.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !hook_fired.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            hook_fired.load(Ordering::Acquire),
+            "panic hook must run before resume_unwind"
+        );
+        // Thread already panicked; join via shutdown (flag is set by the loop).
+        let join = consumer.shutdown();
+        assert!(join.is_err(), "panicking handler must fail join");
     }
 }

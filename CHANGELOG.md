@@ -13,6 +13,24 @@ compiler, or when CI stabilizes on a new stable series. Patch toolchain updates
 
 ## [0.2.0] — 2026-07
 
+### Lifecycle residual closure (post-audit)
+
+Closes the four secondary residuals left after P0–P2:
+
+- **`try_run_once` fatal `on_batch_start`.** Matches the sequential engine:
+  failure freezes the sequence, poisons producers, and stops the processor.
+- **DSL drain shutdown.** `Disruptor::shutdown` / `shutdown_timeout` now close
+  claims, drain the published backlog, then halt; `halt()` is the abrupt path.
+  Post-stop publishes return `DisruptorError::Shutdown`.
+- **Sequencer close flag.** `Sequencer::close` freezes claims on clean
+  halt/shutdown (Builder and DSL). Distinct from poison (failure path).
+- **ElegantConsumer panic hooks.** Handler panics are caught; optional
+  `*_with_panic_hook` constructors run a hook (e.g. sequencer poison) before
+  re-raising. Default constructors still catch+stop without a hook.
+- **Verification depth.** Integration tests for publish-after-halt and DSL
+  drain; Miri CI expanded with poller prefix-ack, try_run_once fatal, and
+  immediate DSL start/shutdown.
+
 ### Surface & validation cleanup (2026-07-18 audit P2 round)
 
 - **Dead surface removed.** `Cursored`, `Sequenced`, and `EventSink` traits

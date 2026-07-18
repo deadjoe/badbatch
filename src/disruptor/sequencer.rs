@@ -148,6 +148,22 @@ pub trait Sequencer: Send + Sync + std::fmt::Debug {
     fn is_poisoned(&self) -> bool {
         false
     }
+
+    /// Close the claim path after a clean shutdown/halt: further `next` /
+    /// `try_next` calls fail with [`crate::disruptor::DisruptorError::Shutdown`]
+    /// (or `None` for try) so producers cannot keep writing into a halted ring.
+    ///
+    /// Default is a no-op so external `Sequencer` implementations keep compiling.
+    fn close(&self) {}
+
+    /// Whether [`Sequencer::close`] has been called.
+    fn is_closed(&self) -> bool {
+        false
+    }
+
+    /// Re-open the claim path after a prior [`Sequencer::close`] (e.g. DSL restart).
+    /// Default is a no-op.
+    fn reopen(&self) {}
 }
 
 /// Enum-based sequencer dispatch that eliminates vtable indirection.
@@ -300,6 +316,21 @@ where
     fn is_poisoned(&self) -> bool {
         dispatch_sequencer!(self, is_poisoned)
     }
+
+    #[inline]
+    fn close(&self) {
+        dispatch_sequencer!(self, close);
+    }
+
+    #[inline]
+    fn is_closed(&self) -> bool {
+        dispatch_sequencer!(self, is_closed)
+    }
+
+    #[inline]
+    fn reopen(&self) {
+        dispatch_sequencer!(self, reopen);
+    }
 }
 
 fn add_gating_sequences_rcu(
@@ -401,6 +432,9 @@ where
     /// Set when a consumer thread or a producer update closure panicked.
     /// Claim methods fail fast instead of spinning on a dead gating sequence.
     poisoned: AtomicBool,
+    /// Set on clean halt/shutdown: further claims return Shutdown instead of
+    /// writing into a stopped pipeline (audit residual: publish-after-halt).
+    closed: AtomicBool,
 }
 
 // SAFETY: `next_value` / `cached_value` are only read/written by the single publisher
@@ -443,6 +477,7 @@ where
             next_value: UnsafeCell::new(-1),
             cached_value: UnsafeCell::new(-1),
             poisoned: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
         }
     }
 
@@ -544,11 +579,14 @@ where
         if n < 1 || n > self.buffer_size_i64 {
             return Err(DisruptorError::InvalidSequence(n));
         }
-        // Relaxed: poisoning is a terminal monotonic flag; coherence guarantees
-        // eventual visibility and no data depends on its ordering. An Acquire
-        // load here pairs a per-publish STLR (cursor Release store) with an
-        // LDAR, creating a StoreLoad barrier per event on ARM that cost ~5x
-        // single-event throughput (P3 bisection, 2026-07-19).
+        // Relaxed: closed/poisoned are terminal monotonic flags; coherence
+        // guarantees eventual visibility. An Acquire load here pairs a
+        // per-publish STLR (cursor Release store) with an LDAR, creating a
+        // StoreLoad barrier per event on ARM that cost ~5x single-event
+        // throughput (P3 bisection, 2026-07-19).
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(DisruptorError::Shutdown);
+        }
         if self.poisoned.load(Ordering::Relaxed) {
             return Err(DisruptorError::Poisoned);
         }
@@ -574,6 +612,9 @@ where
             } {
                 // A dead consumer never advances its gating sequence; fail fast
                 // instead of spinning forever. Relaxed: see entry check above.
+                if self.closed.load(Ordering::Relaxed) {
+                    return Err(DisruptorError::Shutdown);
+                }
                 if self.poisoned.load(Ordering::Relaxed) {
                     return Err(DisruptorError::Poisoned);
                 }
@@ -600,8 +641,8 @@ where
         if n < 1 || n > self.buffer_size_i64 {
             return None;
         }
-        // Relaxed: terminal monotonic flag (see next_n).
-        if self.poisoned.load(Ordering::Relaxed) {
+        // Relaxed: terminal monotonic flags (see next_n).
+        if self.closed.load(Ordering::Relaxed) || self.poisoned.load(Ordering::Relaxed) {
             return None;
         }
 
@@ -681,6 +722,19 @@ where
     fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
     }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.wait_strategy.signal_all_when_blocking();
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    fn reopen(&self) {
+        self.closed.store(false, Ordering::Release);
+    }
 }
 
 /// Multi producer sequencer with bitmap optimization
@@ -745,6 +799,8 @@ where
     /// Set when a consumer thread or a producer update closure panicked.
     /// Claim methods fail fast instead of spinning on a dead gating sequence.
     poisoned: AtomicBool,
+    /// Set on clean halt/shutdown: further claims return Shutdown.
+    closed: AtomicBool,
 }
 
 impl<W> MultiProducerSequencer<W>
@@ -806,6 +862,7 @@ where
             cached_gating_sequence: CachePadded::new(AtomicI64::new(-1)),
             available_buffer,
             poisoned: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
         }
     }
 
@@ -1078,10 +1135,11 @@ where
 
         // Try claiming the sequence using CAS
         loop {
-            // A dead consumer never advances its gating sequence; fail fast
-            // instead of spinning forever (2026-07-18 audit). Relaxed: terminal
-            // monotonic flag; an Acquire here inserts a StoreLoad barrier per
-            // claim on ARM (see SingleProducerSequencer::next_n).
+            // Closed/poisoned are terminal monotonic flags. Relaxed: see Single
+            // next_n for the ARM StoreLoad rationale.
+            if self.closed.load(Ordering::Relaxed) {
+                return Err(DisruptorError::Shutdown);
+            }
             if self.poisoned.load(Ordering::Relaxed) {
                 return Err(DisruptorError::Poisoned);
             }
@@ -1133,8 +1191,8 @@ where
         if n < 1 || n > self.buffer_size_i64 {
             return None;
         }
-        // Relaxed: terminal monotonic flag (see next_n).
-        if self.poisoned.load(Ordering::Relaxed) {
+        // Relaxed: terminal monotonic flags (see next_n).
+        if self.closed.load(Ordering::Relaxed) || self.poisoned.load(Ordering::Relaxed) {
             return None;
         }
 
@@ -1277,6 +1335,19 @@ where
 
     fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.wait_strategy.signal_all_when_blocking();
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    fn reopen(&self) {
+        self.closed.store(false, Ordering::Release);
     }
 }
 

@@ -63,13 +63,31 @@ where
         self.consumers.len()
     }
 
-    /// Abrupt stop: signal shutdown and join all consumer threads.
+    /// Abrupt stop: close the claim path, signal shutdown, and join consumers.
     ///
     /// Published-but-unconsumed events are **not** drained (LMAX `halt()`
     /// semantics). Use [`Self::shutdown_with_timeout`] for a draining stop.
+    /// After halt, further publishes fail with
+    /// [`crate::disruptor::DisruptorError::Shutdown`].
     pub fn halt(&mut self) {
+        // Close claims first so producers fail fast even if they outlive the
+        // handle (`into_producer` / multi `create_producer` still needs an open
+        // claim path — see [`Self::stop_consumers_keep_claims`]).
+        self.sequencer.close();
+        self.stop_consumers_keep_claims();
+    }
+
+    /// Stop and join consumer threads without closing the claim path.
+    ///
+    /// Used by [`crate::disruptor::builder::DisruptorHandle::into_producer`]:
+    /// consumers/gating are removed so the ring can wrap freely, but the
+    /// returned producer must still be able to claim sequences.
+    pub(crate) fn stop_consumers_keep_claims(&mut self) {
         if self.shutdown_flag.swap(true, Ordering::AcqRel) {
-            return;
+            // Already stopped; still ensure gating is cleared if consumers gone.
+            if self.consumers.is_empty() {
+                return;
+            }
         }
 
         for mut consumer in self.consumers.drain(..) {
@@ -91,8 +109,8 @@ where
         }
     }
 
-    /// Draining stop (LMAX `shutdown()` semantics): wait until every consumer
-    /// has processed the published backlog, then halt.
+    /// Draining stop (LMAX `shutdown()` semantics): close new claims, wait until
+    /// every consumer has processed the published backlog, then halt.
     ///
     /// The drain aborts early — proceeding straight to halt — when the
     /// pipeline is poisoned or a consumer thread has already exited (its
@@ -106,17 +124,26 @@ where
         &mut self,
         timeout: Option<std::time::Duration>,
     ) -> crate::disruptor::Result<()> {
+        // Freeze the published prefix before draining so new claims cannot
+        // move the cursor while consumers catch up.
+        self.sequencer.close();
         let drained = self.drain(timeout);
         self.halt();
         drained
     }
 
     /// Wait until all gating sequences reach the cursor (backlog consumed).
+    ///
+    /// Assumes the claim path is already closed (or publishing has stopped) so
+    /// the cursor is a stable drain target.
     fn drain(&self, timeout: Option<std::time::Duration>) -> crate::disruptor::Result<()> {
         if self.shutdown_flag.load(Ordering::Acquire) {
             return Ok(());
         }
         let deadline = timeout.map(|d| std::time::Instant::now() + d);
+        // Snapshot after close. Multi-producer cursor is highest *claimed*;
+        // callers must not leave unpublished claims outstanding.
+        let cursor = self.sequencer.get_cursor().get();
         loop {
             if self.sequencer.is_poisoned() {
                 return Err(crate::disruptor::DisruptorError::Poisoned);
@@ -131,10 +158,6 @@ where
                 ));
             }
 
-            // Note: for multi-producer sequencers the cursor tracks the highest
-            // *claimed* sequence; callers must stop publishing before shutdown
-            // or a pending claim can stall the drain until timeout.
-            let cursor = self.sequencer.get_cursor().get();
             let consumed =
                 Sequence::get_minimum_sequence_with_default(&self.gating_sequences, cursor);
             if consumed >= cursor {

@@ -291,8 +291,10 @@ where
             return Err(DisruptorError::AlreadyRunning);
         }
 
-        // Reset shutdown flag
+        // Reset shutdown / claim-closed flags so restart after shutdown works
+        // (property tests and multi-cycle DSL usage).
         self.shutdown_flag.store(false, Ordering::Release);
+        self.sequencer.reopen();
 
         // Start all event processors in their own threads
         // Each processor runs its own blocking event loop.
@@ -323,36 +325,98 @@ where
         Ok(())
     }
 
-    /// Shutdown the Disruptor
+    /// Draining shutdown (LMAX `shutdown()`): close new claims, wait for
+    /// consumers to process the published backlog, then halt and join.
     ///
-    /// This halts all event processors and waits for them to complete.
-    /// All threads are gracefully stopped and joined.
+    /// Use [`Self::halt`] for an abrupt stop that does not drain.
     ///
-    /// # Returns
-    /// Ok(()) if shutdown successfully
+    /// # Errors
+    /// Propagates drain interruptions ([`DisruptorError::Poisoned`],
+    /// [`DisruptorError::Timeout`] is only from [`Self::shutdown_timeout`])
+    /// and join failures.
     pub fn shutdown(&mut self) -> Result<()> {
+        self.shutdown_with_timeout(None)
+    }
+
+    /// Draining shutdown with a deadline (see [`Self::shutdown`]).
+    ///
+    /// # Errors
+    /// - [`DisruptorError::Timeout`] if the backlog was not drained in time
+    /// - [`DisruptorError::Poisoned`] if the pipeline was poisoned mid-drain
+    /// - [`DisruptorError::ShutdownError`] if a consumer died before draining
+    pub fn shutdown_timeout(&mut self, timeout: std::time::Duration) -> Result<()> {
+        self.shutdown_with_timeout(Some(timeout))
+    }
+
+    fn shutdown_with_timeout(&mut self, timeout: Option<std::time::Duration>) -> Result<()> {
         if !self.started {
-            return Ok(()); // Not started, nothing to shutdown
+            return Ok(());
         }
 
-        // Signal shutdown to all threads atomically
+        // Freeze claims so the drain target is stable, then wait for consumers.
+        self.sequencer.close();
+        let drain_result = self.drain_backlog(timeout);
+        let halt_result = self.halt_join();
+        drain_result.and(halt_result)
+    }
+
+    /// Abrupt stop (LMAX `halt()`): close claims, halt processors, join.
+    /// Does **not** wait for the published backlog to be consumed.
+    pub fn halt(&mut self) -> Result<()> {
+        if !self.started {
+            return Ok(());
+        }
+        self.sequencer.close();
+        self.halt_join()
+    }
+
+    /// Wait until every processor sequence reaches the published cursor.
+    fn drain_backlog(&self, timeout: Option<std::time::Duration>) -> Result<()> {
+        let deadline = timeout.map(|d| std::time::Instant::now() + d);
+        let cursor = self.sequencer.get_cursor().get();
+        let sequences: Vec<Arc<Sequence>> = self
+            .event_processors
+            .iter()
+            .map(|p| p.get_sequence())
+            .collect();
+
+        loop {
+            if self.sequencer.is_poisoned() {
+                return Err(DisruptorError::Poisoned);
+            }
+            if self.thread_handles.iter().any(std::thread::JoinHandle::is_finished) {
+                return Err(DisruptorError::ShutdownError(
+                    "consumer thread exited before the backlog was drained".to_string(),
+                ));
+            }
+
+            let consumed = Sequence::get_minimum_sequence_with_default(&sequences, cursor);
+            if consumed >= cursor {
+                return Ok(());
+            }
+
+            if let Some(deadline) = deadline {
+                if std::time::Instant::now() >= deadline {
+                    return Err(DisruptorError::Timeout);
+                }
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    /// Halt processors and join threads (claim path should already be closed).
+    fn halt_join(&mut self) -> Result<()> {
         self.shutdown_flag.store(true, Ordering::Release);
 
-        // Halt all event processors: running=false (Release) + barrier alert
-        // wakes waiters. The alert/join pair below is the synchronization —
-        // the old extra SeqCst fence and fixed 1ms sleep added nothing
-        // (2026-07-18 audit cleanup).
+        // running=false (Release) + barrier alert wakes waiters.
         for processor in &self.event_processors {
             processor.halt();
         }
 
-        // Wait for all threads to complete with better error handling
         let mut join_errors = Vec::new();
         while let Some(handle) = self.thread_handles.pop() {
             match handle.join() {
-                Ok(Ok(())) => {
-                    // Thread completed successfully
-                }
+                Ok(Ok(())) => {}
                 Ok(Err(e)) => {
                     let err_msg = format!("Event processor thread returned error: {e:?}");
                     crate::internal_error!("{err_msg}");
@@ -368,7 +432,6 @@ where
 
         self.started = false;
 
-        // Return error if any threads failed to shutdown cleanly
         if !join_errors.is_empty() {
             return Err(DisruptorError::ShutdownError(format!(
                 "Some threads failed to shutdown cleanly: {join_errors:?}"
@@ -392,6 +455,7 @@ where
         // Serializes single-producer claim state when the DSL is shared
         // across threads; no-op for multi (soundness audit 2026-07-18).
         let _guard = self.claim_guard();
+        // Sequencer::close on halt/shutdown makes further claims fail with Shutdown.
         let sequence = self.sequencer.next()?;
 
         // SAFETY: The sequencer granted exclusive access to this sequence until

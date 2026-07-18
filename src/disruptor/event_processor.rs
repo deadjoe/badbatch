@@ -303,9 +303,20 @@ where
         let mut current_sequence = next_sequence;
         let batch_span = available_sequence - next_sequence + 1;
 
-        // Notify batch start with batch size and queue depth
+        // Notify batch start with batch size and queue depth. Align with the
+        // sequential engine: on_batch_start failure is fatal (was silently
+        // discarded on this cold path).
         let queue_depth = available_sequence - self.sequence.get();
-        let _ = handler.on_batch_start(batch_span, queue_depth);
+        if let Err(e) = handler.on_batch_start(batch_span, queue_depth) {
+            crate::internal_error!(
+                "on_batch_start failed in try_run_once at sequence {next_sequence}: {e:?}"
+            );
+            // Freeze before any event of this batch; poison producers and stop.
+            self.sequence.set(next_sequence - 1);
+            self.sequence_barrier.poison_producers();
+            self.running.store(false, Ordering::Release);
+            return Err(DisruptorError::Poisoned);
+        }
 
         while current_sequence <= available_sequence {
             let end_of_batch = current_sequence == available_sequence;
@@ -865,6 +876,8 @@ mod tests {
         };
 
         processor.on_start();
+        // run() CAS sets running; manual try_run_once callers must mark running.
+        processor.running.store(true, Ordering::Release);
 
         for sequence in 0..=1 {
             let claimed = sequencer.next().unwrap();
@@ -921,6 +934,7 @@ mod tests {
         };
 
         processor.on_start();
+        processor.running.store(true, Ordering::Release);
 
         for sequence in 0..=1 {
             let claimed = sequencer.next().unwrap();
@@ -1089,6 +1103,49 @@ mod tests {
             BatchEventProcessor<TestEvent, NoOpEventHandler<TestEvent>, BlockingWaitStrategy>,
         ) -> JoinHandle<Result<()>> = BatchEventProcessor::spawn;
         let _ = spawn_fn;
+    }
+
+    /// Residual: try_run_once used to discard on_batch_start errors.
+    #[test]
+    fn test_try_run_once_on_batch_start_failure_is_fatal() {
+        struct FailBatchStart;
+        impl crate::disruptor::EventHandler<TestEvent> for FailBatchStart {
+            fn on_event(
+                &mut self,
+                _event: &mut TestEvent,
+                _sequence: i64,
+                _end_of_batch: bool,
+            ) -> Result<()> {
+                Ok(())
+            }
+            fn on_batch_start(&mut self, _batch_size: i64, _available: i64) -> Result<()> {
+                Err(DisruptorError::InvalidSequence(-1))
+            }
+        }
+
+        let ring_buffer = create_test_ring_buffer(16);
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
+        // Publish one event so try_run_once has work.
+        cursor.set(0);
+        let barrier = create_test_sequence_barrier(cursor, wait_strategy);
+        let processor = unsafe {
+            BatchEventProcessor::new(
+                ring_buffer,
+                barrier,
+                FailBatchStart,
+                Box::new(DefaultExceptionHandler::new()),
+            )
+        };
+        // Mark running so try_run_once proceeds.
+        processor.running.store(true, Ordering::Release);
+
+        let result = processor.try_run_once();
+        assert!(
+            matches!(result, Err(DisruptorError::Poisoned)),
+            "expected Poisoned, got {result:?}"
+        );
+        assert!(!processor.is_running());
     }
 
     // Soundness regression (P0-3, audit 2026-07-18): lifecycle methods used to

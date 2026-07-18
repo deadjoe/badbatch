@@ -80,10 +80,14 @@ where
 
     /// Consume the handle and return the producer
     ///
-    /// Note: This will shutdown all consumer threads before returning the producer
+    /// Stops consumer threads and removes gating so the ring can wrap freely,
+    /// but **does not** close the claim path — the returned producer must still
+    /// publish. For a full stop that rejects further claims, use [`Self::halt`]
+    /// or [`Self::shutdown`] instead.
     pub fn into_producer(mut self) -> SimpleProducer<E, W> {
-        // Ensure the system is stopped before handing out the producer.
-        self.shutdown();
+        // Stop consumers without sequencer.close() (see stop_consumers_keep_claims).
+        self.core.stop_consumers_keep_claims();
+        self.is_shutdown = true;
 
         // Move the producer out while leaving a placeholder behind so Drop can run normally.
         let placeholder = self.core.create_producer();
@@ -98,6 +102,9 @@ where
     where
         F: FnOnce(&mut E),
     {
+        if self.is_shutdown {
+            return Err(crate::disruptor::DisruptorError::Shutdown);
+        }
         self.producer.publish(update)
     }
 
@@ -109,6 +116,11 @@ where
     where
         F: FnOnce(&mut E),
     {
+        // After halt/shutdown the sequencer is closed; surface as "full" on the
+        // try path (typed as RingBufferFull) — use `publish` for Shutdown.
+        if self.is_shutdown {
+            return Err(crate::disruptor::producer::RingBufferFull);
+        }
         self.producer.try_publish(update)
     }
 
@@ -120,6 +132,9 @@ where
     where
         F: for<'a> FnOnce(crate::disruptor::ring_buffer::BatchIterMut<'a, E>),
     {
+        if self.is_shutdown {
+            return Err(crate::disruptor::DisruptorError::Shutdown);
+        }
         self.producer.batch_publish(n, update)
     }
 
@@ -132,6 +147,9 @@ where
     where
         F: for<'a> FnOnce(crate::disruptor::ring_buffer::BatchIterMut<'a, E>),
     {
+        if self.is_shutdown {
+            return Err(crate::disruptor::producer::MissingFreeSlots(n as u64));
+        }
         self.producer.try_batch_publish(n, update)
     }
 
