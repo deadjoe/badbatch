@@ -9,7 +9,7 @@ use crate::disruptor::{
     DisruptorError, EventHandler, ExceptionHandler, ProcessingSequenceBarrier, Result, RingBuffer,
     Sequence, SequenceBarrier, WaitStrategy,
 };
-use std::cell::UnsafeCell;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -121,26 +121,17 @@ where
     data_provider: Arc<RingBuffer<T>>,
     /// The sequence barrier for coordination (monomorphized wait strategy)
     sequence_barrier: Arc<ProcessingSequenceBarrier<W>>,
-    /// Owned event handler. Mutated only from the single processor thread;
-    /// `UnsafeCell` avoids a Mutex on the hot path.
-    event_handler: UnsafeCell<H>,
+    /// Owned event handler. The mutex is taken once per `run()` (held across the
+    /// whole processing loop) and with `try_lock` by the cold lifecycle methods,
+    /// so there is no per-event locking cost while concurrent misuse degrades to
+    /// a skipped callback instead of aliased `&mut H` (soundness audit 2026-07-18).
+    event_handler: Mutex<H>,
     /// The exception handler for error handling
     exception_handler: Box<dyn ExceptionHandler<T>>,
     /// The current sequence being processed
     sequence: Arc<Sequence>,
     /// Flag indicating if the processor is running
     running: AtomicBool,
-}
-
-// SAFETY: BatchEventProcessor methods that mutate the handler are only invoked
-// from the dedicated processor thread (or before/after run under external sync).
-// `H: Send` is required so the processor can be moved to that thread.
-unsafe impl<T, H, W> Sync for BatchEventProcessor<T, H, W>
-where
-    T: Send + Sync,
-    H: EventHandler<T>,
-    W: WaitStrategy + 'static,
-{
 }
 
 impl<T, H, W> BatchEventProcessor<T, H, W>
@@ -168,35 +159,29 @@ where
         Self {
             data_provider,
             sequence_barrier,
-            event_handler: UnsafeCell::new(event_handler),
+            event_handler: Mutex::new(event_handler),
             exception_handler,
             sequence: Arc::new(Sequence::new_with_initial_value()),
             running: AtomicBool::new(false),
         }
     }
 
-    /// SAFETY: caller must ensure exclusive access to the handler (processor thread).
-    #[inline]
-    #[allow(clippy::mut_from_ref)]
-    unsafe fn handler_mut(&self) -> &mut H {
-        &mut *self.event_handler.get()
-    }
-
     /// Process events using the unified sequential consumer engine.
     fn process_events(&self) {
         self.on_start();
 
-        // SAFETY: single processor thread owns handler mutations for the lifetime of run().
-        let handler = unsafe { self.handler_mut() };
+        // One lock acquisition for the whole loop: no per-event cost.
+        let mut handler = self.event_handler.lock();
         consumer_engine::run_sequential_batch_loop_with_exceptions(
             &self.data_provider,
             &self.sequence_barrier,
-            handler,
+            &mut *handler,
             &self.sequence,
             StopFlag::Running(&self.running),
             "batch-event-processor",
             Some(self.exception_handler.as_ref()),
         );
+        drop(handler);
 
         self.on_shutdown();
     }
@@ -245,6 +230,13 @@ where
             return Ok(false);
         }
 
+        // Exclusive handler access for the whole probe+process step. If the lock
+        // is contended the main run() loop is processing; report no work done.
+        let Some(mut handler_guard) = self.event_handler.try_lock() else {
+            return Ok(false);
+        };
+        let handler = &mut *handler_guard;
+
         let next_sequence = self.sequence.get() + 1;
 
         // Probe once without blocking. This is intended for tests and polling-style
@@ -277,9 +269,6 @@ where
         let mut current_sequence = next_sequence;
         let batch_span = available_sequence - next_sequence + 1;
 
-        // SAFETY: single processor thread owns handler mutations.
-        let handler = unsafe { self.handler_mut() };
-
         // Notify batch start with batch size and queue depth
         let queue_depth = available_sequence - self.sequence.get();
         let _ = handler.on_batch_start(batch_span, queue_depth);
@@ -310,30 +299,35 @@ where
     }
 
     fn notify_timeout(&self, sequence: i64) {
-        // SAFETY: single processor thread owns handler mutations.
-        let handler = unsafe { self.handler_mut() };
-        let _ = handler.on_timeout(sequence);
+        // Contended lock means the run() loop owns the handler; it observes
+        // timeouts itself, so skipping the callback here loses nothing.
+        if let Some(mut handler) = self.event_handler.try_lock() {
+            let _ = handler.on_timeout(sequence);
+        }
     }
 
     fn on_start(&self) {
+        // Contended lock means the processor is already being driven by another
+        // thread; starting it twice concurrently is a misuse we degrade gracefully.
+        let Some(mut handler) = self.event_handler.try_lock() else {
+            return;
+        };
         // Clear any previous alerts triggered during shutdown/halt cycles
         self.sequence_barrier.clear_alert();
         self.running.store(true, Ordering::Release);
-        // SAFETY: single processor thread owns handler mutations.
-        let handler = unsafe { self.handler_mut() };
         if let Err(e) = handler.on_start() {
             self.exception_handler.handle_on_start_exception(e);
         }
     }
 
     fn on_shutdown(&self) {
-        {
-            // SAFETY: single processor thread owns handler mutations.
-            let handler = unsafe { self.handler_mut() };
-            if let Err(e) = handler.on_shutdown() {
-                self.exception_handler.handle_on_shutdown_exception(e);
-            }
+        let Some(mut handler) = self.event_handler.try_lock() else {
+            return;
+        };
+        if let Err(e) = handler.on_shutdown() {
+            self.exception_handler.handle_on_shutdown_exception(e);
         }
+        drop(handler);
         self.running.store(false, Ordering::Release);
     }
 }
@@ -1019,5 +1013,60 @@ mod tests {
             BatchEventProcessor<TestEvent, NoOpEventHandler<TestEvent>, BlockingWaitStrategy>,
         ) -> JoinHandle<Result<()>> = BatchEventProcessor::spawn;
         let _ = spawn_fn;
+    }
+
+    // Soundness regression (P0-3, audit 2026-07-18): lifecycle methods used to
+    // hand out aliased `&mut H` from `&self` via UnsafeCell when driven from two
+    // threads. With the handler behind a Mutex this must be race-free (Miri-clean)
+    // and the handler callbacks must never run concurrently.
+    #[test]
+    fn test_concurrent_on_start_is_sound() {
+        #[derive(Debug)]
+        struct CountingHandler {
+            starts: u64,
+        }
+        impl crate::disruptor::EventHandler<TestEvent> for CountingHandler {
+            fn on_event(
+                &mut self,
+                _event: &mut TestEvent,
+                _sequence: i64,
+                _end_of_batch: bool,
+            ) -> Result<()> {
+                Ok(())
+            }
+            fn on_start(&mut self) -> Result<()> {
+                // Non-atomic mutation: aliased &mut H would be a data race here.
+                self.starts += 1;
+                Ok(())
+            }
+        }
+
+        let ring_buffer = create_test_ring_buffer(16);
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
+        let barrier = create_test_sequence_barrier(cursor, wait_strategy);
+        let processor = Arc::new(BatchEventProcessor::new(
+            ring_buffer,
+            barrier,
+            CountingHandler { starts: 0 },
+            Box::new(DefaultExceptionHandler::new()),
+        ));
+
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let processor = Arc::clone(&processor);
+                std::thread::spawn(move || {
+                    processor.on_start();
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("on_start thread must not panic");
+        }
+
+        // Contended callers skip the callback; between 1 and 4 callbacks ran,
+        // each under exclusive access.
+        let starts = processor.event_handler.lock().starts;
+        assert!((1..=4).contains(&starts), "starts = {starts}");
     }
 }
