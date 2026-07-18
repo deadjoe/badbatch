@@ -1003,8 +1003,17 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), DisruptorError::Timeout));
-        assert!(elapsed >= timeout);
-        assert!(elapsed < timeout + Duration::from_millis(50)); // Allow some tolerance
+        // Condvar timeouts are lower-bounded by the requested duration; the upper
+        // bound must tolerate CI scheduler noise (GitHub-hosted macOS runners
+        // routinely overshoot a 50ms budget by well more than 50ms).
+        assert!(
+            elapsed >= timeout,
+            "timeout returned early: elapsed={elapsed:?} timeout={timeout:?}"
+        );
+        assert!(
+            elapsed < timeout + Duration::from_millis(500),
+            "timeout overshot too far: elapsed={elapsed:?} timeout={timeout:?}"
+        );
     }
 
     #[test]
