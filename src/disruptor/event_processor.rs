@@ -233,8 +233,17 @@ where
         // Clear any existing alerts
         self.sequence_barrier.clear_alert();
 
-        // Run the main processing loop
-        self.process_events();
+        // Run the main processing loop. A panicking handler kills this
+        // processor; poison the producers so blocking publishes fail fast
+        // instead of spinning on a dead gating sequence (2026-07-18 audit).
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.process_events();
+        }));
+        if let Err(payload) = result {
+            self.sequence_barrier.poison_producers();
+            self.running.store(false, Ordering::Release);
+            std::panic::resume_unwind(payload);
+        }
         Ok(())
     }
 

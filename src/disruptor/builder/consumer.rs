@@ -171,37 +171,51 @@ where
         config,
         "disruptor-consumer",
         move |seq, thread_name, run_mode, shutdown| {
-            if let Err(e) = event_handler.on_start() {
-                crate::internal_error!("EventHandler on_start failed in '{thread_name}': {e:?}");
-            }
-
-            let stop = StopFlag::External(&shutdown);
-            match &run_mode {
-                RunMode::WorkPool(work_seq) => {
-                    consumer_engine::run_work_processor_loop(
-                        &ring_buffer,
-                        &sequence_barrier,
-                        &mut event_handler,
-                        &seq,
-                        work_seq,
-                        stop,
-                        &thread_name,
+            // A panicking handler kills this consumer thread; poison the
+            // producers so blocking publishes fail fast instead of spinning
+            // forever on a gating sequence that never advances (2026-07-18 audit).
+            let barrier_for_poison = Arc::clone(&sequence_barrier);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Err(e) = event_handler.on_start() {
+                    crate::internal_error!(
+                        "EventHandler on_start failed in '{thread_name}': {e:?}"
                     );
                 }
-                RunMode::Sequential => {
-                    consumer_engine::run_sequential_batch_loop(
-                        &ring_buffer,
-                        &sequence_barrier,
-                        &mut event_handler,
-                        &seq,
-                        stop,
-                        &thread_name,
+
+                let stop = StopFlag::External(&shutdown);
+                match &run_mode {
+                    RunMode::WorkPool(work_seq) => {
+                        consumer_engine::run_work_processor_loop(
+                            &ring_buffer,
+                            &sequence_barrier,
+                            &mut event_handler,
+                            &seq,
+                            work_seq,
+                            stop,
+                            &thread_name,
+                        );
+                    }
+                    RunMode::Sequential => {
+                        consumer_engine::run_sequential_batch_loop(
+                            &ring_buffer,
+                            &sequence_barrier,
+                            &mut event_handler,
+                            &seq,
+                            stop,
+                            &thread_name,
+                        );
+                    }
+                }
+
+                if let Err(e) = event_handler.on_shutdown() {
+                    crate::internal_error!(
+                        "EventHandler on_shutdown failed in '{thread_name}': {e:?}"
                     );
                 }
-            }
-
-            if let Err(e) = event_handler.on_shutdown() {
-                crate::internal_error!("EventHandler on_shutdown failed in '{thread_name}': {e:?}");
+            }));
+            if let Err(payload) = result {
+                barrier_for_poison.poison_producers();
+                std::panic::resume_unwind(payload);
             }
         },
     )
@@ -228,15 +242,24 @@ where
         config,
         "disruptor-fanout",
         move |seq, thread_name, _run_mode, shutdown| {
-            let stop = StopFlag::External(&shutdown);
-            consumer_engine::run_sequential_readonly_loop(
-                &ring_buffer,
-                &sequence_barrier,
-                &mut on_event,
-                &seq,
-                stop,
-                &thread_name,
-            );
+            // Same panic policy as mutable consumers: poison the producers so
+            // they fail fast instead of spinning on a dead gating sequence.
+            let barrier_for_poison = Arc::clone(&sequence_barrier);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let stop = StopFlag::External(&shutdown);
+                consumer_engine::run_sequential_readonly_loop(
+                    &ring_buffer,
+                    &sequence_barrier,
+                    &mut on_event,
+                    &seq,
+                    stop,
+                    &thread_name,
+                );
+            }));
+            if let Err(payload) = result {
+                barrier_for_poison.poison_producers();
+                std::panic::resume_unwind(payload);
+            }
         },
     )
 }

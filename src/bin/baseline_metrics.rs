@@ -91,7 +91,7 @@ fn spsc(events: u64, buffer: usize, pad: bool) -> Row {
 
     let start = Instant::now();
     for i in 0..events {
-        d.publish(|e| e.value = i as i64);
+        let _ = d.publish(|e| e.value = i as i64);
     }
     let ok = wait_count(&counter, events, Duration::from_secs(30));
     let elapsed = start.elapsed();
@@ -120,7 +120,7 @@ fn spsc_batch(events: u64, buffer: usize, batch: usize) -> Row {
     let mut sent = 0_u64;
     while sent < events {
         let n = ((events - sent) as usize).min(batch);
-        d.batch_publish(n, |iter| {
+        let _ = d.batch_publish(n, |iter| {
             for (i, e) in iter.enumerate() {
                 e.value = (sent + i as u64) as i64;
             }
@@ -158,7 +158,7 @@ fn mpsc(events: u64, buffer: usize, producers: usize) -> Row {
         handles.push(thread::spawn(move || {
             let base = p as u64 * per;
             for i in 0..per {
-                prod.publish(|e| e.value = (base + i) as i64);
+                let _ = prod.publish(|e| e.value = (base + i) as i64);
             }
         }));
     }
@@ -198,7 +198,7 @@ fn worker_pool(events: u64, buffer: usize, workers: usize) -> Row {
 
     let start = Instant::now();
     for i in 0..events {
-        d.publish(|e| e.value = i as i64);
+        let _ = d.publish(|e| e.value = i as i64);
     }
     let ok = wait_count(&counter, events, Duration::from_secs(60));
     let elapsed = start.elapsed();
@@ -229,7 +229,7 @@ fn pipeline2(events: u64, buffer: usize) -> Row {
 
     let start = Instant::now();
     for i in 0..events {
-        d.publish(|e| e.value = i as i64);
+        let _ = d.publish(|e| e.value = i as i64);
     }
     let ok = wait_count(&counter, events, Duration::from_secs(60));
     let elapsed = start.elapsed();
@@ -264,7 +264,7 @@ fn pipeline3(events: u64, buffer: usize) -> Row {
 
     let start = Instant::now();
     for i in 0..events {
-        d.publish(|e| e.value = i as i64);
+        let _ = d.publish(|e| e.value = i as i64);
     }
     let ok = wait_count(&counter, events, Duration::from_secs(60));
     let elapsed = start.elapsed();

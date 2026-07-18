@@ -91,11 +91,14 @@ where
     }
 
     /// Publish an event using a closure (delegated to producer)
-    pub fn publish<F>(&mut self, update: F)
+    ///
+    /// # Errors
+    /// Propagates the claim error (2026-07-18 audit: no silent drops).
+    pub fn publish<F>(&mut self, update: F) -> crate::disruptor::Result<i64>
     where
         F: FnOnce(&mut E),
     {
-        self.producer.publish(update);
+        self.producer.publish(update)
     }
 
     /// Try to publish an event (delegated to producer)
@@ -110,11 +113,14 @@ where
     }
 
     /// Publish a batch of events (delegated to producer)
-    pub fn batch_publish<F>(&mut self, n: usize, update: F)
+    ///
+    /// # Errors
+    /// Propagates the claim error (2026-07-18 audit: no silent drops).
+    pub fn batch_publish<F>(&mut self, n: usize, update: F) -> crate::disruptor::Result<i64>
     where
         F: for<'a> FnOnce(crate::disruptor::ring_buffer::BatchIterMut<'a, E>),
     {
-        self.producer.batch_publish(n, update);
+        self.producer.batch_publish(n, update)
     }
 
     /// Try to publish a batch of events (delegated to producer)

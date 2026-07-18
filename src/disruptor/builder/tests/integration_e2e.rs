@@ -87,7 +87,7 @@ fn test_end_to_end_producer_to_consumer_chain() {
     println!("📝 Test 1: Single event processing");
     let start_time = Instant::now();
 
-    disruptor.publish(|event| {
+    let _ = disruptor.publish(|event| {
         event.value = 42;
         event.data = "test_single".to_string();
     });
@@ -112,7 +112,7 @@ fn test_end_to_end_producer_to_consumer_chain() {
     let batch_start = Instant::now();
 
     for i in 0..100 {
-        disruptor.publish(|event| {
+        let _ = disruptor.publish(|event| {
             event.value = i;
             event.data = format!("batch_event_{i}");
         });
@@ -142,7 +142,7 @@ fn test_end_to_end_producer_to_consumer_chain() {
     let hf_start = Instant::now();
 
     for i in 0..1000 {
-        disruptor.publish(|event| {
+        let _ = disruptor.publish(|event| {
             event.value = i + 1000;
             event.data = format!("hf_event_{i}");
         });

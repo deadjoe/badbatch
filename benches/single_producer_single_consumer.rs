@@ -436,7 +436,7 @@ fn benchmark_batch(
                 let start_count = counter.load(Ordering::Relaxed);
                 let target = start_count + burst_size as i64;
 
-                disruptor.batch_publish(burst_size as usize, |iter| {
+                let _ = disruptor.batch_publish(burst_size as usize, |iter| {
                     for (index, event) in iter.enumerate() {
                         let value = (index + 1) as i64;
                         event.value = std::hint::black_box(value);
@@ -531,7 +531,7 @@ fn benchmark_single_event_builder(
                 let target = start_count + burst_size as i64;
 
                 for i in 1..=burst_size {
-                    disruptor.publish(|event: &mut BenchmarkEvent| {
+                    let _ = disruptor.publish(|event: &mut BenchmarkEvent| {
                         event.value = std::hint::black_box(i as i64);
                     });
                 }

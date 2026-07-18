@@ -123,7 +123,7 @@ fn spsc_pipeline_dependency_order_holds() {
         .build();
 
     for n in 0..TOTAL {
-        d.publish(|e| {
+        let _ = d.publish(|e| {
             e.n = u32::try_from(n).unwrap_or(0);
         });
     }

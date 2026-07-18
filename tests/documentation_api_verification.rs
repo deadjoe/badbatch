@@ -123,12 +123,12 @@ mod modern_disruptor_rs_api_tests {
             .build();
 
         // Test closure-based publishing (README "Modern disruptor-rs Inspired API" section)
-        producer.publish(|event| {
+        let _ = producer.publish(|event| {
             event.value = 42;
         });
 
         // Test batch publishing (README "Modern disruptor-rs Inspired API" section)
-        producer.batch_publish(5, |batch| {
+        let _ = producer.batch_publish(5, |batch| {
             for (i, event) in batch.enumerate() {
                 event.value = i as i64;
             }
@@ -198,11 +198,11 @@ mod design_md_verification_tests {
                 .unwrap();
 
         // Test the Producer trait methods
-        producer.publish(|event| {
+        let _ = producer.publish(|event| {
             *event = 42;
         });
 
-        producer.batch_publish(3, |batch| {
+        let _ = producer.batch_publish(3, |batch| {
             for (i, event) in batch.enumerate() {
                 *event = i as i64;
             }

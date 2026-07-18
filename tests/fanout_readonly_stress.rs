@@ -47,7 +47,7 @@ fn fan_out_both_consumers_see_all_sequences() {
         .build();
 
     for i in 0..TOTAL {
-        d.publish(|e| e.v = i);
+        let _ = d.publish(|e| e.v = i);
     }
 
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -102,7 +102,7 @@ fn worker_pool_still_partitions_not_fanout() {
         .build();
 
     for i in 0..TOTAL {
-        d.publish(|e| e.v = i.cast_signed());
+        let _ = d.publish(|e| e.v = i.cast_signed());
     }
 
     let deadline = Instant::now() + Duration::from_secs(15);

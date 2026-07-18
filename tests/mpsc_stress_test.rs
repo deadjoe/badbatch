@@ -35,7 +35,7 @@ fn test_mpsc_stress_4_producers_1m_messages() {
         let h = std::thread::spawn(move || {
             let base = producer_id * MESSAGES_PER_PRODUCER;
             for i in 0..MESSAGES_PER_PRODUCER {
-                producer.publish(|slot| {
+                let _ = producer.publish(|slot| {
                     *slot = base + i + 1; // Use 1-based values so sum > 0
                 });
             }

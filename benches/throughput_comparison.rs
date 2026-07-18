@@ -166,16 +166,45 @@ fn run_builder_throughput<W>(
     W: badbatch::disruptor::WaitStrategy + Clone + 'static,
 {
     let counter = Arc::new(AtomicI64::new(0));
-    let mut disruptor = if single_producer {
-        build_single_producer(buffer_size, ThroughputEvent::default, strategy)
+    // Single- and multi-mode handles are distinct types since the 2026-07-18
+    // soundness round; run the generic body per branch instead of unifying them.
+    if single_producer {
+        let disruptor = build_single_producer(buffer_size, ThroughputEvent::default, strategy)
             .handle_events_with(counting_handler(&counter))
-            .build()
+            .build();
+        run_handle_throughput(
+            group,
+            buffer_size,
+            wait_strategy,
+            producer_type,
+            &counter,
+            disruptor,
+        );
     } else {
-        build_multi_producer(buffer_size, ThroughputEvent::default, strategy)
+        let disruptor = build_multi_producer(buffer_size, ThroughputEvent::default, strategy)
             .handle_events_with(counting_handler(&counter))
-            .build()
-    };
+            .build();
+        run_handle_throughput(
+            group,
+            buffer_size,
+            wait_strategy,
+            producer_type,
+            &counter,
+            disruptor,
+        );
+    }
+}
 
+fn run_handle_throughput<W, M>(
+    group: &mut BenchmarkGroup<WallTime>,
+    buffer_size: usize,
+    wait_strategy: &str,
+    producer_type: ProducerType,
+    counter: &Arc<AtomicI64>,
+    mut disruptor: badbatch::disruptor::builder::DisruptorHandle<ThroughputEvent, W, M>,
+) where
+    W: badbatch::disruptor::WaitStrategy + Clone + 'static,
+{
     let producer_str = match producer_type {
         ProducerType::Single => "SP",
         // Note: this selects the multi-producer *sequencer*; this benchmark still publishes
@@ -202,7 +231,7 @@ fn run_builder_throughput<W>(
                 while published < THROUGHPUT_EVENTS as usize {
                     let chunk_len = (THROUGHPUT_EVENTS as usize - published).min(batch_size);
                     let chunk_start = published;
-                    disruptor.batch_publish(chunk_len, |iter| {
+                    let _ = disruptor.batch_publish(chunk_len, |iter| {
                         for (index, event) in iter.enumerate() {
                             let value = (chunk_start + index) as i64;
                             event.id = std::hint::black_box(value);

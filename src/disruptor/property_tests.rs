@@ -471,7 +471,7 @@ mod builder_dependency_properties {
                 .build();
 
             for value in 0..event_count {
-                disruptor.publish(|event| {
+                let _ = disruptor.publish(|event| {
                     event.value = value;
                 });
             }

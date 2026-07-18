@@ -38,7 +38,7 @@ mod api_discrepancy_tests {
             .build();
 
         // The Producer trait methods work as documented
-        producer.publish(|event| {
+        let _ = producer.publish(|event| {
             event.value = 42;
         });
 
@@ -294,8 +294,8 @@ mod design_md_verification {
             }
         });
 
-        producer.publish(|event| event.value = 99);
-        producer.batch_publish(2, |batch| {
+        let _ = producer.publish(|event| event.value = 99);
+        let _ = producer.batch_publish(2, |batch| {
             for event in batch {
                 event.value = 100;
             }

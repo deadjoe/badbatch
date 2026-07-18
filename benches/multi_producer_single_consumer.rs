@@ -303,7 +303,7 @@ fn benchmark_mpsc_batch_busy_spin(
                 let mut producer = disruptor.create_producer();
 
                 BurstProducer::new(generation, stop_flag, move || {
-                    producer.batch_publish(burst_size as usize, |iter| {
+                    let _ = producer.batch_publish(burst_size as usize, |iter| {
                         for (index, event) in iter.enumerate() {
                             let value = (index + 1) as i64;
                             event.producer_id = producer_id;

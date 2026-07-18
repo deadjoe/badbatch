@@ -76,7 +76,7 @@ fn test_single_producer_builder_cache_line_padding_processes_events() {
         SlotPadding::CacheLine128
     );
 
-    disruptor.publish(|event| {
+    let _ = disruptor.publish(|event| {
         event.value = 7;
     });
 
@@ -282,17 +282,17 @@ fn test_builder_with_different_wait_strategies() {
         .build();
 
     // Publish a single event to each disruptor to ensure they're working
-    disruptor1.publish(|event| {
+    let _ = disruptor1.publish(|event| {
         event.value = 1;
         event.data = "test1".to_string();
     });
 
-    disruptor2.publish(|event| {
+    let _ = disruptor2.publish(|event| {
         event.value = 2;
         event.data = "test2".to_string();
     });
 
-    disruptor3.publish(|event| {
+    let _ = disruptor3.publish(|event| {
         event.value = 3;
         event.data = "test3".to_string();
     });
@@ -468,7 +468,7 @@ fn test_api_comparison_with_disruptor_rs() {
 
     // BadBatch provides DisruptorHandle with lifecycle management
     assert_eq!(bad_batch_disruptor.consumer_count(), 1);
-    bad_batch_disruptor.publish(|event| {
+    let _ = bad_batch_disruptor.publish(|event| {
         event.value = 42;
         event.data = "BadBatch style".to_string();
     });
@@ -534,7 +534,7 @@ fn test_cpu_affinity_support() {
 
     // Publish some events
     for i in 0..5 {
-        disruptor_handle.publish(|event| {
+        let _ = disruptor_handle.publish(|event| {
             event.value = i;
         });
     }
@@ -599,7 +599,7 @@ fn test_multiple_consumers_with_different_cpu_affinity() {
 
     // Publish some events
     for i in 0..10 {
-        disruptor_handle.publish(|event| {
+        let _ = disruptor_handle.publish(|event| {
             event.value = i;
         });
     }

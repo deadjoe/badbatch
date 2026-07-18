@@ -366,8 +366,11 @@ where
         // borrow requirement on the ring buffer (we only hold `&self`).
         let event = unsafe { &mut *self.ring_buffer.get_mut_unchecked(sequence) };
 
-        // Use the translator to populate the event with data
+        // Use the translator to populate the event with data. Poison on panic:
+        // an unpublished claim would expose a never-written slot later.
+        let poison_guard = crate::disruptor::producer::PoisonOnPanic(&self.sequencer);
         translator.translate_to(event, sequence);
+        drop(poison_guard);
 
         // Publish the sequence to make it available to consumers
         self.sequencer.publish(sequence);
@@ -393,8 +396,11 @@ where
             // SAFETY: The sequencer granted exclusive access to this sequence.
             let event = unsafe { &mut *self.ring_buffer.get_mut_unchecked(sequence) };
 
-            // Use the translator to populate the event with data
+            // Use the translator to populate the event with data. Poison on
+            // panic: an unpublished claim would expose a never-written slot.
+            let poison_guard = crate::disruptor::producer::PoisonOnPanic(&self.sequencer);
             translator.translate_to(event, sequence);
+            drop(poison_guard);
 
             // Publish the sequence to make it available to consumers
             self.sequencer.publish(sequence);

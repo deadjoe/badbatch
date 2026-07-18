@@ -805,7 +805,7 @@ where
         let start = Instant::now();
         for value in 0..config.events_total {
             let value = value as i64;
-            disruptor.publish(move |event| event.populate_input(value));
+            let _ = disruptor.publish(move |event| event.populate_input(value));
         }
         wait_for_counter(
             &processed,

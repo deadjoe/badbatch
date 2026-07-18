@@ -66,7 +66,7 @@ fn single_mode_handle_publishes() {
         .build();
 
     for _ in 0..10 {
-        handle.publish(|event| event.value = 1);
+        handle.publish(|event| event.value = 1).unwrap();
     }
     // shutdown() does not drain the backlog (known P1 semantics); wait for
     // consumption before shutting down.
@@ -94,7 +94,7 @@ fn multi_mode_one_producer_per_thread() {
             let mut producer = handle.create_producer();
             thread::spawn(move || {
                 for _ in 0..100 {
-                    producer.publish(|event| event.value = 1);
+                    producer.publish(|event| event.value = 1).unwrap();
                 }
             })
         })

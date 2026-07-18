@@ -54,7 +54,7 @@ fn test_parallel_stage_then_waits_for_all_upstream_handlers() {
 
     // Publish several events so both workers can claim some work
     for i in 0..4 {
-        disruptor_handle.publish(|event| {
+        let _ = disruptor_handle.publish(|event| {
             event.value = i;
             event.data.clear();
         });
@@ -130,7 +130,7 @@ fn test_parallel_consumers_in_dependent_stage_share_upstream_barrier() {
         .build();
 
     for i in 0..4 {
-        disruptor_handle.publish(|event| {
+        let _ = disruptor_handle.publish(|event| {
             event.value = i;
             event.data.clear();
         });
@@ -170,7 +170,7 @@ fn test_multi_producer_and_then_pipeline() {
     assert_eq!(handle.consumer_count(), 2);
 
     for i in 0..8 {
-        handle.publish(|event| {
+        let _ = handle.publish(|event| {
             event.value = i;
         });
     }
