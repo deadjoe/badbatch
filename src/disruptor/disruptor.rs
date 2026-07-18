@@ -670,6 +670,33 @@ mod tests {
         disruptor.shutdown().unwrap();
     }
 
+    /// Regression: start() returns as soon as `running` is set; an immediate
+    /// shutdown() used to race with on_start (which re-asserted running and
+    /// cleared the barrier alert), leaving the consumer parked forever. This
+    /// is the hang that stranded `cargo test --doc` for hours.
+    #[test]
+    fn test_disruptor_immediate_start_shutdown_no_hang() {
+        use std::time::{Duration, Instant};
+
+        for _ in 0..50 {
+            let factory = DefaultEventFactory::<TestEvent>::new();
+            let mut disruptor = Disruptor::with_defaults(factory, 32)
+                .unwrap()
+                .handle_events_with(NoOpEventHandler::<TestEvent>::new())
+                .build();
+
+            disruptor.start().unwrap();
+            // No sleep: maximize the on_start ↔ halt race window.
+            let start = Instant::now();
+            disruptor.shutdown().unwrap();
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "immediate start/shutdown hung for {:?}",
+                start.elapsed()
+            );
+        }
+    }
+
     #[test]
     fn test_disruptor_shutdown_without_start() {
         let factory = DefaultEventFactory::<TestEvent>::new();
