@@ -60,6 +60,10 @@ where
     started: bool,
     /// Shutdown flag for coordinating thread shutdown
     shutdown_flag: Arc<AtomicBool>,
+    /// Serializes claim-path access for `ProducerType::Single` when the DSL is
+    /// shared across threads (`Disruptor` is `Sync`, publish takes `&self`).
+    /// Multi mode never takes this lock (soundness audit 2026-07-18).
+    single_publish_lock: parking_lot::Mutex<()>,
 }
 
 impl<T, W> Disruptor<T, W>
@@ -99,8 +103,10 @@ where
         // Create the appropriate sequencer based on producer type
         let wait_strategy = Arc::new(wait_strategy);
         let sequencer: SequencerEnum<W> = match producer_type {
-            // SAFETY: the DSL publishes through &mut self / publish_event on one
-            // Disruptor value; the single-producer claim path has one driver.
+            // SAFETY: every DSL path that drives the claim methods
+            // (publish_event, try_publish_event, get_remaining_capacity) takes
+            // `single_publish_lock` first, so claim access is serialized with
+            // proper happens-before even when the Disruptor is shared.
             ProducerType::Single => SequencerEnum::Single(Arc::new(unsafe {
                 SingleProducerSequencer::new(buffer_size, wait_strategy)
             })),
@@ -118,6 +124,7 @@ where
             thread_handles: Vec::new(),
             started: false,
             shutdown_flag: Arc::new(AtomicBool::new(false)),
+            single_publish_lock: parking_lot::Mutex::new(()),
         })
     }
 }
@@ -175,7 +182,16 @@ where
     /// # Returns
     /// The remaining capacity in the ring buffer
     pub fn get_remaining_capacity(&self) -> i64 {
+        let _guard = self.claim_guard();
         self.sequencer.remaining_capacity()
+    }
+
+    /// Lock serializing single-producer claim access; no-op (None) for multi.
+    fn claim_guard(&self) -> Option<parking_lot::MutexGuard<'_, ()>> {
+        match &self.sequencer {
+            SequencerEnum::Single(_) => Some(self.single_publish_lock.lock()),
+            SequencerEnum::Multi(_) => None,
+        }
     }
 
     /// Handle events with the specified event handler
@@ -196,12 +212,18 @@ where
         let barrier = self.sequencer.new_barrier(vec![]);
 
         // Create the event processor (owned handler; dyn only at EventProcessor trait)
-        let processor = BatchEventProcessor::new(
-            self.ring_buffer.clone(),
-            barrier,
-            event_handler,
-            Box::new(crate::disruptor::DefaultExceptionHandler::new()),
-        );
+        // SAFETY: this DSL builds a sequential chain — the first stage gates on
+        // the cursor and every later stage (via then()) gates on the previous
+        // stage's sequence, so each processor has an exclusive barrier-ordered
+        // window over the slots it mutates.
+        let processor = unsafe {
+            BatchEventProcessor::new(
+                self.ring_buffer.clone(),
+                barrier,
+                event_handler,
+                Box::new(crate::disruptor::DefaultExceptionHandler::new()),
+            )
+        };
 
         let processor_sequence = processor.get_sequence();
         let processor = Arc::new(processor);
@@ -334,6 +356,9 @@ where
     where
         Tr: crate::disruptor::EventTranslator<T>,
     {
+        // Serializes single-producer claim state when the DSL is shared
+        // across threads; no-op for multi (soundness audit 2026-07-18).
+        let _guard = self.claim_guard();
         let sequence = self.sequencer.next()?;
 
         // SAFETY: The sequencer granted exclusive access to this sequence until
@@ -361,6 +386,9 @@ where
     where
         Tr: crate::disruptor::EventTranslator<T>,
     {
+        // Serializes single-producer claim state when the DSL is shared
+        // across threads; no-op for multi (soundness audit 2026-07-18).
+        let _guard = self.claim_guard();
         if let Some(sequence) = self.sequencer.try_next() {
             // SAFETY: The sequencer granted exclusive access to this sequence.
             let event = unsafe { &mut *self.ring_buffer.get_mut_unchecked(sequence) };
@@ -415,12 +443,14 @@ where
             .new_barrier(self.last_processor_sequences.clone());
 
         // Create the event processor
-        let processor = BatchEventProcessor::new(
-            self.disruptor.ring_buffer.clone(),
-            barrier,
-            event_handler,
-            Box::new(crate::disruptor::DefaultExceptionHandler::new()),
-        );
+        let processor = unsafe {
+            BatchEventProcessor::new(
+                self.disruptor.ring_buffer.clone(),
+                barrier,
+                event_handler,
+                Box::new(crate::disruptor::DefaultExceptionHandler::new()),
+            )
+        };
 
         let processor_sequence = processor.get_sequence();
         let processor = Arc::new(processor);

@@ -156,7 +156,15 @@ where
     ///
     /// # Returns
     /// A new BatchEventProcessor instance
-    pub fn new(
+    ///
+    /// # Safety
+    /// The processor takes `&mut` access to every slot the barrier reports
+    /// available. The caller must guarantee the topology invariant: the barrier
+    /// only releases sequences that are published and that no other processor
+    /// or consumer accesses mutably while this processor is between the
+    /// barrier wait and its sequence update. The DSL (`Disruptor`) discharges
+    /// this by giving each pipeline stage an exclusive barrier-ordered window.
+    pub unsafe fn new(
         data_provider: Arc<RingBuffer<T>>,
         sequence_barrier: Arc<ProcessingSequenceBarrier<W>>,
         event_handler: H,
@@ -481,12 +489,14 @@ mod tests {
         let event_handler = NoOpEventHandler::<TestEvent>::new();
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
-        let processor = BatchEventProcessor::new(
-            data_provider,
-            sequence_barrier,
-            event_handler,
-            exception_handler,
-        );
+        let processor = unsafe {
+            BatchEventProcessor::new(
+                data_provider,
+                sequence_barrier,
+                event_handler,
+                exception_handler,
+            )
+        };
 
         assert_eq!(processor.get_sequence().get(), INITIAL_CURSOR_VALUE);
         assert!(!processor.is_running());
@@ -501,12 +511,14 @@ mod tests {
         let event_handler = NoOpEventHandler::<TestEvent>::new();
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
-        let processor = BatchEventProcessor::new(
-            data_provider,
-            sequence_barrier,
-            event_handler,
-            exception_handler,
-        );
+        let processor = unsafe {
+            BatchEventProcessor::new(
+                data_provider,
+                sequence_barrier,
+                event_handler,
+                exception_handler,
+            )
+        };
 
         assert!(!processor.is_running());
         processor.halt();
@@ -522,12 +534,14 @@ mod tests {
         let event_handler = NoOpEventHandler::<TestEvent>::new();
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
-        let processor = BatchEventProcessor::new(
-            data_provider,
-            sequence_barrier,
-            event_handler,
-            exception_handler,
-        );
+        let processor = unsafe {
+            BatchEventProcessor::new(
+                data_provider,
+                sequence_barrier,
+                event_handler,
+                exception_handler,
+            )
+        };
 
         // Should return false when not running
         let result = processor.try_run_once();
@@ -546,12 +560,14 @@ mod tests {
         let event_handler = NoOpEventHandler::<TestEvent>::new();
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
-        let processor = BatchEventProcessor::new(
-            data_provider,
-            sequence_barrier,
-            event_handler,
-            exception_handler,
-        );
+        let processor = unsafe {
+            BatchEventProcessor::new(
+                data_provider,
+                sequence_barrier,
+                event_handler,
+                exception_handler,
+            )
+        };
 
         processor.running.store(true, Ordering::Release);
 
@@ -575,12 +591,14 @@ mod tests {
         let event_handler = NoOpEventHandler::<TestEvent>::new();
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
-        let processor = BatchEventProcessor::new(
-            data_provider,
-            sequence_barrier,
-            event_handler,
-            exception_handler,
-        );
+        let processor = unsafe {
+            BatchEventProcessor::new(
+                data_provider,
+                sequence_barrier,
+                event_handler,
+                exception_handler,
+            )
+        };
 
         // Initial sequence should be INITIAL_CURSOR_VALUE
         assert_eq!(processor.get_sequence().get(), INITIAL_CURSOR_VALUE);
@@ -625,12 +643,14 @@ mod tests {
         let event_handler = NoOpEventHandler::<TestEvent>::new();
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
-        let processor = BatchEventProcessor::new(
-            data_provider,
-            sequence_barrier,
-            event_handler,
-            exception_handler,
-        );
+        let processor = unsafe {
+            BatchEventProcessor::new(
+                data_provider,
+                sequence_barrier,
+                event_handler,
+                exception_handler,
+            )
+        };
 
         let debug_str = format!("{processor:?}");
         assert!(debug_str.contains("BatchEventProcessor"));
@@ -800,12 +820,14 @@ mod tests {
 
         let handler_state = Arc::new(HandlerState::default());
         let exception_state = Arc::new(ExceptionState::default());
-        let processor = BatchEventProcessor::new(
-            ring_buffer.clone(),
-            barrier,
-            TrackingEventHandler::new(handler_state.clone()),
-            Box::new(RecordingExceptionHandler::new(exception_state.clone())),
-        );
+        let processor = unsafe {
+            BatchEventProcessor::new(
+                ring_buffer.clone(),
+                barrier,
+                TrackingEventHandler::new(handler_state.clone()),
+                Box::new(RecordingExceptionHandler::new(exception_state.clone())),
+            )
+        };
 
         processor.on_start();
 
@@ -854,12 +876,14 @@ mod tests {
 
         let handler_state = Arc::new(HandlerState::default());
         let exception_state = Arc::new(ExceptionState::default());
-        let processor = BatchEventProcessor::new(
-            ring_buffer.clone(),
-            barrier,
-            TrackingEventHandler::failing_on_sequence(handler_state.clone(), 0),
-            Box::new(RecordingExceptionHandler::new(exception_state.clone())),
-        );
+        let processor = unsafe {
+            BatchEventProcessor::new(
+                ring_buffer.clone(),
+                barrier,
+                TrackingEventHandler::failing_on_sequence(handler_state.clone(), 0),
+                Box::new(RecordingExceptionHandler::new(exception_state.clone())),
+            )
+        };
 
         processor.on_start();
 
@@ -901,12 +925,14 @@ mod tests {
         ));
 
         let handler_state = Arc::new(HandlerState::default());
-        let processor = Arc::new(BatchEventProcessor::new(
-            ring_buffer.clone(),
-            barrier,
-            TrackingEventHandler::new(handler_state.clone()),
-            Box::new(DefaultExceptionHandler::<TestEvent>::new()),
-        ));
+        let processor = Arc::new(unsafe {
+            BatchEventProcessor::new(
+                ring_buffer.clone(),
+                barrier,
+                TrackingEventHandler::new(handler_state.clone()),
+                Box::new(DefaultExceptionHandler::<TestEvent>::new()),
+            )
+        });
 
         let processor_thread = {
             let processor = Arc::clone(&processor);
@@ -956,12 +982,14 @@ mod tests {
         let event_handler = NoOpEventHandler::<TestEvent>::new();
         let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
 
-        let processor = BatchEventProcessor::new(
-            data_provider,
-            sequence_barrier,
-            event_handler,
-            exception_handler,
-        );
+        let processor = unsafe {
+            BatchEventProcessor::new(
+                data_provider,
+                sequence_barrier,
+                event_handler,
+                exception_handler,
+            )
+        };
 
         processor.running.store(true, Ordering::Release);
         assert!(matches!(
@@ -977,12 +1005,14 @@ mod tests {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
         let handler_state = Arc::new(HandlerState::default());
-        let processor = BatchEventProcessor::new(
-            data_provider,
-            sequence_barrier,
-            TrackingEventHandler::new(handler_state.clone()),
-            Box::new(DefaultExceptionHandler::<TestEvent>::new()),
-        );
+        let processor = unsafe {
+            BatchEventProcessor::new(
+                data_provider,
+                sequence_barrier,
+                TrackingEventHandler::new(handler_state.clone()),
+                Box::new(DefaultExceptionHandler::<TestEvent>::new()),
+            )
+        };
 
         processor.notify_timeout(42);
         assert_eq!(
@@ -999,12 +1029,14 @@ mod tests {
         let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
         let handler_state = Arc::new(HandlerState::default());
         let exception_state = Arc::new(ExceptionState::default());
-        let processor = BatchEventProcessor::new(
-            data_provider,
-            sequence_barrier,
-            TrackingEventHandler::failing_lifecycle(handler_state.clone(), true, true),
-            Box::new(RecordingExceptionHandler::new(exception_state.clone())),
-        );
+        let processor = unsafe {
+            BatchEventProcessor::new(
+                data_provider,
+                sequence_barrier,
+                TrackingEventHandler::failing_lifecycle(handler_state.clone(), true, true),
+                Box::new(RecordingExceptionHandler::new(exception_state.clone())),
+            )
+        };
 
         processor.on_start();
         processor.on_shutdown();
@@ -1054,12 +1086,14 @@ mod tests {
         let wait_strategy = Arc::new(BlockingWaitStrategy::new());
         let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
         let barrier = create_test_sequence_barrier(cursor, wait_strategy);
-        let processor = Arc::new(BatchEventProcessor::new(
-            ring_buffer,
-            barrier,
-            CountingHandler { starts: 0 },
-            Box::new(DefaultExceptionHandler::new()),
-        ));
+        let processor = Arc::new(unsafe {
+            BatchEventProcessor::new(
+                ring_buffer,
+                barrier,
+                CountingHandler { starts: 0 },
+                Box::new(DefaultExceptionHandler::new()),
+            )
+        });
 
         let threads: Vec<_> = (0..4)
             .map(|_| {
