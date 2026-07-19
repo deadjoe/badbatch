@@ -78,6 +78,12 @@ All 5 TLA+ models re-verified successfully after these changes.
 
 1. **Fan-out** (`fan_out_events_with`): independent consumer sequences, sequential readonly loop, gating = min(sequences). Equivalent to multiple LMAX consumers each reading the full stream without mutation.
 2. **WorkerPool** remains claim-based for mutable same-stage handlers only.
+
+## Round-7 Pipeline wait / gating LMAX alignment (2026-07-19)
+
+1. **Wait strategies** poll dependents-only when the barrier has upstream sequences (LMAX `dependentSequence`); empty deps still poll the cursor. TLA models abstract wait timing — no protocol change to publish/contiguity.
+2. **Producer gating** is the terminal stage only (matches LMAX last handler group). Pipeline stage order remains `stage_n` waits on `stage_{n-1}` sequences via barriers (`BadBatchPipeline.DependencyOrder` still holds).
+3. Drain uses the same terminal gating set; last stage catching the cursor implies earlier stages have already processed those sequences.
 3. Mixing modes on one stage panics at build time (topology error, not a silent protocol bug).
 
 ## Suggested Model Enhancements (Optional)
