@@ -124,5 +124,5 @@ Artifacts: `head_to_head_results/pipeline_fix_20260719_190407/`.
 
 ## Follow-ups remaining
 
-1. Optional: busy-spin full pipeline for lower CV confirmation.
-2. Defer producer `next_n` / `arc_swap` — unicast already competitive under native.
+Completed in [`H2H_POST_ALIGN.md`](./H2H_POST_ALIGN.md): busy-spin pipeline matrix,
+full all-scenario refresh at `3b6d5b1`, claim-lock/affinity decision notes.
