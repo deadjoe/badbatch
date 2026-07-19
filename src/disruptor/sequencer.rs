@@ -13,6 +13,47 @@ use std::convert::TryFrom;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
+// Benchmark-only controls used by the Linux causal matrix. They are deliberately
+// unavailable in normal builds: bypassing the checked claim lock is unsound for
+// concurrent raw Arc claim drivers and must never become a product setting.
+#[cfg(feature = "bench-tools")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BenchClaimMode {
+    Locked,
+    BypassUnsafe,
+}
+
+#[cfg(feature = "bench-tools")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BenchProducerBackoff {
+    None,
+    FixedSpin(u32),
+    Adaptive,
+    PrivateAtomic,
+}
+
+#[cfg(feature = "bench-tools")]
+fn bench_claim_mode_from_env() -> BenchClaimMode {
+    match std::env::var("BB_H2H_CLAIM_MODE").as_deref() {
+        Ok("bypass-unsafe") => BenchClaimMode::BypassUnsafe,
+        Ok("locked") | Err(_) => BenchClaimMode::Locked,
+        Ok(value) => panic!("unsupported BB_H2H_CLAIM_MODE={value:?}"),
+    }
+}
+
+#[cfg(feature = "bench-tools")]
+fn bench_backoff_from_env() -> BenchProducerBackoff {
+    match std::env::var("BB_H2H_PRODUCER_BACKOFF").as_deref() {
+        Ok("spin1") => BenchProducerBackoff::FixedSpin(1),
+        Ok("spin4") => BenchProducerBackoff::FixedSpin(4),
+        Ok("spin16") => BenchProducerBackoff::FixedSpin(16),
+        Ok("adaptive") => BenchProducerBackoff::Adaptive,
+        Ok("private-atomic") => BenchProducerBackoff::PrivateAtomic,
+        Ok("none") | Err(_) => BenchProducerBackoff::None,
+        Ok(value) => panic!("unsupported BB_H2H_PRODUCER_BACKOFF={value:?}"),
+    }
+}
+
 /// Trait for sequencers that coordinate access to the ring buffer
 ///
 /// This trait defines the interface for sequencers, which are responsible
@@ -439,6 +480,13 @@ where
     /// [`crate::disruptor::DisruptorError::ConcurrentClaimDriver`] / `None` instead
     /// of a data race on the `UnsafeCell`s.
     claim_lock: AtomicBool,
+    #[cfg(feature = "bench-tools")]
+    bench_claim_mode: BenchClaimMode,
+    #[cfg(feature = "bench-tools")]
+    bench_backoff: BenchProducerBackoff,
+    /// Separate cache line for the private-atomic pacing control arm.
+    #[cfg(feature = "bench-tools")]
+    bench_private_atomic: CachePadded<AtomicBool>,
     /// Set when a consumer thread or a producer update closure panicked.
     /// Claim methods fail fast instead of spinning on a dead gating sequence.
     poisoned: AtomicBool,
@@ -498,6 +546,12 @@ where
             next_value: UnsafeCell::new(-1),
             cached_value: UnsafeCell::new(-1),
             claim_lock: AtomicBool::new(false),
+            #[cfg(feature = "bench-tools")]
+            bench_claim_mode: bench_claim_mode_from_env(),
+            #[cfg(feature = "bench-tools")]
+            bench_backoff: bench_backoff_from_env(),
+            #[cfg(feature = "bench-tools")]
+            bench_private_atomic: CachePadded::new(AtomicBool::new(false)),
             poisoned: AtomicBool::new(false),
             closed: AtomicBool::new(false),
         }
@@ -521,6 +575,56 @@ where
             return None;
         }
         Some(SingleClaimGuard(&self.claim_lock))
+    }
+
+    #[cfg(feature = "bench-tools")]
+    #[inline]
+    fn bench_acquire_claim(&self) -> Result<Option<SingleClaimGuard<'_>>> {
+        match self.bench_claim_mode {
+            BenchClaimMode::Locked => self.acquire_claim().map(Some),
+            BenchClaimMode::BypassUnsafe => Ok(None),
+        }
+    }
+
+    #[cfg(feature = "bench-tools")]
+    #[inline]
+    fn bench_try_acquire_claim(&self) -> Option<Option<SingleClaimGuard<'_>>> {
+        match self.bench_claim_mode {
+            BenchClaimMode::Locked => self.try_acquire_claim().map(Some),
+            BenchClaimMode::BypassUnsafe => Some(None),
+        }
+    }
+
+    #[cfg(feature = "bench-tools")]
+    #[inline]
+    fn bench_apply_per_claim_pacing(&self) {
+        match self.bench_backoff {
+            BenchProducerBackoff::FixedSpin(count) => {
+                for _ in 0..count {
+                    std::hint::spin_loop();
+                }
+            }
+            BenchProducerBackoff::PrivateAtomic => {
+                let was_set = self.bench_private_atomic.swap(true, Ordering::Acquire);
+                debug_assert!(!was_set);
+                self.bench_private_atomic.store(false, Ordering::Release);
+            }
+            BenchProducerBackoff::None | BenchProducerBackoff::Adaptive => {}
+        }
+    }
+
+    #[cfg(feature = "bench-tools")]
+    #[inline]
+    fn bench_backpressure_pause(&self, iteration: u32) {
+        if self.bench_backoff == BenchProducerBackoff::Adaptive && iteration >= 64 {
+            if iteration.is_multiple_of(64) {
+                std::thread::yield_now();
+            } else {
+                std::hint::spin_loop();
+            }
+        } else {
+            std::hint::spin_loop();
+        }
     }
 
     #[inline]
@@ -635,7 +739,12 @@ where
 
         // Serializes claim-state access so concurrent Arc drivers fail closed
         // instead of racing on next_value/cached_value (residual 2026-07-19).
+        #[cfg(feature = "bench-tools")]
+        let _claim = self.bench_acquire_claim()?;
+        #[cfg(not(feature = "bench-tools"))]
         let _claim = self.acquire_claim()?;
+        #[cfg(feature = "bench-tools")]
+        self.bench_apply_per_claim_pacing();
 
         // This follows the exact LMAX Disruptor SingleProducerSequencer.next(int n) logic.
         // SAFETY: claim_lock held — exclusive access to next/cached cells.
@@ -652,6 +761,8 @@ where
             // Use spin_loop() instead of yield_now() to avoid syscall overhead
             // (~1-5μs per sched_yield). PAUSE (x86) / YIELD (ARM) stays on-core.
             let mut min_sequence;
+            #[cfg(feature = "bench-tools")]
+            let mut backpressure_iteration = 0_u32;
             while {
                 min_sequence = self.gating_minimum(next_value);
                 wrap_point > min_sequence
@@ -664,6 +775,12 @@ where
                 if self.poisoned.load(Ordering::Relaxed) {
                     return Err(DisruptorError::Poisoned);
                 }
+                #[cfg(feature = "bench-tools")]
+                {
+                    self.bench_backpressure_pause(backpressure_iteration);
+                    backpressure_iteration = backpressure_iteration.saturating_add(1);
+                }
+                #[cfg(not(feature = "bench-tools"))]
                 std::hint::spin_loop();
             }
 
@@ -692,7 +809,12 @@ where
             return None;
         }
 
+        #[cfg(feature = "bench-tools")]
+        let _claim = self.bench_try_acquire_claim()?;
+        #[cfg(not(feature = "bench-tools"))]
         let _claim = self.try_acquire_claim()?;
+        #[cfg(feature = "bench-tools")]
+        self.bench_apply_per_claim_pacing();
 
         // This follows the exact LMAX Disruptor SingleProducerSequencer.tryNext(int n) logic
         let Ok(required) = usize::try_from(n) else {

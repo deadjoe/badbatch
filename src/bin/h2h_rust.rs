@@ -201,6 +201,9 @@ struct Config {
     timeout: Duration,
     cpu_list: Vec<usize>,
     affinity_failed: Arc<AtomicBool>,
+    handler_mode: HandlerMode,
+    claim_mode: String,
+    producer_backoff: String,
 }
 
 fn parse_args() -> Result<Config, String> {
@@ -224,6 +227,9 @@ fn parse_args() -> Result<Config, String> {
     let mut output = None;
     let mut quick = false;
     let mut cpu_list = Vec::new();
+    let mut handler_mode = HandlerMode::Value;
+    let claim_mode = env::var("BB_H2H_CLAIM_MODE").unwrap_or_else(|_| "locked".into());
+    let producer_backoff = env::var("BB_H2H_PRODUCER_BACKOFF").unwrap_or_else(|_| "none".into());
 
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -323,6 +329,10 @@ fn parse_args() -> Result<Config, String> {
             "--cpu-list" => {
                 cpu_list = parse_cpu_list(&args.next().ok_or("missing --cpu-list")?)?;
             }
+            "--handler-mode" => {
+                handler_mode =
+                    HandlerMode::parse(&args.next().ok_or("missing --handler-mode value")?)?;
+            }
             "--quick" => quick = true,
             "--help" | "-h" => {
                 print_help();
@@ -356,6 +366,9 @@ fn parse_args() -> Result<Config, String> {
     }
     if pad != Pad::None && scenario == Scenario::MpscBatch {
         return Err("event-padding not supported for mpsc_batch in this harness".into());
+    }
+    if handler_mode != HandlerMode::Value && scenario != Scenario::Unicast {
+        return Err("experimental handler modes are supported only for unicast".into());
     }
     let required_cpus = match scenario {
         Scenario::Unicast | Scenario::UnicastBatch => 2,
@@ -394,6 +407,9 @@ fn parse_args() -> Result<Config, String> {
         timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         cpu_list,
         affinity_failed: Arc::new(AtomicBool::new(false)),
+        handler_mode,
+        claim_mode,
+        producer_backoff,
     })
 }
 
@@ -488,6 +504,7 @@ Options:
   --harness-dirty <true|false>    (orchestrator provenance)
   --implementation-dirty <bool>  (orchestrator provenance)
   --cpu-list <N,N,...>          (pin measured worker roles to logical CPUs)
+  --handler-mode <value|r|w1|w3|sb> (experimental 1P/1C handler gradient)
   --impl-label <label>           (default badbatch-builder)
   --output <path.json>
   --quick                        (smaller defaults / fewer rounds)
@@ -579,6 +596,38 @@ enum TerminalMode {
     Pipeline,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HandlerMode {
+    Value,
+    Read,
+    WriteOne,
+    WriteThree,
+    SideBuffer,
+}
+
+impl HandlerMode {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "value" => Ok(Self::Value),
+            "r" => Ok(Self::Read),
+            "w1" => Ok(Self::WriteOne),
+            "w3" => Ok(Self::WriteThree),
+            "sb" => Ok(Self::SideBuffer),
+            _ => Err(format!("unsupported handler-mode: {value}")),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Value => "value",
+            Self::Read => "r",
+            Self::WriteOne => "w1",
+            Self::WriteThree => "w3",
+            Self::SideBuffer => "sb",
+        }
+    }
+}
+
 struct TerminalHandler {
     processed: Arc<AtomicU64>,
     checksum: Arc<AtomicU64>,
@@ -587,6 +636,8 @@ struct TerminalHandler {
     final_sequence: i64,
     local_checksum: u64,
     mode: TerminalMode,
+    handler_mode: HandlerMode,
+    side_buffer: Vec<i64>,
     cpu_affinity: Option<usize>,
     affinity_failed: Arc<AtomicBool>,
 }
@@ -598,6 +649,8 @@ impl TerminalHandler {
         ready: Arc<AtomicU64>,
         events_total: u64,
         mode: TerminalMode,
+        handler_mode: HandlerMode,
+        buffer_size: usize,
         cpu_affinity: Option<usize>,
         affinity_failed: Arc<AtomicBool>,
     ) -> Self {
@@ -609,6 +662,12 @@ impl TerminalHandler {
             final_sequence: i64::try_from(events_total).expect("events_total must fit i64") - 1,
             local_checksum: 0,
             mode,
+            handler_mode,
+            side_buffer: if handler_mode == HandlerMode::SideBuffer {
+                vec![0; buffer_size]
+            } else {
+                Vec::new()
+            },
             cpu_affinity,
             affinity_failed,
         }
@@ -631,7 +690,32 @@ impl EventHandler<ComparisonEvent> for TerminalHandler {
         _end_of_batch: bool,
     ) -> DisruptorResult<()> {
         let value = match self.mode {
-            TerminalMode::Value => event.value,
+            TerminalMode::Value if self.handler_mode == HandlerMode::Value => event.value,
+            TerminalMode::Value => {
+                let x1 = event.value.wrapping_add(1);
+                let x2 = x1.wrapping_add(3);
+                let x3 = x2.wrapping_add(7);
+                match self.handler_mode {
+                    HandlerMode::Value => unreachable!(),
+                    HandlerMode::Read => {}
+                    HandlerMode::WriteOne => event.stage3_value = x3,
+                    HandlerMode::WriteThree => {
+                        event.stage1_value = x1;
+                        event.stage2_value = x2;
+                        event.stage3_value = x3;
+                    }
+                    HandlerMode::SideBuffer => {
+                        let index = sequence as usize & (self.side_buffer.len() - 1);
+                        // One guaranteed ordinary x86 store to a consumer-private line.
+                        // Volatile prevents LTO from deleting overwritten stores; this is
+                        // benchmark instrumentation, not synchronization.
+                        unsafe {
+                            std::ptr::write_volatile(self.side_buffer.as_mut_ptr().add(index), x3);
+                        }
+                    }
+                }
+                x3
+            }
             TerminalMode::Pipeline => {
                 event.stage3_value = event.stage2_value.wrapping_add(7);
                 event.stage3_value
@@ -691,7 +775,11 @@ fn run_unicast_w<W>(cfg: &Config, batch: bool, wait: &W) -> Result<Vec<Round>, S
 where
     W: badbatch::disruptor::WaitStrategy + Clone + 'static,
 {
-    let expected = arithmetic_checksum(cfg.events_total);
+    let expected = if cfg.handler_mode == HandlerMode::Value {
+        arithmetic_checksum(cfg.events_total)
+    } else {
+        pipeline_checksum(cfg.events_total)
+    };
     let total_rounds = cfg.warmup_rounds + cfg.measured_rounds;
     let mut rounds = Vec::with_capacity(total_rounds);
 
@@ -705,6 +793,8 @@ where
             Arc::clone(&ready),
             cfg.events_total,
             TerminalMode::Value,
+            cfg.handler_mode,
+            cfg.buffer_size,
             cfg.cpu(1),
             Arc::clone(&cfg.affinity_failed),
         );
@@ -805,6 +895,8 @@ where
             Arc::clone(&ready),
             cfg.events_total,
             TerminalMode::Value,
+            HandlerMode::Value,
+            cfg.buffer_size,
             cfg.cpu(3),
             Arc::clone(&cfg.affinity_failed),
         );
@@ -934,6 +1026,8 @@ where
             Arc::clone(&ready),
             cfg.events_total,
             TerminalMode::Pipeline,
+            HandlerMode::Value,
+            cfg.buffer_size,
             cfg.cpu(3),
             Arc::clone(&cfg.affinity_failed),
         );
@@ -1028,6 +1122,14 @@ fn write_result(cfg: &Config, rounds: &[Round], summary: &Summary) -> String {
     writeln!(out, "  \"scenario\": \"{}\",", cfg.scenario.as_str()).unwrap();
     writeln!(out, "  \"wait_strategy\": \"{}\",", cfg.wait.as_str()).unwrap();
     writeln!(out, "  \"event_padding\": \"{}\",", cfg.pad.as_str()).unwrap();
+    writeln!(
+        out,
+        "  \"handler_mode\": \"{}\",",
+        cfg.handler_mode.as_str()
+    )
+    .unwrap();
+    writeln!(out, "  \"claim_mode\": \"{}\",", cfg.claim_mode).unwrap();
+    writeln!(out, "  \"producer_backoff\": \"{}\",", cfg.producer_backoff).unwrap();
     out.push_str("  \"api_path\": \"builder\",\n");
     writeln!(out, "  \"buffer_size\": {},", cfg.buffer_size).unwrap();
     writeln!(out, "  \"events_total\": {},", cfg.events_total).unwrap();
