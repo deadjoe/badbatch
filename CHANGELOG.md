@@ -13,6 +13,18 @@ compiler, or when CI stabilizes on a new stable series. Patch toolchain updates
 
 ## [0.2.0] — 2026-07
 
+### Pipeline wait/gating LMAX alignment (2026-07-19)
+
+- **Wait availability:** non-blocking strategies (`Yielding`, `BusySpin`,
+  `Sleeping`, default timeout poll) now match LMAX: when a barrier has
+  upstream dependent sequences, wait only on those sequences; the producer
+  cursor is polled only when there are no dependents. Multi-producer
+  contiguity still runs after the wait on the barrier.
+- **Producer gating:** Builder/`create_disruptor_core` registers **terminal
+  stage** consumer sequences only (LMAX last `EventHandlerGroup`), not every
+  intermediate pipeline stage. Drain/shutdown still wait on that terminal set.
+  Intermediate stages remain enforced via barrier dependencies.
+
 ### YieldingWaitStrategy LMAX spin-then-yield (2026-07-19)
 
 - **`YieldingWaitStrategy`** now matches LMAX Java: busy-poll

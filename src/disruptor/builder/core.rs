@@ -227,7 +227,6 @@ where
     let stage_modes = super::consumer::stage_run_modes(&consumers, stage_count);
 
     let mut consumer_threads: Vec<Consumer> = Vec::with_capacity(consumers.len());
-    let mut consumer_sequences: Vec<Arc<Sequence>> = Vec::with_capacity(consumers.len());
     let mut stage_sequences: Vec<Vec<Arc<Sequence>>> =
         (0..stage_count).map(|_| Vec::new()).collect();
 
@@ -240,6 +239,9 @@ where
             access: _,
         } = consumer_info;
 
+        // Stage 0: empty deps → barrier wait strategies poll the cursor (publish).
+        // Later stages: wait only on the previous stage's consumer sequences
+        // (LMAX `newBarrier(upstreamSequences)` — not re-gated on the cursor).
         let dependent_sequences = if stage_index == 0 {
             Vec::new()
         } else {
@@ -278,7 +280,6 @@ where
             },
         );
 
-        consumer_sequences.push(Arc::clone(&consumer_sequence));
         stage_sequences
             .get_mut(stage_index)
             .expect("consumer stage must exist")
@@ -286,8 +287,15 @@ where
         consumer_threads.push(consumer);
     }
 
-    if !consumer_sequences.is_empty() {
-        sequencer.add_gating_sequences(&consumer_sequences);
+    // LMAX DSL gates the producer on the *terminal* stage only
+    // (`addGatingSequences` of the last EventHandlerGroup). Intermediate
+    // pipeline stages are already enforced via barrier dependencies; also
+    // listing them as gating sequences adds extra atomic traffic and false
+    // sharing on the producer backpressure path without changing the min
+    // sequence under a pure dependency chain.
+    let gating_sequences = stage_sequences.last().cloned().unwrap_or_default();
+    if !gating_sequences.is_empty() {
+        sequencer.add_gating_sequences(&gating_sequences);
     }
 
     DisruptorCore::new(
@@ -295,7 +303,7 @@ where
         sequencer,
         consumer_threads,
         shutdown_flag,
-        consumer_sequences,
+        gating_sequences,
     )
 }
 

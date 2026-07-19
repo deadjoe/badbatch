@@ -100,8 +100,29 @@ Artifacts under `head_to_head_results/full_native_20260719_180958/pipeline_follo
 4. **Next optimization target is pipeline stage/barrier implementation**, not buffer
    size and not unicast claim path.
 
+## Pipeline LMAX alignment follow-up (same day, after `wait`/`gating` fix)
+
+Code changes (terminal-stage gating + dependents-only wait): see CHANGELOG
+“Pipeline wait/gating LMAX alignment”. Measured on M1 Max with native.
+
+### Full pipeline H2H (100M, yielding, buffer 8192)
+
+| run | rust | java | rust/java | rust CV | java CV |
+|-----|-----:|-----:|----------:|--------:|--------:|
+| pre-fix (this file primary) | 14.76 | 26.80 | **0.55×** | 0.301 | 0.670 |
+| post-fix r1 | 33.88 | 26.70 | **1.27×** | 0.319 | 0.645 |
+| post-fix r2 | 24.52 | 19.23 | **1.28×** | 0.296 | 0.147 |
+| post-fix r3 | 26.45 | 24.86 | **1.06×** | **0.079** | 0.698 |
+| post-fix both-orders | 28.11 | 25.90 | **1.09×** | 0.345 | 0.644 |
+
+**Interpretation:** aligning wait/gating with LMAX moves pipeline from a stable
+deficit (~0.55×) to **roughly parity / slight lead** on this machine. Absolute
+medians and CVs remain noisy under yielding; do not quote a single ratio.
+Unicast smoke after the change stayed ~141 Melem/s (no regression).
+
+Artifacts: `head_to_head_results/pipeline_fix_20260719_190407/`.
+
 ## Follow-ups remaining
 
-1. Deep dive **pipeline barrier + multi-stage consumer loops** (samply already pointed at wait).
-2. Compare Rust vs Java **stage dependency wiring** in the H2H harness for accidental extra cost.
-3. Defer producer `next_n` / `arc_swap` — unicast already competitive under native.
+1. Optional: busy-spin full pipeline for lower CV confirmation.
+2. Defer producer `next_n` / `arc_swap` — unicast already competitive under native.

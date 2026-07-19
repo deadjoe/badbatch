@@ -13,6 +13,24 @@ use std::time::Duration;
 
 static NEVER_ALERTED: AtomicBool = AtomicBool::new(false);
 
+/// Sequence a wait strategy should poll (LMAX `dependentSequence` contract).
+///
+/// Java wait strategies only observe the barrier's dependent sequence group:
+/// - no upstream consumers → that group is the **cursor** (publish visibility)
+/// - otherwise → **upstream consumer sequences only** (not re-min'd with cursor)
+///
+/// Downstream stages therefore do not reload the producer cursor on every spin.
+/// Multi-producer publication contiguity is resolved *after* the wait by
+/// [`crate::disruptor::sequence_barrier::ProcessingSequenceBarrier`].
+#[inline]
+fn wait_available_sequence(cursor: &Sequence, dependent_sequences: &[Arc<Sequence>]) -> i64 {
+    if dependent_sequences.is_empty() {
+        cursor.get()
+    } else {
+        Sequence::get_minimum_sequence(dependent_sequences)
+    }
+}
+
 /// Strategy for waiting for events to become available
 ///
 /// This trait defines how consumers wait for new events in the ring buffer.
@@ -103,17 +121,9 @@ pub trait WaitStrategy: Send + Sync + std::fmt::Debug {
                 return Err(DisruptorError::Alert);
             }
 
-            let cursor_value = cursor.get();
-            if cursor_value >= sequence {
-                let dep_min = if dependent_sequences.is_empty() {
-                    cursor_value
-                } else {
-                    Sequence::get_minimum_sequence(dependent_sequences)
-                };
-                let available = std::cmp::min(cursor_value, dep_min);
-                if available >= sequence {
-                    return Ok(available);
-                }
+            let available = wait_available_sequence(cursor, dependent_sequences);
+            if available >= sequence {
+                return Ok(available);
             }
 
             if alerted.load(Ordering::Acquire) {
@@ -435,20 +445,6 @@ impl YieldingWaitStrategy {
         Self
     }
 
-    /// Min of cursor and dependent sequences (empty deps → cursor only).
-    #[inline]
-    fn available_sequence(cursor: &Sequence, dependent_sequences: &[Arc<Sequence>]) -> i64 {
-        let cursor_sequence = cursor.get();
-        if dependent_sequences.is_empty() {
-            cursor_sequence
-        } else {
-            std::cmp::min(
-                cursor_sequence,
-                Sequence::get_minimum_sequence(dependent_sequences),
-            )
-        }
-    }
-
     /// LMAX `applyWaitMethod`: decrement spin counter, then yield.
     ///
     /// Terminal-flag checks remain in the caller so every poll still observes
@@ -479,7 +475,7 @@ impl WaitStrategy for YieldingWaitStrategy {
             if alerted.load(Ordering::Acquire) {
                 return Err(DisruptorError::Alert);
             }
-            let available = Self::available_sequence(cursor, dependent_sequences);
+            let available = wait_available_sequence(cursor, dependent_sequences);
             if available >= sequence {
                 return Ok(available);
             }
@@ -503,7 +499,7 @@ impl WaitStrategy for YieldingWaitStrategy {
                 return Err(DisruptorError::Alert);
             }
 
-            let available = Self::available_sequence(cursor, dependent_sequences);
+            let available = wait_available_sequence(cursor, dependent_sequences);
             if available >= sequence {
                 return Ok(available);
             }
@@ -536,7 +532,7 @@ impl WaitStrategy for YieldingWaitStrategy {
             if alerted.load(Ordering::Acquire) {
                 return Err(DisruptorError::Alert);
             }
-            let available = Self::available_sequence(cursor, dependent_sequences);
+            let available = wait_available_sequence(cursor, dependent_sequences);
             if available >= sequence {
                 return Ok(available);
             }
@@ -582,14 +578,7 @@ impl WaitStrategy for BusySpinWaitStrategy {
                 return Err(DisruptorError::Alert);
             }
 
-            let cursor_sequence = cursor.get();
-            let dep_min = if dependent_sequences.is_empty() {
-                cursor_sequence
-            } else {
-                // Sequence::get() uses Acquire ordering, so no extra fence needed
-                Sequence::get_minimum_sequence(dependent_sequences)
-            };
-            let available = std::cmp::min(cursor_sequence, dep_min);
+            let available = wait_available_sequence(cursor, dependent_sequences);
             if available >= sequence {
                 return Ok(available);
             }
@@ -607,36 +596,24 @@ impl WaitStrategy for BusySpinWaitStrategy {
     ) -> Result<i64> {
         let start_time = std::time::Instant::now();
 
-        // Wait for both cursor and dependent sequences to reach the required sequence
         loop {
             if alerted.load(Ordering::Acquire) {
                 return Err(DisruptorError::Alert);
             }
 
-            let cursor_sequence = cursor.get();
-            let minimum_dependent_sequence = if dependent_sequences.is_empty() {
-                cursor_sequence
-            } else {
-                Sequence::get_minimum_sequence(dependent_sequences)
-            };
-
-            // The available sequence is the minimum of cursor and dependent sequences
-            let available_sequence = std::cmp::min(cursor_sequence, minimum_dependent_sequence);
-
-            if available_sequence >= sequence {
-                return Ok(available_sequence);
+            let available = wait_available_sequence(cursor, dependent_sequences);
+            if available >= sequence {
+                return Ok(available);
             }
 
             if alerted.load(Ordering::Acquire) {
                 return Err(DisruptorError::Alert);
             }
 
-            // Check for timeout
             if start_time.elapsed() >= timeout {
                 return Err(DisruptorError::Timeout);
             }
 
-            // Busy spin - no yielding or parking
             std::hint::spin_loop();
         }
     }
@@ -649,53 +626,19 @@ impl WaitStrategy for BusySpinWaitStrategy {
         shutdown_flag: &AtomicBool,
         alerted: &AtomicBool,
     ) -> Result<i64> {
-        // Simplified logic following LMAX Disruptor pattern
-        let mut available_sequence;
-
-        // Create a combined sequence that represents the minimum of cursor and dependent sequences
-        let dependent_sequence = if dependent_sequences.is_empty() {
-            cursor
-        } else {
-            // For dependent sequences, we need to wait for the minimum
-            loop {
-                // Check shutdown flag
-                if shutdown_flag.load(Ordering::Acquire) {
-                    return Err(DisruptorError::Alert);
-                }
-                if alerted.load(Ordering::Acquire) {
-                    return Err(DisruptorError::Alert);
-                }
-
-                let cursor_value = cursor.get();
-                let min_dependent = Sequence::get_minimum_sequence(dependent_sequences);
-
-                // The available sequence is the minimum of cursor and dependent sequences
-                available_sequence = std::cmp::min(cursor_value, min_dependent);
-
-                if available_sequence >= sequence {
-                    return Ok(available_sequence);
-                }
-
-                std::hint::spin_loop();
-            }
-        };
-
-        // Simple case: only wait for cursor
-        while {
-            available_sequence = dependent_sequence.get();
-            available_sequence < sequence
-        } {
-            // Check shutdown flag
+        loop {
             if shutdown_flag.load(Ordering::Acquire) {
                 return Err(DisruptorError::Alert);
             }
             if alerted.load(Ordering::Acquire) {
                 return Err(DisruptorError::Alert);
             }
+            let available = wait_available_sequence(cursor, dependent_sequences);
+            if available >= sequence {
+                return Ok(available);
+            }
             std::hint::spin_loop();
         }
-
-        Ok(available_sequence)
     }
 
     fn signal_all_when_blocking(&self) {
@@ -754,13 +697,7 @@ impl WaitStrategy for SleepingWaitStrategy {
                 return Err(DisruptorError::Alert);
             }
 
-            let cursor_sequence = cursor.get();
-            let dep_min = if dependent_sequences.is_empty() {
-                cursor_sequence
-            } else {
-                Sequence::get_minimum_sequence(dependent_sequences)
-            };
-            let available = std::cmp::min(cursor_sequence, dep_min);
+            let available = wait_available_sequence(cursor, dependent_sequences);
             if available >= sequence {
                 return Ok(available);
             }
@@ -783,13 +720,7 @@ impl WaitStrategy for SleepingWaitStrategy {
             if alerted.load(Ordering::Acquire) {
                 return Err(DisruptorError::Alert);
             }
-            let cursor_sequence = cursor.get();
-            let dep_min = if dependent_sequences.is_empty() {
-                cursor_sequence
-            } else {
-                Sequence::get_minimum_sequence(dependent_sequences)
-            };
-            let available = std::cmp::min(cursor_sequence, dep_min);
+            let available = wait_available_sequence(cursor, dependent_sequences);
             if available >= sequence {
                 return Ok(available);
             }
@@ -817,13 +748,7 @@ impl WaitStrategy for SleepingWaitStrategy {
                 return Err(DisruptorError::Timeout);
             }
 
-            let cursor_sequence = cursor.get();
-            let dep_min = if dependent_sequences.is_empty() {
-                cursor_sequence
-            } else {
-                Sequence::get_minimum_sequence(dependent_sequences)
-            };
-            let available = std::cmp::min(cursor_sequence, dep_min);
+            let available = wait_available_sequence(cursor, dependent_sequences);
             if available >= sequence {
                 return Ok(available);
             }
@@ -1569,6 +1494,20 @@ mod tests {
         // Contract lock: keep the public constant aligned with LMAX Java
         // `YieldingWaitStrategy.SPIN_TRIES` (and simple_wait_strategy default).
         assert_eq!(YieldingWaitStrategy::SPIN_TRIES, 100);
+    }
+
+    #[test]
+    fn test_wait_available_polls_dependents_not_cursor_min() {
+        // LMAX Yielding/BusySpin only poll `dependentSequence`. With upstream
+        // deps present, the cursor is not re-min'd into availability (stage1
+        // already waited for publish before advancing).
+        let cursor = Sequence::new(3);
+        let dep = Arc::new(Sequence::new(10));
+        let available = wait_available_sequence(&cursor, &[dep]);
+        assert_eq!(available, 10);
+
+        let cursor_only = wait_available_sequence(&Sequence::new(7), &[]);
+        assert_eq!(cursor_only, 7);
     }
 
     #[test]
