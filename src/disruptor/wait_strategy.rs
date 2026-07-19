@@ -404,16 +404,65 @@ impl WaitStrategy for BlockingWaitStrategy {
 
 /// Yielding wait strategy
 ///
-/// This strategy yields the CPU to other threads while waiting.
-/// It provides better CPU efficiency than busy-spin but may have
-/// higher latency than blocking strategies.
+/// LMAX-aligned **spin-then-yield** policy (see Java
+/// `com.lmax.disruptor.YieldingWaitStrategy`):
+///
+/// 1. Busy-poll for [`Self::SPIN_TRIES`] unsuccessful observations of the
+///    cursor / dependent sequences (with `spin_loop` hints).
+/// 2. Then call `thread::yield_now()` on every subsequent miss until the
+///    sequence is available.
+///
+/// **Protocol:** unchanged relative to other non-blocking strategies — returns
+/// only when `available >= sequence`, or with `Alert` / `Timeout` as documented
+/// on [`WaitStrategy`]. Claim, publish, barrier contiguity, and memory ordering
+/// on sequence loads are not altered; only the idle action between polls is.
+///
+/// **CPU:** the spin window can briefly use a full core (same trade-off as LMAX).
+/// After the window is exhausted, the thread yields so other work can run.
+/// Prefer [`BusySpinWaitStrategy`] only when cores can be dedicated.
 #[derive(Debug, Default, Clone)]
 pub struct YieldingWaitStrategy;
 
 impl YieldingWaitStrategy {
-    /// Create a new yielding wait strategy
+    /// Unsuccessful polls before the first `yield_now` in each wait call.
+    ///
+    /// Matches LMAX `YieldingWaitStrategy.SPIN_TRIES` (`100`). The counter is
+    /// local to each `wait_for*` invocation and is not shared across calls.
+    pub const SPIN_TRIES: i32 = 100;
+
+    /// Create a new yielding wait strategy.
     pub fn new() -> Self {
         Self
+    }
+
+    /// Min of cursor and dependent sequences (empty deps → cursor only).
+    #[inline]
+    fn available_sequence(cursor: &Sequence, dependent_sequences: &[Arc<Sequence>]) -> i64 {
+        let cursor_sequence = cursor.get();
+        if dependent_sequences.is_empty() {
+            cursor_sequence
+        } else {
+            std::cmp::min(
+                cursor_sequence,
+                Sequence::get_minimum_sequence(dependent_sequences),
+            )
+        }
+    }
+
+    /// LMAX `applyWaitMethod`: decrement spin counter, then yield.
+    ///
+    /// Terminal-flag checks remain in the caller so every poll still observes
+    /// alert/shutdown; only the idle action changes.
+    #[inline]
+    fn apply_wait_method(counter: &mut i32) {
+        if *counter == 0 {
+            thread::yield_now();
+        } else {
+            *counter -= 1;
+            // LMAX's spin phase is an empty decrement; `spin_loop` is the
+            // portable hint for that tight re-poll (PAUSE / YIELD).
+            std::hint::spin_loop();
+        }
     }
 }
 
@@ -425,22 +474,16 @@ impl WaitStrategy for YieldingWaitStrategy {
         dependent_sequences: &[Arc<Sequence>],
         alerted: &AtomicBool,
     ) -> Result<i64> {
+        let mut counter = Self::SPIN_TRIES;
         loop {
             if alerted.load(Ordering::Acquire) {
                 return Err(DisruptorError::Alert);
             }
-
-            let cursor_sequence = cursor.get();
-            let dep_min = if dependent_sequences.is_empty() {
-                cursor_sequence
-            } else {
-                Sequence::get_minimum_sequence(dependent_sequences)
-            };
-            let available = std::cmp::min(cursor_sequence, dep_min);
+            let available = Self::available_sequence(cursor, dependent_sequences);
             if available >= sequence {
                 return Ok(available);
             }
-            thread::yield_now();
+            Self::apply_wait_method(&mut counter);
         }
     }
 
@@ -453,37 +496,27 @@ impl WaitStrategy for YieldingWaitStrategy {
         alerted: &AtomicBool,
     ) -> Result<i64> {
         let start_time = std::time::Instant::now();
+        let mut counter = Self::SPIN_TRIES;
 
-        // Wait for both cursor and dependent sequences to reach the required sequence
         loop {
             if alerted.load(Ordering::Acquire) {
                 return Err(DisruptorError::Alert);
             }
 
-            let cursor_sequence = cursor.get();
-            let minimum_dependent_sequence = if dependent_sequences.is_empty() {
-                cursor_sequence
-            } else {
-                Sequence::get_minimum_sequence(dependent_sequences)
-            };
-
-            // The available sequence is the minimum of cursor and dependent sequences
-            let available_sequence = std::cmp::min(cursor_sequence, minimum_dependent_sequence);
-
-            if available_sequence >= sequence {
-                return Ok(available_sequence);
+            let available = Self::available_sequence(cursor, dependent_sequences);
+            if available >= sequence {
+                return Ok(available);
             }
 
             if alerted.load(Ordering::Acquire) {
                 return Err(DisruptorError::Alert);
             }
 
-            // Check for timeout
             if start_time.elapsed() >= timeout {
                 return Err(DisruptorError::Timeout);
             }
 
-            thread::yield_now();
+            Self::apply_wait_method(&mut counter);
         }
     }
 
@@ -495,6 +528,7 @@ impl WaitStrategy for YieldingWaitStrategy {
         shutdown_flag: &AtomicBool,
         alerted: &AtomicBool,
     ) -> Result<i64> {
+        let mut counter = Self::SPIN_TRIES;
         loop {
             if shutdown_flag.load(Ordering::Acquire) {
                 return Err(DisruptorError::Alert);
@@ -502,22 +536,16 @@ impl WaitStrategy for YieldingWaitStrategy {
             if alerted.load(Ordering::Acquire) {
                 return Err(DisruptorError::Alert);
             }
-            let cursor_sequence = cursor.get();
-            let dep_min = if dependent_sequences.is_empty() {
-                cursor_sequence
-            } else {
-                Sequence::get_minimum_sequence(dependent_sequences)
-            };
-            let available = std::cmp::min(cursor_sequence, dep_min);
+            let available = Self::available_sequence(cursor, dependent_sequences);
             if available >= sequence {
                 return Ok(available);
             }
-            thread::yield_now();
+            Self::apply_wait_method(&mut counter);
         }
     }
 
     fn signal_all_when_blocking(&self) {
-        // Yielding strategy doesn't block, so no signaling needed
+        // Non-blocking strategy: nothing to wake.
     }
 
     #[inline]
@@ -1534,6 +1562,27 @@ mod tests {
         assert_eq!(result.unwrap(), 5);
 
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_yielding_wait_strategy_spin_tries_matches_lmax() {
+        // Contract lock: keep the public constant aligned with LMAX Java
+        // `YieldingWaitStrategy.SPIN_TRIES` (and simple_wait_strategy default).
+        assert_eq!(YieldingWaitStrategy::SPIN_TRIES, 100);
+    }
+
+    #[test]
+    fn test_yielding_apply_wait_method_counts_down_then_stays_at_zero() {
+        let mut counter = 3;
+        YieldingWaitStrategy::apply_wait_method(&mut counter);
+        assert_eq!(counter, 2);
+        YieldingWaitStrategy::apply_wait_method(&mut counter);
+        assert_eq!(counter, 1);
+        YieldingWaitStrategy::apply_wait_method(&mut counter);
+        assert_eq!(counter, 0);
+        // At zero: yield path; counter remains 0 (subsequent waits always yield).
+        YieldingWaitStrategy::apply_wait_method(&mut counter);
+        assert_eq!(counter, 0);
     }
 
     #[test]

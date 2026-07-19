@@ -51,8 +51,11 @@ impl SimpleWaitStrategy for BusySpinWithHint {
 
 /// Yielding wait strategy - balanced latency and CPU usage
 ///
-/// This strategy yields the CPU thread after a few busy spin attempts.
-/// Good balance between latency and CPU usage.
+/// Yields the CPU after a short busy-spin window. The default window size
+/// matches LMAX / [`crate::disruptor::YieldingWaitStrategy::SPIN_TRIES`]
+/// (`100`). Prefer the monomorphized LMAX path
+/// ([`crate::disruptor::YieldingWaitStrategy`]) on the Builder hot path;
+/// this type is the simplified `SimpleWaitStrategy` surface.
 #[derive(Copy, Clone, Debug)]
 pub struct Yielding {
     spin_tries: u32,
@@ -70,7 +73,8 @@ impl Yielding {
 
 impl Default for Yielding {
     fn default() -> Self {
-        Self::new(100) // Default to 100 spin tries
+        // Align with LMAX YieldingWaitStrategy.SPIN_TRIES / core YieldingWaitStrategy.
+        Self::new(100)
     }
 }
 
