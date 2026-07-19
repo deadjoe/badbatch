@@ -13,6 +13,19 @@ compiler, or when CI stabilizes on a new stable series. Patch toolchain updates
 
 ## [0.2.0] — 2026-07
 
+### YieldingWaitStrategy LMAX spin-then-yield (2026-07-19)
+
+- **`YieldingWaitStrategy`** now matches LMAX Java: busy-poll
+  `SPIN_TRIES` (100) unsuccessful observations, then `thread::yield_now()`
+  on further misses (`apply_wait_method`). Previously every miss yielded
+  immediately.
+- **Protocol unchanged:** still returns only when `available >= sequence`
+  (or Alert/Timeout); alert/shutdown flags are still observed every poll.
+  This is a scheduling policy fix for LMAX fidelity, not a semantic change
+  to claim/publish/barriers.
+- Public constant `YieldingWaitStrategy::SPIN_TRIES` documents the LMAX
+  value; unit tests lock the constant and countdown behavior.
+
 ### Residual soundness & API closure (2026-07-19 post-fix review)
 
 Closes residuals from the independent post-fix re-audit:
