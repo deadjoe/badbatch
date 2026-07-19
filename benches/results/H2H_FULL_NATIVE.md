@@ -1,5 +1,9 @@
 # Full Java LMAX head-to-head with `target-cpu=native` (2026-07-19)
 
+> **Historical pre-fork evidence.** This capture predates the fork-level paired
+> protocol in `scripts/run_head_to_head.sh`. Its within-process CVs and exact
+> Rust/Java ratios are retained for audit history, not as a current ranking.
+
 Captured at commit **`bd85582`** (includes LMAX-aligned spin-then-yield
 `YieldingWaitStrategy`).
 

@@ -19,8 +19,8 @@
 )]
 
 use badbatch::disruptor::{
-    build_multi_producer, build_single_producer, BusySpinWaitStrategy, Producer, SlotPadding,
-    YieldingWaitStrategy,
+    build_multi_producer, build_single_producer, BusySpinWaitStrategy, EventHandler, Producer,
+    Result as DisruptorResult, SlotPadding, YieldingWaitStrategy,
 };
 use std::env;
 use std::fs;
@@ -189,6 +189,12 @@ struct Config {
     warmup_rounds: usize,
     measured_rounds: usize,
     run_order: String,
+    pair_id: String,
+    fork_index: usize,
+    harness_rev: Option<String>,
+    implementation_rev: Option<String>,
+    harness_dirty: Option<bool>,
+    implementation_dirty: Option<bool>,
     impl_label: String,
     output: Option<PathBuf>,
     timeout: Duration,
@@ -205,6 +211,12 @@ fn parse_args() -> Result<Config, String> {
     let mut warmup_rounds = 3usize;
     let mut measured_rounds = 7usize;
     let mut run_order = "standalone".into();
+    let mut pair_id = "standalone".into();
+    let mut fork_index = 0usize;
+    let mut harness_rev = None;
+    let mut implementation_rev = None;
+    let mut harness_dirty = None;
+    let mut implementation_dirty = None;
     let mut impl_label = "badbatch-builder".into();
     let mut output = None;
     let mut quick = false;
@@ -266,6 +278,38 @@ fn parse_args() -> Result<Config, String> {
             "--run-order" => {
                 run_order = args.next().ok_or("missing --run-order")?;
             }
+            "--pair-id" => {
+                pair_id = args.next().ok_or("missing --pair-id")?;
+            }
+            "--fork-index" => {
+                fork_index = args
+                    .next()
+                    .ok_or("missing --fork-index")?
+                    .parse()
+                    .map_err(|e| format!("fork-index: {e}"))?;
+            }
+            "--harness-rev" => {
+                harness_rev = Some(args.next().ok_or("missing --harness-rev")?);
+            }
+            "--implementation-rev" => {
+                implementation_rev = Some(args.next().ok_or("missing --implementation-rev")?);
+            }
+            "--harness-dirty" => {
+                harness_dirty = Some(
+                    args.next()
+                        .ok_or("missing --harness-dirty")?
+                        .parse()
+                        .map_err(|e| format!("harness-dirty: {e}"))?,
+                );
+            }
+            "--implementation-dirty" => {
+                implementation_dirty = Some(
+                    args.next()
+                        .ok_or("missing --implementation-dirty")?
+                        .parse()
+                        .map_err(|e| format!("implementation-dirty: {e}"))?,
+                );
+            }
             "--impl-label" => {
                 impl_label = args.next().ok_or("missing --impl-label")?;
             }
@@ -321,6 +365,12 @@ fn parse_args() -> Result<Config, String> {
         warmup_rounds,
         measured_rounds,
         run_order,
+        pair_id,
+        fork_index,
+        harness_rev,
+        implementation_rev,
+        harness_dirty,
+        implementation_dirty,
         impl_label,
         output,
         timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
@@ -341,6 +391,12 @@ Options:
   --warmup-rounds <N>            (default 3)
   --measured-rounds <N>          (default 7)
   --run-order <label>            (metadata only)
+  --pair-id <label>              (paired-fork metadata)
+  --fork-index <N>               (paired-fork metadata)
+  --harness-rev <rev>            (orchestrator provenance)
+  --implementation-rev <rev>     (orchestrator provenance)
+  --harness-dirty <true|false>    (orchestrator provenance)
+  --implementation-dirty <bool>  (orchestrator provenance)
   --impl-label <label>           (default badbatch-builder)
   --output <path.json>
   --quick                        (smaller defaults / fewer rounds)
@@ -426,6 +482,101 @@ fn wait_count(counter: &AtomicU64, target: u64, timeout: Duration) -> bool {
     true
 }
 
+#[derive(Clone, Copy)]
+enum TerminalMode {
+    Value,
+    Pipeline,
+}
+
+struct TerminalHandler {
+    processed: Arc<AtomicU64>,
+    checksum: Arc<AtomicU64>,
+    ready: Arc<AtomicU64>,
+    events_total: u64,
+    final_sequence: i64,
+    local_checksum: u64,
+    mode: TerminalMode,
+}
+
+impl TerminalHandler {
+    fn new(
+        processed: Arc<AtomicU64>,
+        checksum: Arc<AtomicU64>,
+        ready: Arc<AtomicU64>,
+        events_total: u64,
+        mode: TerminalMode,
+    ) -> Self {
+        Self {
+            processed,
+            checksum,
+            ready,
+            events_total,
+            final_sequence: i64::try_from(events_total).expect("events_total must fit i64") - 1,
+            local_checksum: 0,
+            mode,
+        }
+    }
+
+    fn complete_if_final(&self, sequence: i64) {
+        if sequence == self.final_sequence {
+            // Exactly one completion publication per round on both harness sides.
+            self.checksum.store(self.local_checksum, Ordering::SeqCst);
+            self.processed.store(self.events_total, Ordering::SeqCst);
+        }
+    }
+}
+
+impl EventHandler<ComparisonEvent> for TerminalHandler {
+    fn on_event(
+        &mut self,
+        event: &mut ComparisonEvent,
+        sequence: i64,
+        _end_of_batch: bool,
+    ) -> DisruptorResult<()> {
+        let value = match self.mode {
+            TerminalMode::Value => event.value,
+            TerminalMode::Pipeline => {
+                event.stage3_value = event.stage2_value.wrapping_add(7);
+                event.stage3_value
+            }
+        };
+        self.local_checksum = self.local_checksum.wrapping_add(value as u64);
+        self.complete_if_final(sequence);
+        Ok(())
+    }
+
+    fn on_start(&mut self) -> DisruptorResult<()> {
+        self.ready.fetch_add(1, Ordering::Release);
+        Ok(())
+    }
+}
+
+struct PipelineStageHandler {
+    stage: u8,
+    ready: Arc<AtomicU64>,
+}
+
+impl EventHandler<ComparisonEvent> for PipelineStageHandler {
+    fn on_event(
+        &mut self,
+        event: &mut ComparisonEvent,
+        _sequence: i64,
+        _end_of_batch: bool,
+    ) -> DisruptorResult<()> {
+        match self.stage {
+            1 => event.stage1_value = event.value.wrapping_add(1),
+            2 => event.stage2_value = event.stage1_value.wrapping_add(3),
+            _ => unreachable!("pipeline stage must be 1 or 2"),
+        }
+        Ok(())
+    }
+
+    fn on_start(&mut self) -> DisruptorResult<()> {
+        self.ready.fetch_add(1, Ordering::Release);
+        Ok(())
+    }
+}
+
 // --- scenarios ---------------------------------------------------------------------
 
 fn run_unicast(cfg: &Config, batch: bool) -> Result<Vec<Round>, String> {
@@ -446,19 +597,25 @@ where
     for i in 0..total_rounds {
         let processed = Arc::new(AtomicU64::new(0));
         let checksum = Arc::new(AtomicU64::new(0));
-        let p = Arc::clone(&processed);
-        let c = Arc::clone(&checksum);
+        let ready = Arc::new(AtomicU64::new(0));
+        let handler = TerminalHandler::new(
+            Arc::clone(&processed),
+            Arc::clone(&checksum),
+            Arc::clone(&ready),
+            cfg.events_total,
+            TerminalMode::Value,
+        );
 
         let mut handle =
             build_single_producer(cfg.buffer_size, ComparisonEvent::default, wait.clone())
                 .with_slot_padding(cfg.pad.slot_padding())
-                .handle_events_with(move |e: &mut ComparisonEvent, _s, _end| {
-                    c.fetch_add(e.value as u64, Ordering::Relaxed);
-                    p.fetch_add(1, Ordering::Release);
-                })
+                .handle_events_with_handler(handler)
                 .build();
 
-        thread::sleep(Duration::from_millis(5));
+        if !wait_count(&ready, 1, cfg.timeout) {
+            handle.shutdown();
+            return Err("timeout waiting for unicast consumer readiness".into());
+        }
 
         let start = Instant::now();
         if batch {
@@ -534,28 +691,37 @@ where
     for i in 0..total_rounds {
         let processed = Arc::new(AtomicU64::new(0));
         let checksum = Arc::new(AtomicU64::new(0));
-        let p = Arc::clone(&processed);
-        let c = Arc::clone(&checksum);
+        let ready = Arc::new(AtomicU64::new(0));
+        let handler = TerminalHandler::new(
+            Arc::clone(&processed),
+            Arc::clone(&checksum),
+            Arc::clone(&ready),
+            cfg.events_total,
+            TerminalMode::Value,
+        );
 
         let mut handle =
             build_multi_producer(cfg.buffer_size, ComparisonEvent::default, wait.clone())
-                .handle_events_with(move |e: &mut ComparisonEvent, _s, _end| {
-                    c.fetch_add(e.value as u64, Ordering::Relaxed);
-                    p.fetch_add(1, Ordering::Release);
-                })
+                .handle_events_with_handler(handler)
                 .build();
 
-        thread::sleep(Duration::from_millis(5));
+        if !wait_count(&ready, 1, cfg.timeout) {
+            handle.shutdown();
+            return Err("timeout waiting for mpsc consumer readiness".into());
+        }
 
         let start_flag = Arc::new(AtomicBool::new(false));
+        let producers_ready = Arc::new(AtomicU64::new(0));
         let mut joins = Vec::new();
         for id in 0..MPSC_PRODUCERS {
             let mut prod = handle.create_producer();
             let start_flag = Arc::clone(&start_flag);
+            let producers_ready = Arc::clone(&producers_ready);
             let batch = cfg.batch_size;
             let range_start = per * id as u64;
             let range_end = range_start + per;
             joins.push(thread::spawn(move || {
+                producers_ready.fetch_add(1, Ordering::Release);
                 while !start_flag.load(Ordering::Acquire) {
                     std::hint::spin_loop();
                 }
@@ -574,6 +740,11 @@ where
                     published += chunk as u64;
                 }
             }));
+        }
+
+        if !wait_count(&producers_ready, MPSC_PRODUCERS as u64, cfg.timeout) {
+            handle.shutdown();
+            return Err("timeout waiting for mpsc producer readiness".into());
         }
 
         let start = Instant::now();
@@ -624,28 +795,37 @@ where
     for i in 0..total_rounds {
         let processed = Arc::new(AtomicU64::new(0));
         let checksum = Arc::new(AtomicU64::new(0));
-        let p = Arc::clone(&processed);
-        let c = Arc::clone(&checksum);
+        let ready = Arc::new(AtomicU64::new(0));
+        let stage1 = PipelineStageHandler {
+            stage: 1,
+            ready: Arc::clone(&ready),
+        };
+        let stage2 = PipelineStageHandler {
+            stage: 2,
+            ready: Arc::clone(&ready),
+        };
+        let stage3 = TerminalHandler::new(
+            Arc::clone(&processed),
+            Arc::clone(&checksum),
+            Arc::clone(&ready),
+            cfg.events_total,
+            TerminalMode::Pipeline,
+        );
 
         let mut handle =
             build_single_producer(cfg.buffer_size, ComparisonEvent::default, wait.clone())
                 .with_slot_padding(cfg.pad.slot_padding())
-                .handle_events_with(|e: &mut ComparisonEvent, _s, _end| {
-                    e.stage1_value = e.value.wrapping_add(1);
-                })
+                .handle_events_with_handler(stage1)
                 .and_then()
-                .handle_events_with(|e: &mut ComparisonEvent, _s, _end| {
-                    e.stage2_value = e.stage1_value.wrapping_add(3);
-                })
+                .handle_events_with_handler(stage2)
                 .and_then()
-                .handle_events_with(move |e: &mut ComparisonEvent, _s, _end| {
-                    e.stage3_value = e.stage2_value.wrapping_add(7);
-                    c.fetch_add(e.stage3_value as u64, Ordering::Relaxed);
-                    p.fetch_add(1, Ordering::Release);
-                })
+                .handle_events_with_handler(stage3)
                 .build();
 
-        thread::sleep(Duration::from_millis(10));
+        if !wait_count(&ready, 3, cfg.timeout) {
+            handle.shutdown();
+            return Err("timeout waiting for pipeline stage readiness".into());
+        }
 
         let start = Instant::now();
         for v in 0..cfg.events_total {
@@ -698,9 +878,19 @@ fn git_rev() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
+fn git_dirty() -> bool {
+    Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+}
+
 fn write_result(cfg: &Config, rounds: &[Round], summary: &Summary) -> String {
     use std::fmt::Write as _;
 
+    let local_rev = git_rev();
+    let harness_rev = cfg.harness_rev.as_deref().unwrap_or(&local_rev);
+    let implementation_rev = cfg.implementation_rev.as_deref().unwrap_or(&local_rev);
     let mut out = String::new();
     out.push_str("{\n");
     writeln!(out, "  \"impl\": \"{}\",", cfg.impl_label).unwrap();
@@ -715,7 +905,23 @@ fn write_result(cfg: &Config, rounds: &[Round], summary: &Summary) -> String {
     writeln!(out, "  \"warmup_rounds\": {},", cfg.warmup_rounds).unwrap();
     writeln!(out, "  \"measured_rounds\": {},", cfg.measured_rounds).unwrap();
     writeln!(out, "  \"run_order\": \"{}\",", cfg.run_order).unwrap();
-    writeln!(out, "  \"git_rev\": \"{}\",", git_rev()).unwrap();
+    writeln!(out, "  \"pair_id\": \"{}\",", cfg.pair_id).unwrap();
+    writeln!(out, "  \"fork_index\": {},", cfg.fork_index).unwrap();
+    writeln!(out, "  \"harness_git_rev\": \"{harness_rev}\",").unwrap();
+    writeln!(out, "  \"implementation_rev\": \"{implementation_rev}\",").unwrap();
+    writeln!(
+        out,
+        "  \"harness_dirty\": {},",
+        cfg.harness_dirty.unwrap_or_else(git_dirty)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "  \"implementation_dirty\": {},",
+        cfg.implementation_dirty.unwrap_or_else(git_dirty)
+    )
+    .unwrap();
+    writeln!(out, "  \"git_rev\": \"{local_rev}\",").unwrap();
     out.push_str("  \"rounds\": [\n");
     for (idx, r) in rounds.iter().enumerate() {
         out.push_str("    {\n");
@@ -816,5 +1022,43 @@ fn main() {
 
     if !summary.checksum_valid_all {
         std::process::exit(2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_handler_publishes_completion_only_at_final_sequence() {
+        let processed = Arc::new(AtomicU64::new(0));
+        let checksum = Arc::new(AtomicU64::new(0));
+        let ready = Arc::new(AtomicU64::new(0));
+        let mut handler = TerminalHandler::new(
+            Arc::clone(&processed),
+            Arc::clone(&checksum),
+            Arc::clone(&ready),
+            3,
+            TerminalMode::Value,
+        );
+
+        handler.on_start().unwrap();
+        assert_eq!(ready.load(Ordering::Acquire), 1);
+        for (sequence, value) in [10_i64, 20, 30].into_iter().enumerate() {
+            let mut event = ComparisonEvent {
+                value,
+                ..ComparisonEvent::default()
+            };
+            handler
+                .on_event(&mut event, sequence as i64, sequence == 2)
+                .unwrap();
+            if sequence < 2 {
+                assert_eq!(processed.load(Ordering::Acquire), 0);
+                assert_eq!(checksum.load(Ordering::Acquire), 0);
+            }
+        }
+
+        assert_eq!(checksum.load(Ordering::Acquire), 60);
+        assert_eq!(processed.load(Ordering::Acquire), 3);
     }
 }

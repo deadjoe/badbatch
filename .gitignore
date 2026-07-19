@@ -142,6 +142,8 @@ head_to_head_results/
 # Testing artifacts
 test_results/
 test_output/
+__pycache__/
+*.py[cod]
 *.test
 *.gcda
 *.gcno
