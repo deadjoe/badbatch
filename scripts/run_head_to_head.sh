@@ -206,6 +206,24 @@ print("\n".join(plan))
 PY
 }
 
+run_fork_process() {
+  local output_path="$1" stdout_path="$2"
+  shift 2
+  local started ended process_status
+  started="$(python3 tools/head_to_head/record_fork.py snapshot)"
+  if "$@" >"$stdout_path"; then
+    process_status=0
+  else
+    process_status=$?
+  fi
+  ended="$(python3 tools/head_to_head/record_fork.py snapshot)"
+  if [[ -f "$output_path" ]]; then
+    python3 tools/head_to_head/record_fork.py annotate \
+      "$output_path" "$started" "$ended" "$process_status"
+  fi
+  return "$process_status"
+}
+
 run_rust() {
   local scenario="$1" wait="$2" buffer="$3" events="$4" batch="$5" warmup="$6"
   local order_label="$7" fork_index="$8" pair_id="$9" stem="${10}"
@@ -215,7 +233,9 @@ run_rust() {
   [[ -n "$BUFFER_OVERRIDE" ]] && buffer="$BUFFER_OVERRIDE"
 
   echo "[INFO] Rust $pair_id ($order_label wait=$wait buffer=$buffer events=$events)"
-  ./target/release/h2h_rust \
+  local output_path="$RESULTS_DIR/rust_${stem}.json"
+  run_fork_process "$output_path" "$RESULTS_DIR/rust_${stem}.stdout" \
+    ./target/release/h2h_rust \
     --scenario "$scenario" --wait-strategy "$wait" --event-padding "$pad_arg" \
     --buffer-size "$buffer" --events-total "$events" --batch-size "$batch" \
     --warmup-rounds "$warmup" --measured-rounds 1 \
@@ -223,8 +243,7 @@ run_rust() {
     --harness-rev "$BADBATCH_REV" --implementation-rev "$BADBATCH_REV" \
     --harness-dirty "$BADBATCH_DIRTY" --implementation-dirty "$BADBATCH_DIRTY" \
     --impl-label "badbatch-builder" \
-    --output "$RESULTS_DIR/rust_${stem}.json" \
-    >"$RESULTS_DIR/rust_${stem}.stdout"
+    --output "$output_path"
 }
 
 run_java() {
@@ -234,7 +253,9 @@ run_java() {
   [[ -n "$BUFFER_OVERRIDE" ]] && buffer="$BUFFER_OVERRIDE"
 
   echo "[INFO] Java $pair_id ($order_label wait=$wait buffer=$buffer events=$events)"
-  java -Xms2g -Xmx2g -XX:+AlwaysPreTouch -cp "$JAVA_CP" \
+  local output_path="$RESULTS_DIR/java_${stem}.json"
+  run_fork_process "$output_path" "$RESULTS_DIR/java_${stem}.stdout" \
+    java -Xms2g -Xmx2g -XX:+AlwaysPreTouch -cp "$JAVA_CP" \
     com.lmax.disruptor.headtohead.HeadToHead \
     --scenario "$scenario" --wait-strategy "$wait" --event-padding none \
     --buffer-size "$buffer" --events-total "$events" --batch-size "$batch" \
@@ -243,8 +264,7 @@ run_java() {
     --harness-rev "$BADBATCH_REV" --implementation-rev "$LMAX_REV" \
     --harness-dirty "$BADBATCH_DIRTY" --implementation-dirty "$LMAX_DIRTY" \
     --impl-label "lmax-bep" \
-    --output "$RESULTS_DIR/java_${stem}.json" \
-    >"$RESULTS_DIR/java_${stem}.stdout"
+    --output "$output_path"
 }
 
 echo -e "scenario\tpair_id\tfork_index\trun_order" >"$RESULTS_DIR/fork_plan.tsv"

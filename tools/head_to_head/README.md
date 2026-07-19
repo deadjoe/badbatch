@@ -21,6 +21,7 @@ Both sides share:
 - wall time: first publish → consumer has processed all events
 - terminal checksum/progress publication exactly once at the final sequence
 - JSON fork metadata (`pair_id`, `fork_index`, implementation revisions, dirty state)
+- orchestrator-side per-fork start/end UTC timestamps and load-average snapshots
 
 ## Prerequisites
 
@@ -52,7 +53,7 @@ Outputs go to `head_to_head_results/<timestamp>/`:
 |------|---------|
 | `environment.txt` | host, both source revisions/dirty state/tree hashes, binary hashes, tools |
 | `fork_plan.tsv` | precomputed pair IDs and Rust/Java order |
-| `rust_<scenario>_fork…json` / `java_<scenario>_fork…json` | one fresh-process fork |
+| `rust_<scenario>_fork…json` / `java_<scenario>_fork…json` | one fresh-process fork, including `fork_provenance` timestamps/loadavg |
 | `fork_samples.csv` | paired fork scatter input |
 | `fork_summary.json` | aggregate fork statistics |
 | `REPORT.md` | fork summary, every pair, and interpretation boundary |
@@ -72,6 +73,7 @@ Outputs go to `head_to_head_results/<timestamp>/`:
 ## Fork protocol
 
 - The script builds Rust and Java once, then launches a fresh process for every sample.
+- The same shell/Python wrapper snapshots UTC time and system load average immediately before and after every child process; these observations are outside the measured interval and are diagnostic rather than cross-platform performance metrics.
 - Each process performs the configured warmup rounds and exactly one measured round.
 - A pair is one Rust fork plus one Java fork with the same scenario/configuration.
 - `--order both-orders` creates a balanced order plan and shuffles it with `--seed`.
