@@ -2,7 +2,7 @@
 //!
 //! Exercises multi-producer claim + availability tracking + contiguity barrier under load.
 
-use badbatch::disruptor::{build_multi_producer, BusySpinWaitStrategy, Producer, TryPublishError};
+use badbatch::disruptor::{build_multi_producer, BusySpinWaitStrategy, Producer};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -48,9 +48,9 @@ fn mpsc_sequences_exactly_once_and_contiguous() {
                     }) {
                         Ok(_) => break,
                         // Transient backpressure: retry.
-                        Err(TryPublishError::Full(_)) => std::hint::spin_loop(),
-                        // Terminal states must not spin forever (R1, 2026-07-19 audit).
-                        Err(terminal) => panic!("terminal publish failure: {terminal}"),
+                        Err(err) if err.is_transient() => std::hint::spin_loop(),
+                        // Terminal or invalid requests must not spin forever.
+                        Err(err) => panic!("non-retryable publish failure: {err}"),
                     }
                 }
             }

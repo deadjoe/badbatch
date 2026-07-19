@@ -559,7 +559,8 @@ where
     /// Try to publish one event.
     ///
     /// # Errors
-    /// [`TryPublishError::Full`](crate::disruptor::producer::TryPublishError::Full)
+    /// [`TryPublishError::Full`](crate::disruptor::producer::TryPublishError::Full) /
+    /// [`TryPublishError::Contended`](crate::disruptor::producer::TryPublishError::Contended)
     /// on transient backpressure; a terminal
     /// [`TryPublishError::Poisoned`](crate::disruptor::producer::TryPublishError::Poisoned)
     /// or
@@ -589,8 +590,11 @@ where
     /// Try to publish a batch of `n` events.
     ///
     /// # Errors
-    /// [`TryPublishError::MissingFreeSlots`](crate::disruptor::producer::TryPublishError::MissingFreeSlots)
-    /// on transient backpressure; a terminal
+    /// [`TryPublishError::MissingFreeSlots`](crate::disruptor::producer::TryPublishError::MissingFreeSlots) /
+    /// [`TryPublishError::Contended`](crate::disruptor::producer::TryPublishError::Contended)
+    /// on transient backpressure;
+    /// [`TryPublishError::InvalidBatchSize`](crate::disruptor::producer::TryPublishError::InvalidBatchSize)
+    /// for a zero or over-capacity request; or a terminal
     /// [`TryPublishError::Poisoned`](crate::disruptor::producer::TryPublishError::Poisoned)
     /// or
     /// [`TryPublishError::Shutdown`](crate::disruptor::producer::TryPublishError::Shutdown)

@@ -51,9 +51,8 @@ fn try_publish_on_full_ring_is_transient_and_recovers() {
     producer.try_publish(|e| e.value = 99).unwrap();
 }
 
-/// Batch claims report the slot deficit through the transient
-/// `MissingFreeSlots` variant — including the over-capacity case, where the
-/// deficit makes the permanence visible to the caller.
+/// Valid batch claims report the exact transient slot deficit. Invalid batch
+/// sizes are non-retryable and never invoke the update closure.
 #[test]
 fn try_batch_publish_reports_deficit() {
     let (mut producer, _poller, _shutdown) =
@@ -79,9 +78,24 @@ fn try_batch_publish_reports_deficit() {
     }
     assert!(err.is_transient());
 
-    // Over-capacity request: deficit reflects the impossible claim.
-    let err = producer.try_batch_publish(1000, |_iter| {}).unwrap_err();
-    assert!(matches!(err, TryPublishError::MissingFreeSlots(_)));
+    // Over-capacity and zero-size requests can never succeed unchanged, so
+    // they must not enter a retry loop or invoke user code.
+    for requested in [0, 1000, usize::MAX] {
+        let err = producer
+            .try_batch_publish(requested, |_iter| {
+                panic!("invalid batch closure must not run")
+            })
+            .unwrap_err();
+        assert_eq!(
+            err,
+            TryPublishError::InvalidBatchSize {
+                requested,
+                capacity: 8,
+            }
+        );
+        assert!(!err.is_transient());
+        assert!(!err.is_terminal());
+    }
 }
 
 /// After a producer-side closure panic poisons the pipeline, both try paths
@@ -110,6 +124,10 @@ fn try_paths_report_poisoned_as_terminal() {
         "batch path must also report Poisoned, got {err:?}"
     );
     assert!(err.is_terminal());
+
+    // A terminal pipeline state takes precedence over invalid request shape.
+    let err = producer.try_batch_publish(0, |_iter| {}).unwrap_err();
+    assert!(matches!(err, TryPublishError::Poisoned));
 }
 
 /// After halt, the handle-level try paths report the terminal `Shutdown`
@@ -136,4 +154,7 @@ fn try_paths_report_shutdown_as_terminal() {
         "batch path must also report Shutdown, got {err:?}"
     );
     assert!(err.is_terminal());
+
+    let err = handle.try_batch_publish(0, |_iter| {}).unwrap_err();
+    assert!(matches!(err, TryPublishError::Shutdown));
 }

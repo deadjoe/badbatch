@@ -160,4 +160,9 @@ jobs:
           cargo miri test --lib disruptor::event_processor::tests::test_try_run_once_on_batch_start_failure_is_fatal
           cargo miri test --lib disruptor::event_poller::tests::dropped_batch_commits_only_consumed_prefix
           cargo miri test --lib disruptor::event_poller::tests::untouched_batch_drop_redelivers_everything
-          cargo miri test --lib disruptor::disruptor::tests::test_disruptor_immediate_start_shutdown_no_hang
+          # This regression intentionally exercises BlockingWaitStrategy's
+          # parking_lot Condvar. parking_lot_core encodes waiter pointers in an
+          # integer word, which Miri rejects only under strict-provenance; run
+          # this third-party synchronization path under normal Miri while the
+          # aliasing-critical BadBatch tests above remain strict.
+          MIRIFLAGS="" cargo miri test --lib disruptor::disruptor::tests::test_disruptor_immediate_start_shutdown_no_hang

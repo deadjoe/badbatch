@@ -21,12 +21,15 @@ regressions found red on `main` while verifying it:
 - **`TryPublishError` (breaking).** `Producer::try_publish` /
   `try_batch_publish` (and the `DisruptorHandle` / `CloneableProducer`
   delegates) now return `Result<i64, TryPublishError>`, distinguishing
-  *transient* backpressure — `Full(RingBufferFull)` /
-  `MissingFreeSlots(MissingFreeSlots)`, with the legacy payload types
-  unchanged — from *terminal* states (`Poisoned` / `Shutdown`). Previously
+  *transient* backpressure — `Full(RingBufferFull)`,
+  `MissingFreeSlots(MissingFreeSlots)`, or `Contended` after a lost
+  multi-producer CAS — from *terminal* states (`Poisoned` / `Shutdown`). Zero,
+  over-capacity, and unrepresentable batches return the non-retryable
+  `InvalidBatchSize { requested, capacity }` variant. Previously
   every try-path rejection surfaced as "ring full", so the idiomatic
   `Err(_) => retry` loop spun forever on a poisoned or halted pipeline.
-  `is_terminal()` / `is_transient()` encode the retry discipline;
+  `is_terminal()` identifies terminal pipeline state and `is_transient()`
+  alone identifies retryable rejection;
   classification reads the monotonic poisoned/closed flags, so a terminal
   report is always conclusive.
 - **`try_run_once` self-activates (regression fix).** The halt-race fix made
@@ -47,8 +50,9 @@ regressions found red on `main` while verifying it:
   opt out of failure propagation.
 
 Coverage: new `tests/try_publish_errors.rs` (transient recovery end-to-end,
-exact deficit, poisoned/shutdown on both try paths); strengthened assertions
-in `tests/failure_semantics.rs` and `tests/lifecycle_residuals.rs`;
+exact deficit, non-retryable invalid batch sizes, poisoned/shutdown on both
+try paths); strengthened assertions in `tests/failure_semantics.rs`,
+`tests/lifecycle_residuals.rs`, and the poisoned DSL shutdown integration test;
 `mpsc_exactly_once_stress` retries only on the transient variant.
 
 ### Lifecycle residual closure (post-audit)
