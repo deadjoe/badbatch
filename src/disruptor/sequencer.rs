@@ -633,12 +633,11 @@ where
             return Err(DisruptorError::Poisoned);
         }
 
-        // Serializes claim-state access so concurrent Arc drivers fail closed
-        // instead of racing on next_value/cached_value (residual 2026-07-19).
-        let _claim = self.acquire_claim()?;
+        // EXPERIMENT ONLY: bypass the runtime claim lock to isolate its hot-path
+        // cost. This makes concurrent Arc drivers unsound and must never ship.
 
         // This follows the exact LMAX Disruptor SingleProducerSequencer.next(int n) logic.
-        // SAFETY: claim_lock held — exclusive access to next/cached cells.
+        // SAFETY (experiment only): the H2H driver has one publishing thread.
         let next_value = unsafe { self.next_value() };
         let next_sequence = next_value + n;
         let wrap_point = next_sequence - self.buffer_size_i64;
@@ -692,7 +691,8 @@ where
             return None;
         }
 
-        let _claim = self.try_acquire_claim()?;
+        // EXPERIMENT ONLY: bypass the runtime claim lock to isolate its hot-path
+        // cost. This makes concurrent Arc drivers unsound and must never ship.
 
         // This follows the exact LMAX Disruptor SingleProducerSequencer.tryNext(int n) logic
         let Ok(required) = usize::try_from(n) else {
@@ -704,7 +704,7 @@ where
         }
 
         // Update next_value and return the sequence (equivalent to this.nextValue += n)
-        // SAFETY: claim_lock held — exclusive access to next/cached cells.
+        // SAFETY (experiment only): the H2H driver has one publishing thread.
         let next_sequence = unsafe { self.next_value() + n };
         unsafe { self.set_next_value(next_sequence) };
 
