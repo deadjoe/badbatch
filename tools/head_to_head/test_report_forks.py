@@ -8,6 +8,7 @@ import pathlib
 import tempfile
 import unittest
 
+import record_fork
 import report_forks
 
 
@@ -31,6 +32,29 @@ def artifact(language: str, pair_id: str, fork_index: int, ops: float) -> dict:
 
 
 class ForkReportTest(unittest.TestCase):
+    def test_records_fork_timestamps_load_and_exit_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = pathlib.Path(temp) / "rust_unicast-001.json"
+            path.write_text(json.dumps(artifact("rust", "unicast-001", 1, 100.0)))
+            started = {
+                "timestamp_utc": "2026-07-19T01:02:03.000000Z",
+                "unix_ns": 100,
+                "loadavg": [1.0, 2.0, 3.0],
+            }
+            ended = {
+                "timestamp_utc": "2026-07-19T01:02:04.000000Z",
+                "unix_ns": 250,
+                "loadavg": [1.5, 2.5, 3.5],
+            }
+
+            record_fork.annotate(path, started, ended, 0)
+
+            provenance = json.loads(path.read_text())["fork_provenance"]
+            self.assertEqual(150, provenance["orchestrator_elapsed_ns"])
+            self.assertEqual([1.0, 2.0, 3.0], provenance["loadavg_at_start"])
+            self.assertEqual([1.5, 2.5, 3.5], provenance["loadavg_at_end"])
+            self.assertEqual(0, provenance["process_exit_code"])
+
     def test_loads_and_summarizes_complete_pairs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp)

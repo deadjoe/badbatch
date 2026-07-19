@@ -39,6 +39,15 @@ for path in rust + java:
     assert data["fork_index"] in {1, 2}
     assert data["harness_git_rev"]
     assert data["implementation_rev"]
+    provenance = data["fork_provenance"]
+    assert provenance["started_at_utc"].endswith("Z")
+    assert provenance["ended_at_utc"].endswith("Z")
+    assert provenance["ended_unix_ns"] >= provenance["started_unix_ns"]
+    assert provenance["orchestrator_elapsed_ns"] >= 0
+    assert provenance["process_exit_code"] == 0
+    for key in ("loadavg_at_start", "loadavg_at_end"):
+        loadavg = provenance[key]
+        assert loadavg is None or len(loadavg) == 3
     orders.add(data["run_order"])
 
 assert orders == {"rust-then-java", "java-then-rust"}, orders
