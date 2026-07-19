@@ -334,7 +334,6 @@ where
         }
 
         // Process all available events in this batch
-        let mut current_sequence = next_sequence;
         let batch_span = available_sequence - next_sequence + 1;
 
         // Notify batch start with batch size and queue depth. Align with the
@@ -352,37 +351,45 @@ where
             return Err(DisruptorError::Poisoned);
         }
 
-        while current_sequence <= available_sequence {
-            let end_of_batch = current_sequence == available_sequence;
+        // Catch handler panics so try_run_once matches run(): poison producers
+        // instead of leaving them spinning on a frozen gating sequence
+        // (adversarial residual 2026-07-19).
+        let process = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut current_sequence = next_sequence;
+            while current_sequence <= available_sequence {
+                let end_of_batch = current_sequence == available_sequence;
 
-            // SAFETY: We have exclusive access to this sequence position as guaranteed by
-            // the barrier wait — no other processor can access this sequence until we're done.
-            let event = unsafe { &mut *self.data_provider.get_mut_unchecked(current_sequence) };
+                // SAFETY: exclusive access to this sequence via the barrier wait.
+                let event = unsafe { &mut *self.data_provider.get_mut_unchecked(current_sequence) };
 
-            if let Err(e) = handler.on_event(event, current_sequence, end_of_batch) {
-                let exception_handler = &*self.exception_handler;
-                let decision = exception_handler.handle_event_exception(e, current_sequence, event);
-                if decision == crate::disruptor::ErrorDecision::Stop {
-                    // Freeze at the last fully processed event, poison the
-                    // producers, and stop this processor (LMAX fatal default).
-                    self.sequence.set(current_sequence - 1);
-                    self.sequence_barrier.poison_producers();
-                    self.running.store(false, Ordering::Release);
-                    return Err(DisruptorError::Poisoned);
+                if let Err(e) = handler.on_event(event, current_sequence, end_of_batch) {
+                    let exception_handler = &*self.exception_handler;
+                    let decision =
+                        exception_handler.handle_event_exception(e, current_sequence, event);
+                    if decision == crate::disruptor::ErrorDecision::Stop {
+                        self.sequence.set(current_sequence - 1);
+                        self.sequence_barrier.poison_producers();
+                        self.running.store(false, Ordering::Release);
+                        return Err(DisruptorError::Poisoned);
+                    }
                 }
+
+                current_sequence += 1;
             }
 
-            current_sequence += 1;
+            // Release ordering: producers read this sequence with Acquire.
+            self.sequence.set(available_sequence);
+            Ok(true)
+        }));
+
+        match process {
+            Ok(result) => result,
+            Err(payload) => {
+                self.sequence_barrier.poison_producers();
+                self.running.store(false, Ordering::Release);
+                std::panic::resume_unwind(payload);
+            }
         }
-
-        // Update our sequence to indicate we've processed up to this point.
-        // Release ordering ensures all prior event reads/writes are visible
-        // before the sequence advance. Producers read this with Acquire,
-        // forming a correct Release-Acquire pair. SeqCst is unnecessary here
-        // (LMAX Java BatchEventProcessor also uses lazySet = Release).
-        self.sequence.set(available_sequence);
-
-        Ok(true)
     }
 
     fn notify_timeout(&self, sequence: i64) {

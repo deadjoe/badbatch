@@ -471,12 +471,13 @@ fn test_complete_event_flow() {
     }
 
     for i in 3..6 {
-        let success = disruptor.try_publish_event(ClosureEventTranslator::new(
-            move |event: &mut TestEvent, _seq: i64| {
-                event.value = i;
-            },
-        ));
-        assert!(success, "try_publish_event should succeed");
+        disruptor
+            .try_publish_event(ClosureEventTranslator::new(
+                move |event: &mut TestEvent, _seq: i64| {
+                    event.value = i;
+                },
+            ))
+            .expect("try_publish_event should succeed");
     }
 
     wait_until(

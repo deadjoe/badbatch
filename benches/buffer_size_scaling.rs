@@ -371,14 +371,16 @@ fn benchmark_memory_scaling(group: &mut BenchmarkGroup<WallTime>, buffer_size: u
                 // processed before we read `initial_count`.
                 let initial_count = counter.load(Ordering::Relaxed);
 
-                let success = disruptor.try_publish_event(ClosureEventTranslator::new(
-                    move |event: &mut ScalingEvent, _seq: i64| {
-                        event.id = std::hint::black_box(1);
-                        event.data = vec![1; payload_size];
-                    },
-                ));
+                let published = disruptor
+                    .try_publish_event(ClosureEventTranslator::new(
+                        move |event: &mut ScalingEvent, _seq: i64| {
+                            event.id = std::hint::black_box(1);
+                            event.data = vec![1; payload_size];
+                        },
+                    ))
+                    .is_ok();
 
-                if success {
+                if published {
                     // Wait for event to be processed with timeout
                     if !wait_for_counter_increase(&counter, initial_count, TIMEOUT_MS) {
                         eprintln!(
@@ -430,13 +432,16 @@ fn benchmark_buffer_utilization(
                 // Publish a burst of events
                 for i in 1..=burst_size {
                     // Use try_publish to test buffer utilization
-                    while !disruptor.try_publish_event(ClosureEventTranslator::new(
-                        move |event: &mut ScalingEvent, _seq: i64| {
-                            event.id = std::hint::black_box(i as i64);
-                            event.data.clear();
-                            event.data.resize(8, i as i64);
-                        },
-                    )) {
+                    while disruptor
+                        .try_publish_event(ClosureEventTranslator::new(
+                            move |event: &mut ScalingEvent, _seq: i64| {
+                                event.id = std::hint::black_box(i as i64);
+                                event.data.clear();
+                                event.data.resize(8, i as i64);
+                            },
+                        ))
+                        .is_err()
+                    {
                         // Buffer is full, brief wait
                         std::hint::spin_loop();
                     }

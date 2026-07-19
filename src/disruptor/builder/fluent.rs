@@ -540,7 +540,8 @@ where
     /// Crate-private (soundness audit 2026-07-18): the sequencer must be the
     /// multi-producer variant; safe external construction over a single-producer
     /// sequencer would allow concurrent claims on unsynchronized state.
-    #[allow(dead_code)]
+    /// Prefer [`crate::disruptor::DisruptorHandle::cloneable_producer`] on a
+    /// multi-mode handle.
     pub(crate) fn new(ring_buffer: Arc<RingBuffer<E>>, sequencer: SequencerEnum<W>) -> Self {
         debug_assert!(
             matches!(sequencer, SequencerEnum::Multi(_)),

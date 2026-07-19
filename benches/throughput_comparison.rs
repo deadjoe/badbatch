@@ -372,18 +372,17 @@ fn benchmark_try_publish_throughput(group: &mut BenchmarkGroup<WallTime>, buffer
 
                 let mut published = 0;
                 while published < THROUGHPUT_EVENTS {
-                    let success = disruptor.try_publish_event(ClosureEventTranslator::new(
+                    match disruptor.try_publish_event(ClosureEventTranslator::new(
                         move |event: &mut ThroughputEvent, _seq: i64| {
                             event.id = std::hint::black_box(published as i64);
                             event.data = [published as i64; 4];
                         },
-                    ));
-
-                    if success {
-                        published += 1;
-                    } else {
-                        // Brief pause to allow consumer to catch up
-                        std::hint::spin_loop();
+                    )) {
+                        Ok(_) => published += 1,
+                        Err(_) => {
+                            // Brief pause to allow consumer to catch up
+                            std::hint::spin_loop();
+                        }
                     }
                 }
 

@@ -3,7 +3,7 @@
 use super::core::DisruptorCore;
 use crate::disruptor::{
     producer::{Producer, SimpleProducer},
-    WaitStrategy,
+    Sequencer, WaitStrategy,
 };
 use std::marker::PhantomData;
 
@@ -244,6 +244,26 @@ where
     pub fn is_shutdown(&self) -> bool {
         self.is_shutdown
     }
+
+    /// Whether the pipeline was poisoned (consumer panic or claim-window panic).
+    ///
+    /// Once true, further publishes fail with
+    /// [`crate::disruptor::DisruptorError::Poisoned`] /
+    /// [`crate::disruptor::TryPublishError::Poisoned`].
+    #[must_use]
+    pub fn is_poisoned(&self) -> bool {
+        self.core.sequencer.is_poisoned()
+    }
+
+    /// Whether the sequencer claim path is closed (after halt/shutdown).
+    ///
+    /// Distinct from [`Self::is_shutdown`]: the handle flag is set when stop
+    /// methods return; the claim path closes first so in-flight producers fail
+    /// fast.
+    #[must_use]
+    pub fn is_claim_closed(&self) -> bool {
+        self.core.sequencer.is_closed()
+    }
 }
 
 impl<E, W> DisruptorHandle<E, W, MultiProducerMode>
@@ -259,6 +279,26 @@ where
     /// claim state (soundness audit 2026-07-18).
     pub fn create_producer(&self) -> SimpleProducer<E, W> {
         self.core.create_producer()
+    }
+
+    /// Shared multi-producer handle that is [`Clone`] and can mint further
+    /// [`SimpleProducer`]s — the supported public path to
+    /// [`super::CloneableProducer`] (wired residual 2026-07-19).
+    ///
+    /// ```compile_fail
+    /// use badbatch::disruptor::{build_single_producer, BusySpinWaitStrategy};
+    /// #[derive(Default)]
+    /// struct MyEvent { value: i64 }
+    /// let handle = build_single_producer(8, MyEvent::default, BusySpinWaitStrategy)
+    ///     .handle_events_with(|_e: &mut MyEvent, _s, _b| {})
+    ///     .build();
+    /// let _ = handle.cloneable_producer(); // ERROR: single mode has no cloneable_producer
+    /// ```
+    pub fn cloneable_producer(&self) -> super::CloneableProducer<E, W> {
+        super::CloneableProducer::new(
+            std::sync::Arc::clone(&self.core.ring_buffer),
+            self.core.sequencer.clone(),
+        )
     }
 }
 

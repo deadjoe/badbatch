@@ -424,11 +424,21 @@ where
     ///
     /// Exclusive to the single publishing thread. Stored in `UnsafeCell` (not atomics)
     /// because LMAX guarantees single-threaded access; `SimpleProducer` is `!Sync` to
-    /// reinforce that discipline at the handle layer.
+    /// reinforce that discipline at the handle layer. Concurrent access is rejected
+    /// by [`Self::claim_lock`] (see [`crate::disruptor::DisruptorError::ConcurrentClaimDriver`]).
     next_value: UnsafeCell<i64>,
     /// Cached minimum gating sequence (equivalent to LMAX cachedValue).
     /// Same single-publisher exclusivity as `next_value`.
     cached_value: UnsafeCell<i64>,
+    /// Runtime mutual exclusion for claim-state cells (`next_value` / `cached_value`).
+    ///
+    /// High-level APIs already prevent dual handles; this closes the residual where
+    /// a caller uses `unsafe { SingleProducerSequencer::new }` and then drives
+    /// claim methods from two threads via a shared `Arc` (safe-looking after the
+    /// unsafe constructor). Concurrent claimants get
+    /// [`crate::disruptor::DisruptorError::ConcurrentClaimDriver`] / `None` instead
+    /// of a data race on the `UnsafeCell`s.
+    claim_lock: AtomicBool,
     /// Set when a consumer thread or a producer update closure panicked.
     /// Claim methods fail fast instead of spinning on a dead gating sequence.
     poisoned: AtomicBool,
@@ -437,10 +447,19 @@ where
     closed: AtomicBool,
 }
 
-// SAFETY: `next_value` / `cached_value` are only read/written by the single publisher
-// thread that owns the producer handle. Other threads access only `cursor`, gating
-// sequences, and wait strategy — never these cells.
+// SAFETY: `next_value` / `cached_value` are only read/written while `claim_lock`
+// is held. Other threads may access `cursor`, gating sequences, wait strategy,
+// and the lock itself. Concurrent claim attempts fail without touching the cells.
 unsafe impl<W: WaitStrategy + 'static> Sync for SingleProducerSequencer<W> {}
+
+/// Releases [`SingleProducerSequencer::claim_lock`] on every exit path (including panic).
+struct SingleClaimGuard<'a>(&'a AtomicBool);
+
+impl Drop for SingleClaimGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 impl<W> SingleProducerSequencer<W>
 where
@@ -456,14 +475,16 @@ where
     /// A new SingleProducerSequencer instance
     ///
     /// # Safety
-    /// The claim state (`next_value`/`cached_value`) is deliberately not
-    /// synchronized. The caller must guarantee that the claim methods
-    /// (`next`, `next_n`, `try_next`, `try_next_n`, `has_available_capacity`,
-    /// `remaining_capacity`) are only ever driven by **one thread at a time**
-    /// for the lifetime of this sequencer. Driving them from two threads is a
-    /// data race (soundness audit 2026-07-18). Read-side methods used by
-    /// barriers/consumers (`is_available`, cursor access, gating management)
-    /// are unrestricted.
+    /// The claim state (`next_value`/`cached_value`) is non-atomic. Callers must
+    /// drive claim methods (`next`, `next_n`, `try_next`, `try_next_n`,
+    /// `has_available_capacity`, `remaining_capacity`) from **one thread at a
+    /// time**. A runtime claim lock rejects concurrent drivers with
+    /// [`crate::disruptor::DisruptorError::ConcurrentClaimDriver`] (or `None`
+    /// on try paths) so a violated contract fails closed instead of data-racing,
+    /// but overlapping multi-publisher use is still a protocol error — prefer
+    /// the Builder / `SimpleProducer` surface which enforces single ownership
+    /// in the type system. Read-side methods used by barriers/consumers
+    /// (`is_available`, cursor access, gating management) are unrestricted.
     pub unsafe fn new(buffer_size: usize, wait_strategy: Arc<W>) -> Self {
         let buffer_size_i64 = i64::try_from(buffer_size).expect("buffer size must fit into i64");
         let needs_signal = wait_strategy.needs_signal();
@@ -476,9 +497,30 @@ where
             gating_sequences: ArcSwap::from_pointee(Vec::new()),
             next_value: UnsafeCell::new(-1),
             cached_value: UnsafeCell::new(-1),
+            claim_lock: AtomicBool::new(false),
             poisoned: AtomicBool::new(false),
             closed: AtomicBool::new(false),
         }
+    }
+
+    /// Acquire exclusive access to claim-state cells, or return the concurrent-driver error.
+    #[inline]
+    fn acquire_claim(&self) -> Result<SingleClaimGuard<'_>> {
+        // Swap true: if it was already true, another driver holds the lock.
+        // Failed claimants never touch next_value/cached_value → no data race.
+        if self.claim_lock.swap(true, Ordering::Acquire) {
+            return Err(DisruptorError::ConcurrentClaimDriver);
+        }
+        Ok(SingleClaimGuard(&self.claim_lock))
+    }
+
+    /// Non-blocking claim lock for try paths (`None` = busy or unavailable).
+    #[inline]
+    fn try_acquire_claim(&self) -> Option<SingleClaimGuard<'_>> {
+        if self.claim_lock.swap(true, Ordering::Acquire) {
+            return None;
+        }
+        Some(SingleClaimGuard(&self.claim_lock))
     }
 
     #[inline]
@@ -591,8 +633,12 @@ where
             return Err(DisruptorError::Poisoned);
         }
 
+        // Serializes claim-state access so concurrent Arc drivers fail closed
+        // instead of racing on next_value/cached_value (residual 2026-07-19).
+        let _claim = self.acquire_claim()?;
+
         // This follows the exact LMAX Disruptor SingleProducerSequencer.next(int n) logic.
-        // SAFETY: single-publisher exclusive access.
+        // SAFETY: claim_lock held — exclusive access to next/cached cells.
         let next_value = unsafe { self.next_value() };
         let next_sequence = next_value + n;
         let wrap_point = next_sequence - self.buffer_size_i64;
@@ -646,6 +692,8 @@ where
             return None;
         }
 
+        let _claim = self.try_acquire_claim()?;
+
         // This follows the exact LMAX Disruptor SingleProducerSequencer.tryNext(int n) logic
         let Ok(required) = usize::try_from(n) else {
             return None;
@@ -656,7 +704,7 @@ where
         }
 
         // Update next_value and return the sequence (equivalent to this.nextValue += n)
-        // SAFETY: single-publisher exclusive access.
+        // SAFETY: claim_lock held — exclusive access to next/cached cells.
         let next_sequence = unsafe { self.next_value() + n };
         unsafe { self.set_next_value(next_sequence) };
 
@@ -700,8 +748,14 @@ where
     }
 
     fn remaining_capacity(&self) -> i64 {
-        // This follows the exact LMAX Disruptor SingleProducerSequencer.remainingCapacity logic
-        // SAFETY: single-publisher exclusive access.
+        // This follows the exact LMAX Disruptor SingleProducerSequencer.remainingCapacity logic.
+        // If another thread holds the claim lock, report 0 (conservative "full") rather
+        // than racing on next_value — remaining_capacity is advisory for try-path
+        // classification and never authorizes a claim by itself.
+        let Some(_claim) = self.try_acquire_claim() else {
+            return 0;
+        };
+        // SAFETY: claim_lock held.
         let next_value = unsafe { self.next_value() };
         let consumed = self.gating_minimum(next_value);
         let used_capacity = next_value.saturating_sub(consumed);
@@ -709,6 +763,9 @@ where
     }
 
     fn has_available_capacity(&self, required_capacity: usize) -> bool {
+        let Some(_claim) = self.try_acquire_claim() else {
+            return false;
+        };
         self.has_available_capacity_internal(required_capacity, false)
     }
 
@@ -2196,5 +2253,41 @@ mod tests {
         assert_eq!(multi.remaining_capacity(), 8);
         multi.try_next_n(4);
         assert_eq!(multi.remaining_capacity(), 8);
+    }
+
+    /// Residual: two threads sharing an Arc after `unsafe { SingleProducerSequencer::new }`
+    /// used to data-race on next_value. Concurrent drivers must now fail closed.
+    #[test]
+    fn test_single_concurrent_claim_driver_rejected() {
+        use std::time::Duration;
+
+        let sequencer =
+            Arc::new(unsafe { SingleProducerSequencer::new(8, Arc::new(BusySpinWaitStrategy)) });
+        let consumer = Arc::new(Sequence::new(-1));
+        sequencer.add_gating_sequences(std::slice::from_ref(&consumer));
+
+        // Fill the ring so a subsequent next() blocks waiting on the consumer,
+        // holding the claim lock for the whole spin.
+        assert_eq!(sequencer.try_next_n(8), Some(7));
+
+        let blocked = Arc::clone(&sequencer);
+        let joiner = std::thread::spawn(move || blocked.next());
+
+        // Give the blocked thread time to enter next() and hold claim_lock.
+        std::thread::sleep(Duration::from_millis(50));
+
+        match sequencer.next() {
+            Err(DisruptorError::ConcurrentClaimDriver) => {}
+            other => panic!("expected ConcurrentClaimDriver, got {other:?}"),
+        }
+        assert!(
+            sequencer.try_next().is_none(),
+            "try path must also refuse a concurrent driver"
+        );
+
+        // Unblock the first claimer and ensure it completes cleanly.
+        consumer.set(7);
+        let claimed = joiner.join().expect("blocked claimer must not panic");
+        assert_eq!(claimed.unwrap(), 8);
     }
 }

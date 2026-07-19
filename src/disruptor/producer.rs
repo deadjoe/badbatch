@@ -69,6 +69,9 @@ pub enum TryPublishError {
     /// The sequencer was closed by shutdown/halt — terminal; retrying will
     /// never succeed.
     Shutdown,
+    /// Nested single-producer DSL publish from inside a translator callback.
+    /// Not transient: retrying the same nested call will fail the same way.
+    ReentrantPublish,
 }
 
 impl TryPublishError {
@@ -103,7 +106,8 @@ impl TryPublishError {
     /// `true` when the rejection is transient backpressure and retrying is
     /// meaningful.
     ///
-    /// [`TryPublishError::InvalidBatchSize`] is neither transient nor a
+    /// [`TryPublishError::InvalidBatchSize`] and
+    /// [`TryPublishError::ReentrantPublish`] are neither transient nor a
     /// terminal pipeline state: the pipeline is still usable, but retrying the
     /// same invalid request can never succeed.
     pub fn is_transient(&self) -> bool {
@@ -135,6 +139,10 @@ impl std::fmt::Display for TryPublishError {
                 f,
                 "Sequencer is closed (shutdown/halt); publishing is disabled"
             ),
+            Self::ReentrantPublish => write!(
+                f,
+                "Reentrant publish from inside a single-producer DSL translator"
+            ),
         }
     }
 }
@@ -144,9 +152,11 @@ impl std::error::Error for TryPublishError {
         match self {
             Self::Full(e) => Some(e),
             Self::MissingFreeSlots(e) => Some(e),
-            Self::Contended | Self::InvalidBatchSize { .. } | Self::Poisoned | Self::Shutdown => {
-                None
-            }
+            Self::Contended
+            | Self::InvalidBatchSize { .. }
+            | Self::Poisoned
+            | Self::Shutdown
+            | Self::ReentrantPublish => None,
         }
     }
 }
@@ -568,9 +578,19 @@ where
         T: 'a,
         F: FnOnce(BatchIterMut<'a, T>),
     {
+        // Validate before claim so zero / over-capacity / unrepresentable sizes
+        // never panic or silently drop (aligned with try_batch_publish).
+        let capacity = self.sequencer.get_buffer_size();
+        if n == 0 || n > capacity {
+            return Err(crate::disruptor::DisruptorError::InvalidSequence(
+                i64::try_from(n).unwrap_or(i64::MAX),
+            ));
+        }
+        let batch_size = i64::try_from(n)
+            .map_err(|_| crate::disruptor::DisruptorError::InvalidSequence(i64::MAX))?;
+
         // Claim n sequences from the sequencer (blocking). Claim errors are
         // delivered to the caller, never logged-and-dropped (2026-07-18 audit).
-        let batch_size = i64::try_from(n).expect("batch size must fit in i64");
         let end_sequence = self.sequencer.next_n(batch_size)?;
         let start_sequence = end_sequence - (batch_size - 1);
 
@@ -805,6 +825,10 @@ mod tests {
         let shutdown = TryPublishError::Shutdown;
         assert!(shutdown.is_terminal());
         assert!(!shutdown.is_transient());
+
+        let reentrant = TryPublishError::ReentrantPublish;
+        assert!(!reentrant.is_terminal());
+        assert!(!reentrant.is_transient());
 
         // The wrapped transient errors remain accessible as sources.
         assert!(std::error::Error::source(&full).is_some());

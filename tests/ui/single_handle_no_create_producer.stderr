@@ -1,0 +1,11 @@
+error[E0599]: no method named `create_producer` found for struct `DisruptorHandle<MyEvent, BusySpinWaitStrategy>` in the current scope
+  --> tests/ui/single_handle_no_create_producer.rs:12:25
+   |
+12 |     let _extra = handle.create_producer();
+   |                         ^^^^^^^^^^^^^^^
+   |
+help: there is a method `producer` with a similar name
+   |
+12 -     let _extra = handle.create_producer();
+12 +     let _extra = handle.producer();
+   |

@@ -4,8 +4,9 @@
 
 use badbatch::disruptor::event_translator::ClosureEventTranslator;
 use badbatch::disruptor::{
-    build_single_producer, BusySpinWaitStrategy, DefaultEventFactory, Disruptor, DisruptorError,
-    EventHandler, ProducerType, Result as DisruptorResult, TryPublishError,
+    build_multi_producer, build_single_producer, BusySpinWaitStrategy, DefaultEventFactory,
+    Disruptor, DisruptorError, EventHandler, Producer, ProducerType, Result as DisruptorResult,
+    TryPublishError,
 };
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -108,4 +109,53 @@ fn dsl_shutdown_drains_published_backlog() {
         matches!(result, Err(DisruptorError::Shutdown)),
         "expected Shutdown, got {result:?}"
     );
+    assert!(disruptor.is_claim_closed());
+    assert!(!disruptor.is_poisoned());
+}
+
+/// Handle lifecycle queries reflect claim-path and poison state.
+#[test]
+fn handle_lifecycle_queries() {
+    let mut handle = build_single_producer(16, Event::default, BusySpinWaitStrategy)
+        .handle_events_with(|_e: &mut Event, _s, _eob| {})
+        .build();
+
+    assert!(!handle.is_poisoned());
+    assert!(!handle.is_claim_closed());
+    handle.halt();
+    assert!(handle.is_claim_closed());
+    assert!(handle.is_shutdown());
+
+    // Multi-mode CloneableProducer is the supported public mint path.
+    let mut multi = build_multi_producer(16, Event::default, BusySpinWaitStrategy)
+        .handle_events_with(|_e: &mut Event, _s, _eob| {})
+        .build();
+    let shared = multi.cloneable_producer();
+    let mut p1 = shared.create_producer();
+    let mut p2 = shared.clone().create_producer();
+    p1.publish(|e| e.value = 1).unwrap();
+    p2.publish(|e| e.value = 2).unwrap();
+    multi.shutdown();
+    assert!(multi.is_claim_closed());
+}
+
+/// DSL `try_publish_event` reports terminal Shutdown distinctly from Full.
+#[test]
+fn dsl_try_publish_reports_shutdown_terminal() {
+    let factory = DefaultEventFactory::<Event>::new();
+    let mut disruptor = Disruptor::new(factory, 8, ProducerType::Single, BusySpinWaitStrategy)
+        .unwrap()
+        .handle_events_with(CountingHandler {
+            seen: Arc::new(AtomicI64::new(0)),
+        })
+        .build();
+    disruptor.start().unwrap();
+    disruptor.halt().unwrap();
+
+    match disruptor.try_publish_event(ClosureEventTranslator::new(|e: &mut Event, _| {
+        e.value = 1;
+    })) {
+        Err(TryPublishError::Shutdown) => {}
+        other => panic!("expected TryPublishError::Shutdown, got {other:?}"),
+    }
 }

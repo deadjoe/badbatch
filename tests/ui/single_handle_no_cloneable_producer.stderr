@@ -1,0 +1,11 @@
+error[E0599]: no method named `cloneable_producer` found for struct `DisruptorHandle<MyEvent, BusySpinWaitStrategy>` in the current scope
+  --> tests/ui/single_handle_no_cloneable_producer.rs:12:26
+   |
+12 |     let _shared = handle.cloneable_producer();
+   |                          ^^^^^^^^^^^^^^^^^^
+   |
+help: there is a method `into_producer` with a similar name
+   |
+12 -     let _shared = handle.cloneable_producer();
+12 +     let _shared = handle.into_producer();
+   |
