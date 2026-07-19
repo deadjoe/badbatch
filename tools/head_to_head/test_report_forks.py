@@ -23,6 +23,12 @@ def artifact(language: str, pair_id: str, fork_index: int, ops: float) -> dict:
         "buffer_size": 65536,
         "events_total": 1000,
         "batch_size": 1,
+        "cpu_affinity": {
+            "requested_cpu_list": [2, 3],
+            "mode": "per-thread",
+            "verified_all": True,
+            "role_cpu_map": {"publisher": 2, "consumer": 3},
+        },
         "rounds": [
             {"phase": "warmup", "ops_per_sec": ops / 2, "checksum_valid": True},
             {"phase": "measured", "ops_per_sec": ops, "checksum_valid": True},
@@ -40,11 +46,13 @@ class ForkReportTest(unittest.TestCase):
                 "timestamp_utc": "2026-07-19T01:02:03.000000Z",
                 "unix_ns": 100,
                 "loadavg": [1.0, 2.0, 3.0],
+                "linux_host": {"procs_running": 1, "cpu_times": {"cpu": {"steal": 0}}},
             }
             ended = {
                 "timestamp_utc": "2026-07-19T01:02:04.000000Z",
                 "unix_ns": 250,
                 "loadavg": [1.5, 2.5, 3.5],
+                "linux_host": {"procs_running": 2, "cpu_times": {"cpu": {"steal": 0}}},
             }
 
             record_fork.annotate(path, started, ended, 0)
@@ -53,6 +61,8 @@ class ForkReportTest(unittest.TestCase):
             self.assertEqual(150, provenance["orchestrator_elapsed_ns"])
             self.assertEqual([1.0, 2.0, 3.0], provenance["loadavg_at_start"])
             self.assertEqual([1.5, 2.5, 3.5], provenance["loadavg_at_end"])
+            self.assertEqual(1, provenance["linux_host_at_start"]["procs_running"])
+            self.assertEqual(2, provenance["linux_host_at_end"]["procs_running"])
             self.assertEqual(0, provenance["process_exit_code"])
 
     def test_loads_and_summarizes_complete_pairs(self) -> None:
@@ -94,6 +104,28 @@ class ForkReportTest(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "incomplete pair"):
                 report_forks.load_pairs(root)
+
+    def test_rejects_affinity_mismatch_within_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            pair_id = "unicast-001"
+            rust = artifact("rust", pair_id, 1, 100.0)
+            java = artifact("java", pair_id, 1, 100.0)
+            java["cpu_affinity"]["role_cpu_map"]["consumer"] = 4
+            (root / "rust_unicast-001.json").write_text(json.dumps(rust))
+            (root / "java_unicast-001.json").write_text(json.dumps(java))
+            with self.assertRaisesRegex(ValueError, "metadata mismatch"):
+                report_forks.load_pairs(root)
+
+    def test_loads_legacy_artifact_without_affinity_metadata(self) -> None:
+        data = artifact("rust", "unicast-001", 1, 100.0)
+        del data["cpu_affinity"]
+        with tempfile.TemporaryDirectory() as temp:
+            path = pathlib.Path(temp) / "rust_unicast-001.json"
+            path.write_text(json.dumps(data))
+            sample = report_forks.load_sample(path)
+            self.assertEqual("legacy-unrecorded", sample.cpu_affinity_mode)
+            self.assertFalse(sample.affinity_verified_all)
 
 
 if __name__ == "__main__":

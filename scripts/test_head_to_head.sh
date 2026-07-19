@@ -6,8 +6,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 python3 tools/head_to_head/test_report_forks.py
+bash scripts/setup_head_to_head_lmax.sh
 
-RESULTS_DIR="$(mktemp -d /private/tmp/badbatch-h2h-smoke.XXXXXX)"
+TMP_ROOT="${TMPDIR:-/tmp}"
+RESULTS_DIR="$(mktemp -d "${TMP_ROOT%/}/badbatch-h2h-smoke.XXXXXX")"
 export RUSTFLAGS="${RUSTFLAGS:--C target-cpu=native}"
 
 bash scripts/run_head_to_head.sh \
@@ -39,6 +41,11 @@ for path in rust + java:
     assert data["fork_index"] in {1, 2}
     assert data["harness_git_rev"]
     assert data["implementation_rev"]
+    affinity = data["cpu_affinity"]
+    assert affinity["requested_cpu_list"] == []
+    assert affinity["mode"] == "none"
+    assert affinity["verified_all"] is False
+    assert affinity["role_cpu_map"] == {}
     provenance = data["fork_provenance"]
     assert provenance["started_at_utc"].endswith("Z")
     assert provenance["ended_at_utc"].endswith("Z")
@@ -48,6 +55,11 @@ for path in rust + java:
     for key in ("loadavg_at_start", "loadavg_at_end"):
         loadavg = provenance[key]
         assert loadavg is None or len(loadavg) == 3
+    for key in ("linux_host_at_start", "linux_host_at_end"):
+        host = provenance[key]
+        if host is not None:
+            assert "cpu" in host["cpu_times"]
+            assert "steal" in host["cpu_times"]["cpu"]
     orders.add(data["run_order"])
 
 assert orders == {"rust-then-java", "java-then-rust"}, orders

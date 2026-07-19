@@ -22,6 +22,7 @@ use badbatch::disruptor::{
     build_multi_producer, build_single_producer, BusySpinWaitStrategy, EventHandler, Producer,
     Result as DisruptorResult, SlotPadding, YieldingWaitStrategy,
 };
+use core_affinity::CoreId;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -198,6 +199,8 @@ struct Config {
     impl_label: String,
     output: Option<PathBuf>,
     timeout: Duration,
+    cpu_list: Vec<usize>,
+    affinity_failed: Arc<AtomicBool>,
 }
 
 fn parse_args() -> Result<Config, String> {
@@ -220,6 +223,7 @@ fn parse_args() -> Result<Config, String> {
     let mut impl_label = "badbatch-builder".into();
     let mut output = None;
     let mut quick = false;
+    let mut cpu_list = Vec::new();
 
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -316,6 +320,9 @@ fn parse_args() -> Result<Config, String> {
             "--output" => {
                 output = Some(PathBuf::from(args.next().ok_or("missing --output")?));
             }
+            "--cpu-list" => {
+                cpu_list = parse_cpu_list(&args.next().ok_or("missing --cpu-list")?)?;
+            }
             "--quick" => quick = true,
             "--help" | "-h" => {
                 print_help();
@@ -350,6 +357,17 @@ fn parse_args() -> Result<Config, String> {
     if pad != Pad::None && scenario == Scenario::MpscBatch {
         return Err("event-padding not supported for mpsc_batch in this harness".into());
     }
+    let required_cpus = match scenario {
+        Scenario::Unicast | Scenario::UnicastBatch => 2,
+        Scenario::MpscBatch | Scenario::Pipeline => 4,
+    };
+    if !cpu_list.is_empty() && cpu_list.len() < required_cpus {
+        return Err(format!(
+            "scenario {} requires at least {required_cpus} CPUs, got {}",
+            scenario.as_str(),
+            cpu_list.len()
+        ));
+    }
     if quick {
         warmup_rounds = warmup_rounds.min(1);
         measured_rounds = measured_rounds.min(2);
@@ -374,7 +392,79 @@ fn parse_args() -> Result<Config, String> {
         impl_label,
         output,
         timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+        cpu_list,
+        affinity_failed: Arc::new(AtomicBool::new(false)),
     })
+}
+
+fn parse_cpu_list(value: &str) -> Result<Vec<usize>, String> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cpus = value
+        .split(',')
+        .map(|part| {
+            part.parse::<usize>()
+                .map_err(|error| format!("invalid CPU {part:?}: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut unique = cpus.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    if unique.len() != cpus.len() {
+        return Err("cpu-list must contain unique CPU IDs".into());
+    }
+    Ok(cpus)
+}
+
+impl Config {
+    fn cpu(&self, index: usize) -> Option<usize> {
+        self.cpu_list.get(index).copied()
+    }
+
+    fn affinity_verified_all(&self) -> bool {
+        !self.cpu_list.is_empty() && !self.affinity_failed.load(Ordering::Acquire)
+    }
+
+    fn affinity_roles(&self) -> Vec<(&'static str, usize)> {
+        if self.cpu_list.is_empty() {
+            return Vec::new();
+        }
+        match self.scenario {
+            Scenario::Unicast | Scenario::UnicastBatch => vec![
+                ("publisher", self.cpu_list[0]),
+                ("consumer", self.cpu_list[1]),
+            ],
+            Scenario::MpscBatch => vec![
+                ("coordinator", self.cpu_list[0]),
+                ("producer_0", self.cpu_list[0]),
+                ("producer_1", self.cpu_list[1]),
+                ("producer_2", self.cpu_list[2]),
+                ("consumer", self.cpu_list[3]),
+            ],
+            Scenario::Pipeline => vec![
+                ("publisher", self.cpu_list[0]),
+                ("stage_1", self.cpu_list[1]),
+                ("stage_2", self.cpu_list[2]),
+                ("stage_3", self.cpu_list[3]),
+            ],
+        }
+    }
+}
+
+fn pin_current_thread(cpu: Option<usize>, failed: &AtomicBool) {
+    let Some(cpu) = cpu else {
+        return;
+    };
+    let set = core_affinity::set_for_current(CoreId { id: cpu });
+    #[cfg(target_os = "linux")]
+    let verified =
+        set && core_affinity::get_core_ids().is_some_and(|ids| ids.len() == 1 && ids[0].id == cpu);
+    #[cfg(not(target_os = "linux"))]
+    let verified = set;
+    if !verified {
+        failed.store(true, Ordering::Release);
+    }
 }
 
 fn print_help() {
@@ -397,6 +487,7 @@ Options:
   --implementation-rev <rev>     (orchestrator provenance)
   --harness-dirty <true|false>    (orchestrator provenance)
   --implementation-dirty <bool>  (orchestrator provenance)
+  --cpu-list <N,N,...>          (pin measured worker roles to logical CPUs)
   --impl-label <label>           (default badbatch-builder)
   --output <path.json>
   --quick                        (smaller defaults / fewer rounds)
@@ -496,6 +587,8 @@ struct TerminalHandler {
     final_sequence: i64,
     local_checksum: u64,
     mode: TerminalMode,
+    cpu_affinity: Option<usize>,
+    affinity_failed: Arc<AtomicBool>,
 }
 
 impl TerminalHandler {
@@ -505,6 +598,8 @@ impl TerminalHandler {
         ready: Arc<AtomicU64>,
         events_total: u64,
         mode: TerminalMode,
+        cpu_affinity: Option<usize>,
+        affinity_failed: Arc<AtomicBool>,
     ) -> Self {
         Self {
             processed,
@@ -514,6 +609,8 @@ impl TerminalHandler {
             final_sequence: i64::try_from(events_total).expect("events_total must fit i64") - 1,
             local_checksum: 0,
             mode,
+            cpu_affinity,
+            affinity_failed,
         }
     }
 
@@ -546,6 +643,7 @@ impl EventHandler<ComparisonEvent> for TerminalHandler {
     }
 
     fn on_start(&mut self) -> DisruptorResult<()> {
+        pin_current_thread(self.cpu_affinity, &self.affinity_failed);
         self.ready.fetch_add(1, Ordering::Release);
         Ok(())
     }
@@ -554,6 +652,8 @@ impl EventHandler<ComparisonEvent> for TerminalHandler {
 struct PipelineStageHandler {
     stage: u8,
     ready: Arc<AtomicU64>,
+    cpu_affinity: Option<usize>,
+    affinity_failed: Arc<AtomicBool>,
 }
 
 impl EventHandler<ComparisonEvent> for PipelineStageHandler {
@@ -572,6 +672,7 @@ impl EventHandler<ComparisonEvent> for PipelineStageHandler {
     }
 
     fn on_start(&mut self) -> DisruptorResult<()> {
+        pin_current_thread(self.cpu_affinity, &self.affinity_failed);
         self.ready.fetch_add(1, Ordering::Release);
         Ok(())
     }
@@ -604,6 +705,8 @@ where
             Arc::clone(&ready),
             cfg.events_total,
             TerminalMode::Value,
+            cfg.cpu(1),
+            Arc::clone(&cfg.affinity_failed),
         );
 
         let mut handle =
@@ -615,6 +718,10 @@ where
         if !wait_count(&ready, 1, cfg.timeout) {
             handle.shutdown();
             return Err("timeout waiting for unicast consumer readiness".into());
+        }
+        if cfg.affinity_failed.load(Ordering::Acquire) {
+            handle.shutdown();
+            return Err("failed to pin unicast worker threads".into());
         }
 
         let start = Instant::now();
@@ -698,6 +805,8 @@ where
             Arc::clone(&ready),
             cfg.events_total,
             TerminalMode::Value,
+            cfg.cpu(3),
+            Arc::clone(&cfg.affinity_failed),
         );
 
         let mut handle =
@@ -708,6 +817,10 @@ where
         if !wait_count(&ready, 1, cfg.timeout) {
             handle.shutdown();
             return Err("timeout waiting for mpsc consumer readiness".into());
+        }
+        if cfg.affinity_failed.load(Ordering::Acquire) {
+            handle.shutdown();
+            return Err("failed to pin mpsc consumer thread".into());
         }
 
         let start_flag = Arc::new(AtomicBool::new(false));
@@ -720,7 +833,10 @@ where
             let batch = cfg.batch_size;
             let range_start = per * id as u64;
             let range_end = range_start + per;
+            let producer_cpu = cfg.cpu(id);
+            let affinity_failed = Arc::clone(&cfg.affinity_failed);
             joins.push(thread::spawn(move || {
+                pin_current_thread(producer_cpu, &affinity_failed);
                 producers_ready.fetch_add(1, Ordering::Release);
                 while !start_flag.load(Ordering::Acquire) {
                     std::hint::spin_loop();
@@ -745,6 +861,10 @@ where
         if !wait_count(&producers_ready, MPSC_PRODUCERS as u64, cfg.timeout) {
             handle.shutdown();
             return Err("timeout waiting for mpsc producer readiness".into());
+        }
+        if cfg.affinity_failed.load(Ordering::Acquire) {
+            handle.shutdown();
+            return Err("failed to pin mpsc producer threads".into());
         }
 
         let start = Instant::now();
@@ -799,10 +919,14 @@ where
         let stage1 = PipelineStageHandler {
             stage: 1,
             ready: Arc::clone(&ready),
+            cpu_affinity: cfg.cpu(1),
+            affinity_failed: Arc::clone(&cfg.affinity_failed),
         };
         let stage2 = PipelineStageHandler {
             stage: 2,
             ready: Arc::clone(&ready),
+            cpu_affinity: cfg.cpu(2),
+            affinity_failed: Arc::clone(&cfg.affinity_failed),
         };
         let stage3 = TerminalHandler::new(
             Arc::clone(&processed),
@@ -810,6 +934,8 @@ where
             Arc::clone(&ready),
             cfg.events_total,
             TerminalMode::Pipeline,
+            cfg.cpu(3),
+            Arc::clone(&cfg.affinity_failed),
         );
 
         let mut handle =
@@ -825,6 +951,10 @@ where
         if !wait_count(&ready, 3, cfg.timeout) {
             handle.shutdown();
             return Err("timeout waiting for pipeline stage readiness".into());
+        }
+        if cfg.affinity_failed.load(Ordering::Acquire) {
+            handle.shutdown();
+            return Err("failed to pin pipeline worker threads".into());
         }
 
         let start = Instant::now();
@@ -922,6 +1052,48 @@ fn write_result(cfg: &Config, rounds: &[Round], summary: &Summary) -> String {
     )
     .unwrap();
     writeln!(out, "  \"git_rev\": \"{local_rev}\",").unwrap();
+    out.push_str("  \"cpu_affinity\": {\n");
+    out.push_str("    \"requested_cpu_list\": [");
+    for (index, cpu) in cfg.cpu_list.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        write!(out, "{cpu}").unwrap();
+    }
+    out.push_str("],\n");
+    writeln!(
+        out,
+        "    \"mode\": \"{}\",",
+        if cfg.cpu_list.is_empty() {
+            "none"
+        } else {
+            "per-thread"
+        }
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    \"verified_all\": {},",
+        cfg.affinity_verified_all()
+    )
+    .unwrap();
+    out.push_str("    \"role_cpu_map\": {");
+    let roles = cfg.affinity_roles();
+    if roles.is_empty() {
+        out.push_str("}\n");
+    } else {
+        out.push('\n');
+        for (index, (role, cpu)) in roles.iter().enumerate() {
+            writeln!(
+                out,
+                "      \"{role}\": {cpu}{}",
+                if index + 1 == roles.len() { "" } else { "," }
+            )
+            .unwrap();
+        }
+        out.push_str("    }\n");
+    }
+    out.push_str("  },\n");
     out.push_str("  \"rounds\": [\n");
     for (idx, r) in rounds.iter().enumerate() {
         out.push_str("    {\n");
@@ -991,6 +1163,12 @@ fn main() {
         }
     };
 
+    pin_current_thread(cfg.cpu(0), &cfg.affinity_failed);
+    if !cfg.cpu_list.is_empty() && cfg.affinity_failed.load(Ordering::Acquire) {
+        eprintln!("error: failed to pin publisher/coordinator thread");
+        std::process::exit(1);
+    }
+
     let rounds = match cfg.scenario {
         Scenario::Unicast => run_unicast(&cfg, false),
         Scenario::UnicastBatch => run_unicast(&cfg, true),
@@ -1040,6 +1218,8 @@ mod tests {
             Arc::clone(&ready),
             3,
             TerminalMode::Value,
+            None,
+            Arc::new(AtomicBool::new(false)),
         );
 
         handler.on_start().unwrap();

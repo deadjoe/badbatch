@@ -29,6 +29,10 @@ class Sample:
     buffer_size: int
     events_total: int
     batch_size: int
+    cpu_affinity_mode: str
+    requested_cpu_list: tuple[int, ...]
+    affinity_verified_all: bool
+    role_cpu_map: tuple[tuple[str, int], ...]
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,21 @@ def load_sample(path: pathlib.Path) -> Sample:
     missing = [key for key in required if key not in data]
     if missing:
         raise ValueError(f"{path}: missing fork metadata: {', '.join(missing)}")
+    affinity = data.get(
+        "cpu_affinity",
+        {
+            "requested_cpu_list": [],
+            "mode": "legacy-unrecorded",
+            "verified_all": False,
+            "role_cpu_map": {},
+        },
+    )
+    if not isinstance(affinity, dict):
+        raise ValueError(f"{path}: cpu_affinity must be an object")
+    requested_cpu_list = tuple(int(cpu) for cpu in affinity.get("requested_cpu_list", []))
+    role_cpu_map = tuple(
+        sorted((str(role), int(cpu)) for role, cpu in affinity.get("role_cpu_map", {}).items())
+    )
     return Sample(
         language=str(data["language"]),
         scenario=str(data["scenario"]),
@@ -80,6 +99,10 @@ def load_sample(path: pathlib.Path) -> Sample:
         buffer_size=int(data["buffer_size"]),
         events_total=int(data["events_total"]),
         batch_size=int(data["batch_size"]),
+        cpu_affinity_mode=str(affinity.get("mode", "none")),
+        requested_cpu_list=requested_cpu_list,
+        affinity_verified_all=bool(affinity.get("verified_all", False)),
+        role_cpu_map=role_cpu_map,
     )
 
 
@@ -117,6 +140,10 @@ def load_pairs(results_dir: pathlib.Path) -> list[Pair]:
             and rust.buffer_size == java.buffer_size
             and rust.events_total == java.events_total
             and rust.batch_size == java.batch_size
+            and rust.cpu_affinity_mode == java.cpu_affinity_mode
+            and rust.requested_cpu_list == java.requested_cpu_list
+            and rust.affinity_verified_all == java.affinity_verified_all
+            and rust.role_cpu_map == java.role_cpu_map
         )
         if not comparable:
             raise ValueError(f"metadata mismatch in pair {scenario}/{pair_id}")
@@ -240,6 +267,7 @@ def render_report(
             "- Fork-level CV describes dispersion across processes. It does not establish unimodality or a portable ranking.\n",
             "- Inspect `fork_samples.csv` or the raw JSON scatter before interpreting the aggregate medians.\n",
             "- No automatic fast/slow-mode threshold is applied by this report.\n",
+            "- Per-thread CPU affinity metadata must match within every Rust/Java pair; when requested, each process hard-fails before timing unless every measured role verifies its CPU.\n",
         ]
     )
     if minimum_pairs < 20:

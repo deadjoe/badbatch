@@ -16,14 +16,17 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * LMAX Disruptor side of the BadBatch head-to-head harness.
@@ -69,16 +72,22 @@ public final class HeadToHead
 
     private static List<Round> runScenario(final Config config) throws Exception
     {
-        return switch (config.scenario)
+        final AffinityTracker affinity = new AffinityTracker(config);
+        affinity.pinCurrent(0, "publisher/coordinator");
+        affinity.verify("publisher/coordinator");
+        final List<Round> rounds = switch (config.scenario)
         {
-            case UNICAST -> runUnicast(config, false);
-            case UNICAST_BATCH -> runUnicast(config, true);
-            case MPSC_BATCH -> runMpscBatch(config);
-            case PIPELINE -> runPipeline(config);
+            case UNICAST -> runUnicast(config, affinity, false);
+            case UNICAST_BATCH -> runUnicast(config, affinity, true);
+            case MPSC_BATCH -> runMpscBatch(config, affinity);
+            case PIPELINE -> runPipeline(config, affinity);
         };
+        config.affinityVerifiedAll = affinity.verifiedAll();
+        return rounds;
     }
 
-    private static List<Round> runUnicast(final Config config, final boolean batch) throws Exception
+    private static List<Round> runUnicast(
+            final Config config, final AffinityTracker affinity, final boolean batch) throws Exception
     {
         final long expected = arithmeticChecksum(config.eventsTotal);
         final int totalRounds = config.warmupRounds + config.measuredRounds;
@@ -90,7 +99,8 @@ public final class HeadToHead
             final AtomicLong processed = new AtomicLong();
             final AtomicLong checksum = new AtomicLong();
             final SummingHandler handler =
-                    new SummingHandler(processed, checksum, ready, config.eventsTotal);
+                    new SummingHandler(processed, checksum, ready, config.eventsTotal, affinity, 1,
+                            "consumer");
 
             final RingBuffer<ComparisonEvent> ring =
                     RingBuffer.createSingleProducer(
@@ -104,6 +114,7 @@ public final class HeadToHead
                     Executors.newSingleThreadExecutor(DaemonThreadFactory.INSTANCE);
             executor.submit(processor);
             waitForCount(ready, 1, "unicast consumer ready");
+            affinity.verify("unicast consumer");
 
             final long start = System.nanoTime();
             if (batch)
@@ -155,7 +166,8 @@ public final class HeadToHead
         return rounds;
     }
 
-    private static List<Round> runMpscBatch(final Config config) throws Exception
+    private static List<Round> runMpscBatch(
+            final Config config, final AffinityTracker affinity) throws Exception
     {
         final long expected = arithmeticChecksum(config.eventsTotal);
         final long perProducer = config.eventsTotal / MPSC_PRODUCERS;
@@ -168,7 +180,8 @@ public final class HeadToHead
             final AtomicLong processed = new AtomicLong();
             final AtomicLong checksum = new AtomicLong();
             final SummingHandler handler =
-                    new SummingHandler(processed, checksum, ready, config.eventsTotal);
+                    new SummingHandler(processed, checksum, ready, config.eventsTotal, affinity, 3,
+                            "consumer");
 
             final RingBuffer<ComparisonEvent> ring =
                     RingBuffer.createMultiProducer(
@@ -182,6 +195,7 @@ public final class HeadToHead
                     Executors.newSingleThreadExecutor(DaemonThreadFactory.INSTANCE);
             executor.submit(processor);
             waitForCount(ready, 1, "mpsc consumer ready");
+            affinity.verify("mpsc consumer");
 
             final CountDownLatch producersReady = new CountDownLatch(MPSC_PRODUCERS);
             final CountDownLatch startSignal = new CountDownLatch(1);
@@ -191,6 +205,7 @@ public final class HeadToHead
             {
                 final int index = id;
                 producers[id] = new Thread(() -> {
+                    affinity.pinCurrent(index, "producer_" + index);
                     producersReady.countDown();
                     await(startSignal);
                     final long rangeStart = perProducer * index;
@@ -217,6 +232,7 @@ public final class HeadToHead
             }
 
             producersReady.await();
+            affinity.verify("mpsc producers");
             final long start = System.nanoTime();
             startSignal.countDown();
             for (final Thread producer : producers)
@@ -239,7 +255,8 @@ public final class HeadToHead
         return rounds;
     }
 
-    private static List<Round> runPipeline(final Config config) throws Exception
+    private static List<Round> runPipeline(
+            final Config config, final AffinityTracker affinity) throws Exception
     {
         final long expected = pipelineChecksum(config.eventsTotal);
         final int totalRounds = config.warmupRounds + config.measuredRounds;
@@ -255,17 +272,17 @@ public final class HeadToHead
                     RingBuffer.createSingleProducer(
                             ComparisonEvent::new, config.bufferSize, waitStrategy(config.wait));
 
-            final Stage1Handler stage1 = new Stage1Handler(ready);
+            final Stage1Handler stage1 = new Stage1Handler(ready, affinity, 1);
             final BatchEventProcessor<ComparisonEvent> p1 =
                     new BatchEventProcessorBuilder().build(ring, ring.newBarrier(), stage1);
 
-            final Stage2Handler stage2 = new Stage2Handler(ready);
+            final Stage2Handler stage2 = new Stage2Handler(ready, affinity, 2);
             final BatchEventProcessor<ComparisonEvent> p2 =
                     new BatchEventProcessorBuilder()
                             .build(ring, ring.newBarrier(p1.getSequence()), stage2);
 
             final Stage3Handler stage3 =
-                    new Stage3Handler(processed, checksum, ready, config.eventsTotal);
+                    new Stage3Handler(processed, checksum, ready, config.eventsTotal, affinity, 3);
             final BatchEventProcessor<ComparisonEvent> p3 =
                     new BatchEventProcessorBuilder()
                             .build(ring, ring.newBarrier(p2.getSequence()), stage3);
@@ -278,6 +295,7 @@ public final class HeadToHead
             executor.submit(p2);
             executor.submit(p3);
             waitForCount(ready, 3, "pipeline stages ready");
+            affinity.verify("pipeline stages");
 
             final long start = System.nanoTime();
             for (long v = 0; v < config.eventsTotal; v++)
@@ -381,6 +399,79 @@ public final class HeadToHead
         executor.awaitTermination(5, TimeUnit.SECONDS);
     }
 
+    private static final class AffinityTracker
+    {
+        private final Config config;
+        private final AtomicReference<String> failure = new AtomicReference<>();
+
+        AffinityTracker(final Config config)
+        {
+            this.config = config;
+        }
+
+        void pinCurrent(final int cpuIndex, final String role)
+        {
+            if (config.cpuList.isEmpty() || failure.get() != null)
+            {
+                return;
+            }
+            final int cpu = config.cpuList.get(cpuIndex);
+            try
+            {
+                if (!System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("linux"))
+                {
+                    throw new IllegalStateException("--cpu-list is supported only on Linux");
+                }
+                final Path threadLink = Files.readSymbolicLink(Path.of("/proc/thread-self"));
+                final String tid = threadLink.getFileName().toString();
+                final Process taskset = new ProcessBuilder(
+                        "taskset", "-pc", Integer.toString(cpu), tid)
+                        .redirectErrorStream(true)
+                        .start();
+                final String output = new String(taskset.getInputStream().readAllBytes(),
+                        StandardCharsets.UTF_8).trim();
+                final int status = taskset.waitFor();
+                final String observed = currentAllowedCpuList();
+                if (status != 0 || !Integer.toString(cpu).equals(observed))
+                {
+                    throw new IllegalStateException(
+                            "taskset status=" + status + " observed=" + observed + " output=" + output);
+                }
+            }
+            catch (final Exception error)
+            {
+                failure.compareAndSet(null,
+                        role + "->CPU" + cpu + " failed: " + error.getMessage());
+            }
+        }
+
+        void verify(final String phase)
+        {
+            final String message = failure.get();
+            if (message != null)
+            {
+                throw new IllegalStateException("CPU affinity failed before " + phase + ": " + message);
+            }
+        }
+
+        boolean verifiedAll()
+        {
+            return !config.cpuList.isEmpty() && failure.get() == null;
+        }
+
+        private static String currentAllowedCpuList() throws Exception
+        {
+            for (final String line : Files.readAllLines(Path.of("/proc/thread-self/status")))
+            {
+                if (line.startsWith("Cpus_allowed_list:"))
+                {
+                    return line.substring(line.indexOf(':') + 1).trim();
+                }
+            }
+            throw new IllegalStateException("Cpus_allowed_list missing from /proc/thread-self/status");
+        }
+    }
+
     // --- handlers ------------------------------------------------------------------
 
     static final class ComparisonEvent
@@ -398,24 +489,34 @@ public final class HeadToHead
         private final AtomicInteger ready;
         private final long eventsTotal;
         private final long finalSequence;
+        private final AffinityTracker affinity;
+        private final int cpuIndex;
+        private final String role;
         private long localChecksum;
 
         SummingHandler(
                 final AtomicLong processed,
                 final AtomicLong checksum,
                 final AtomicInteger ready,
-                final long eventsTotal)
+                final long eventsTotal,
+                final AffinityTracker affinity,
+                final int cpuIndex,
+                final String role)
         {
             this.processed = processed;
             this.checksum = checksum;
             this.ready = ready;
             this.eventsTotal = eventsTotal;
             this.finalSequence = eventsTotal - 1L;
+            this.affinity = affinity;
+            this.cpuIndex = cpuIndex;
+            this.role = role;
         }
 
         @Override
         public void onStart()
         {
+            affinity.pinCurrent(cpuIndex, role);
             ready.incrementAndGet();
         }
 
@@ -434,15 +535,20 @@ public final class HeadToHead
     private static final class Stage1Handler implements EventHandler<ComparisonEvent>
     {
         private final AtomicInteger ready;
+        private final AffinityTracker affinity;
+        private final int cpuIndex;
 
-        Stage1Handler(final AtomicInteger ready)
+        Stage1Handler(final AtomicInteger ready, final AffinityTracker affinity, final int cpuIndex)
         {
             this.ready = ready;
+            this.affinity = affinity;
+            this.cpuIndex = cpuIndex;
         }
 
         @Override
         public void onStart()
         {
+            affinity.pinCurrent(cpuIndex, "stage_1");
             ready.incrementAndGet();
         }
 
@@ -456,15 +562,20 @@ public final class HeadToHead
     private static final class Stage2Handler implements EventHandler<ComparisonEvent>
     {
         private final AtomicInteger ready;
+        private final AffinityTracker affinity;
+        private final int cpuIndex;
 
-        Stage2Handler(final AtomicInteger ready)
+        Stage2Handler(final AtomicInteger ready, final AffinityTracker affinity, final int cpuIndex)
         {
             this.ready = ready;
+            this.affinity = affinity;
+            this.cpuIndex = cpuIndex;
         }
 
         @Override
         public void onStart()
         {
+            affinity.pinCurrent(cpuIndex, "stage_2");
             ready.incrementAndGet();
         }
 
@@ -482,24 +593,31 @@ public final class HeadToHead
         private final AtomicInteger ready;
         private final long eventsTotal;
         private final long finalSequence;
+        private final AffinityTracker affinity;
+        private final int cpuIndex;
         private long localChecksum;
 
         Stage3Handler(
                 final AtomicLong processed,
                 final AtomicLong checksum,
                 final AtomicInteger ready,
-                final long eventsTotal)
+                final long eventsTotal,
+                final AffinityTracker affinity,
+                final int cpuIndex)
         {
             this.processed = processed;
             this.checksum = checksum;
             this.ready = ready;
             this.eventsTotal = eventsTotal;
             this.finalSequence = eventsTotal - 1L;
+            this.affinity = affinity;
+            this.cpuIndex = cpuIndex;
         }
 
         @Override
         public void onStart()
         {
+            affinity.pinCurrent(cpuIndex, "stage_3");
             ready.incrementAndGet();
         }
 
@@ -583,6 +701,8 @@ public final class HeadToHead
         String implLabel = "lmax-bep";
         String outputPath;
         boolean quick;
+        List<Integer> cpuList = List.of();
+        boolean affinityVerifiedAll;
 
         static Config parse(final String[] args)
         {
@@ -621,6 +741,7 @@ public final class HeadToHead
                             c.implementationDirty = Boolean.parseBoolean(args[++i]);
                     case "--impl-label" -> c.implLabel = args[++i];
                     case "--output" -> c.outputPath = args[++i];
+                    case "--cpu-list" -> c.cpuList = parseCpuList(args[++i]);
                     case "--quick" -> c.quick = true;
                     case "--help", "-h" ->
                     {
@@ -667,7 +788,65 @@ public final class HeadToHead
             {
                 throw new IllegalArgumentException("mpsc events must be divisible by " + MPSC_PRODUCERS);
             }
+            final int requiredCpus =
+                    (c.scenario == Scenario.MPSC_BATCH || c.scenario == Scenario.PIPELINE) ? 4 : 2;
+            if (!c.cpuList.isEmpty() && c.cpuList.size() < requiredCpus)
+            {
+                throw new IllegalArgumentException(
+                        c.scenario.wire() + " requires at least " + requiredCpus + " CPUs");
+            }
             return c;
+        }
+
+        Map<String, Integer> affinityRoles()
+        {
+            final Map<String, Integer> roles = new LinkedHashMap<>();
+            if (cpuList.isEmpty())
+            {
+                return roles;
+            }
+            switch (scenario)
+            {
+                case UNICAST, UNICAST_BATCH ->
+                {
+                    roles.put("publisher", cpuList.get(0));
+                    roles.put("consumer", cpuList.get(1));
+                }
+                case MPSC_BATCH ->
+                {
+                    roles.put("coordinator", cpuList.get(0));
+                    roles.put("producer_0", cpuList.get(0));
+                    roles.put("producer_1", cpuList.get(1));
+                    roles.put("producer_2", cpuList.get(2));
+                    roles.put("consumer", cpuList.get(3));
+                }
+                case PIPELINE ->
+                {
+                    roles.put("publisher", cpuList.get(0));
+                    roles.put("stage_1", cpuList.get(1));
+                    roles.put("stage_2", cpuList.get(2));
+                    roles.put("stage_3", cpuList.get(3));
+                }
+            }
+            return roles;
+        }
+
+        private static List<Integer> parseCpuList(final String value)
+        {
+            if (value.isEmpty())
+            {
+                return List.of();
+            }
+            final List<Integer> cpus = Arrays.stream(value.split(","))
+                    .map(Integer::parseInt)
+                    .toList();
+            if (cpus.isEmpty() || cpus.stream().anyMatch(cpu -> cpu < 0)
+                    || cpus.stream().distinct().count() != cpus.size())
+            {
+                throw new IllegalArgumentException(
+                        "cpu-list must contain unique non-negative CPU IDs");
+            }
+            return cpus;
         }
     }
 
@@ -796,6 +975,37 @@ public final class HeadToHead
             bool(sb, "harness_dirty", config.harnessDirty, true, 2);
             bool(sb, "implementation_dirty", config.implementationDirty, true, 2);
             field(sb, "git_rev", config.implementationRev, true);
+            sb.append("  \"cpu_affinity\": {\n");
+            sb.append("    \"requested_cpu_list\": [");
+            for (int i = 0; i < config.cpuList.size(); i++)
+            {
+                if (i > 0)
+                {
+                    sb.append(", ");
+                }
+                sb.append(config.cpuList.get(i));
+            }
+            sb.append("],\n");
+            field(sb, "mode", config.cpuList.isEmpty() ? "none" : "per-thread", true, 4);
+            bool(sb, "verified_all", config.affinityVerifiedAll, true, 4);
+            sb.append("    \"role_cpu_map\": {");
+            final List<Map.Entry<String, Integer>> roles =
+                    new ArrayList<>(config.affinityRoles().entrySet());
+            if (!roles.isEmpty())
+            {
+                sb.append('\n');
+                for (int i = 0; i < roles.size(); i++)
+                {
+                    final Map.Entry<String, Integer> role = roles.get(i);
+                    num(sb, role.getKey(), role.getValue(), i + 1 < roles.size(), 6);
+                }
+                sb.append("    }\n");
+            }
+            else
+            {
+                sb.append("}\n");
+            }
+            sb.append("  },\n");
             sb.append("  \"rounds\": [\n");
             for (int i = 0; i < rounds.size(); i++)
             {

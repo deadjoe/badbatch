@@ -27,7 +27,12 @@ Both sides share:
 
 - Rust stable (repo `rust-toolchain.toml`)
 - JDK 17+ (`javac` / `java`)
-- LMAX sources at `examples/disruptor/src/main/java/com/lmax/disruptor/…`
+- LMAX sources provisioned at the pinned revision declared in
+  `tools/head_to_head/lmax.env`:
+
+  ```bash
+  bash scripts/setup_head_to_head_lmax.sh
+  ```
 - Optional: `RUSTFLAGS="-C target-cpu=native"` for fair native codegen on this machine
 
 ## Run
@@ -41,7 +46,8 @@ bash scripts/run_head_to_head.sh --mode full
 
 # Serious fork-level study (20 paired forks, reproducible balanced order)
 bash scripts/run_head_to_head.sh --scenario pipeline --mode full \
-  --order both-orders --forks 20 --seed 20260719
+  --order both-orders --forks 20 --seed 20260719 \
+  --cpu-list 2,3,4,5
 
 # Rust 128B slot padding (Java still heap objects — interpret carefully)
 bash scripts/run_head_to_head.sh --scenario unicast --event-padding 128 --mode quick
@@ -74,6 +80,11 @@ Outputs go to `head_to_head_results/<timestamp>/`:
 
 - The script builds Rust and Java once, then launches a fresh process for every sample.
 - The same shell/Python wrapper snapshots UTC time and system load average immediately before and after every child process; these observations are outside the measured interval and are diagnostic rather than cross-platform performance metrics.
+- On Linux, `--cpu-list` applies and verifies per-thread affinity before timing. The
+  role map is identical on both sides: unicast uses publisher/consumer; MPSC uses
+  three producers plus the consumer; pipeline uses publisher plus stages 1–3.
+  Every JSON fork artifact records the requested CPUs, role mapping, and
+  `verified_all`; the process fails before timing if any pin cannot be verified.
 - Each process performs the configured warmup rounds and exactly one measured round.
 - A pair is one Rust fork plus one Java fork with the same scenario/configuration.
 - `--order both-orders` creates a balanced order plan and shuffles it with `--seed`.
@@ -90,6 +101,7 @@ frequency or implementation ranking matters.
 - Builder orchestration cost vs bare LMAX BEP (intentional for “product API vs idiomatic LMAX”)  
 - Criterion HTML benches vs this harness (different metrics)  
 - Cross-machine absolute ops/s without pinning and power control
+- Results produced without `--cpu-list` when CPU migration would affect the claim
 - A portable ranking inferred from one host or a visibly mixed fork distribution
 
 ## Layout

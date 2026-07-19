@@ -6,6 +6,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# shellcheck source=../tools/head_to_head/lmax.env
+source tools/head_to_head/lmax.env
+
 SCENARIO="all"
 MODE="quick"
 ORDER="both-orders"
@@ -15,6 +18,7 @@ EVENTS_OVERRIDE=""
 BUFFER_OVERRIDE=""
 FORKS_OVERRIDE=""
 SEED="1"
+CPU_LIST=""
 
 usage() {
   cat <<'EOF'
@@ -33,11 +37,13 @@ Options:
   --event-padding <none|128>   Rust slot padding only
   --events-total <N>           override events for all scenarios
   --buffer-size <N>            override buffer size
+  --cpu-list <N,N,...>         Linux logical CPUs; pins every measured worker role
   --results-dir <PATH>         must be absent or empty
 
 Examples:
   bash scripts/run_head_to_head.sh --mode quick
-  bash scripts/run_head_to_head.sh --scenario pipeline --mode full --forks 20 --seed 20260719
+  bash scripts/run_head_to_head.sh --scenario pipeline --mode full --forks 20 \
+    --seed 20260719 --cpu-list 2,3,4,5
 EOF
 }
 
@@ -51,6 +57,7 @@ while [[ $# -gt 0 ]]; do
     --event-padding) PADDING="${2:?}"; shift 2 ;;
     --events-total) EVENTS_OVERRIDE="${2:?}"; shift 2 ;;
     --buffer-size) BUFFER_OVERRIDE="${2:?}"; shift 2 ;;
+    --cpu-list) CPU_LIST="${2:?}"; shift 2 ;;
     --results-dir) RESULTS_DIR="${2:?}"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
@@ -70,9 +77,36 @@ if [[ -n "$FORKS_OVERRIDE" ]]; then
   [[ "$FORKS_OVERRIDE" =~ ^[1-9][0-9]*$ ]] || { echo "--forks must be > 0" >&2; exit 1; }
 fi
 
-if [[ ! -d examples/disruptor/src/main/java/com/lmax/disruptor ]]; then
-  echo "error: examples/disruptor LMAX sources not found." >&2
+bash scripts/setup_head_to_head_lmax.sh --check
+LMAX_HEAD="$(git -C examples/disruptor rev-parse HEAD)"
+[[ "$LMAX_HEAD" == "$LMAX_GIT_REV" ]] || {
+  echo "error: expected LMAX $LMAX_GIT_REV, found $LMAX_HEAD" >&2
   exit 1
+}
+
+AFFINITY_PREFIX=(env)
+AFFINITY_ARGS=(--cpu-list "")
+if [[ -n "$CPU_LIST" ]]; then
+  command -v taskset >/dev/null || { echo "error: --cpu-list requires taskset" >&2; exit 1; }
+  CPU_LIST="$(python3 - "$CPU_LIST" "$SCENARIO" <<'PY'
+import sys
+
+raw, scenario = sys.argv[1:]
+try:
+    cpus = [int(value) for value in raw.split(",")]
+except ValueError as error:
+    raise SystemExit(f"--cpu-list must contain comma-separated non-negative integers: {error}")
+if not cpus or any(cpu < 0 for cpu in cpus) or len(set(cpus)) != len(cpus):
+    raise SystemExit("--cpu-list must contain unique non-negative integers")
+required = 4 if scenario in {"all", "mpsc_batch", "pipeline"} else 2
+if len(cpus) < required:
+    raise SystemExit(f"--cpu-list requires at least {required} CPUs for scenario {scenario}")
+print(",".join(map(str, cpus)))
+PY
+)"
+  taskset -c "$CPU_LIST" true
+  AFFINITY_PREFIX=(taskset -c "$CPU_LIST")
+  AFFINITY_ARGS=(--cpu-list "$CPU_LIST")
 fi
 for command in javac java cargo python3 shasum; do
   command -v "$command" >/dev/null || { echo "error: $command not found" >&2; exit 1; }
@@ -161,6 +195,32 @@ JAVA_CLASSES_SHA="$(directory_hash "$JAVA_CP")"
   echo "javac=$(javac -version 2>&1)"
   echo "mode=$MODE order=$ORDER padding=$PADDING scenario=$SCENARIO"
   echo "seed=$SEED forks_override=${FORKS_OVERRIDE:-default}"
+  echo "cpu_list=${CPU_LIST:-none}"
+  echo "cpu_affinity_mode=$([[ -n "$CPU_LIST" ]] && echo per-thread-verified || echo none)"
+  if [[ -r /proc/sys/kernel/nmi_watchdog ]]; then
+    echo "nmi_watchdog=$(< /proc/sys/kernel/nmi_watchdog)"
+    echo "perf_event_paranoid=$(< /proc/sys/kernel/perf_event_paranoid)"
+    echo "clocksource=$(< /sys/devices/system/clocksource/clocksource0/current_clocksource)"
+    echo "smt_control=$(< /sys/devices/system/cpu/smt/control)"
+    echo "transparent_hugepage=$(< /sys/kernel/mm/transparent_hugepage/enabled)"
+    echo "numa_balancing=$(< /proc/sys/kernel/numa_balancing)"
+    if [[ -r /sys/devices/system/cpu/intel_pstate/no_turbo ]]; then
+      echo "intel_pstate_no_turbo=$(< /sys/devices/system/cpu/intel_pstate/no_turbo)"
+    fi
+    echo "ext4lazyinit=$([[ -n "$(pgrep -x ext4lazyinit 2>/dev/null || true)" ]] && echo active || echo finished)"
+    for cpu in ${CPU_LIST//,/ }; do
+      [[ -z "$cpu" ]] && continue
+      governor_path="/sys/devices/system/cpu/cpu${cpu}/cpufreq/scaling_governor"
+      sibling_path="/sys/devices/system/cpu/cpu${cpu}/topology/thread_siblings_list"
+      [[ -r "$governor_path" ]] && echo "cpu${cpu}_governor=$(< "$governor_path")"
+      [[ -r "$sibling_path" ]] && echo "cpu${cpu}_thread_siblings=$(< "$sibling_path")"
+    done
+  fi
+  if command -v lscpu >/dev/null; then
+    echo "cpu_topology_begin"
+    lscpu -e=CPU,CORE,SOCKET,NODE,ONLINE
+    echo "cpu_topology_end"
+  fi
   echo "RUSTFLAGS=${RUSTFLAGS:-}"
 } >"$RESULTS_DIR/environment.txt"
 cp "$RESULTS_DIR/environment.txt" "$RESULTS_DIR/environment.env"
@@ -235,13 +295,14 @@ run_rust() {
   echo "[INFO] Rust $pair_id ($order_label wait=$wait buffer=$buffer events=$events)"
   local output_path="$RESULTS_DIR/rust_${stem}.json"
   run_fork_process "$output_path" "$RESULTS_DIR/rust_${stem}.stdout" \
-    ./target/release/h2h_rust \
+    "${AFFINITY_PREFIX[@]}" ./target/release/h2h_rust \
     --scenario "$scenario" --wait-strategy "$wait" --event-padding "$pad_arg" \
     --buffer-size "$buffer" --events-total "$events" --batch-size "$batch" \
     --warmup-rounds "$warmup" --measured-rounds 1 \
     --run-order "$order_label" --pair-id "$pair_id" --fork-index "$fork_index" \
     --harness-rev "$BADBATCH_REV" --implementation-rev "$BADBATCH_REV" \
     --harness-dirty "$BADBATCH_DIRTY" --implementation-dirty "$BADBATCH_DIRTY" \
+    "${AFFINITY_ARGS[@]}" \
     --impl-label "badbatch-builder" \
     --output "$output_path"
 }
@@ -255,7 +316,7 @@ run_java() {
   echo "[INFO] Java $pair_id ($order_label wait=$wait buffer=$buffer events=$events)"
   local output_path="$RESULTS_DIR/java_${stem}.json"
   run_fork_process "$output_path" "$RESULTS_DIR/java_${stem}.stdout" \
-    java -Xms2g -Xmx2g -XX:+AlwaysPreTouch -cp "$JAVA_CP" \
+    "${AFFINITY_PREFIX[@]}" java -Xms2g -Xmx2g -XX:+AlwaysPreTouch -cp "$JAVA_CP" \
     com.lmax.disruptor.headtohead.HeadToHead \
     --scenario "$scenario" --wait-strategy "$wait" --event-padding none \
     --buffer-size "$buffer" --events-total "$events" --batch-size "$batch" \
@@ -263,6 +324,7 @@ run_java() {
     --run-order "$order_label" --pair-id "$pair_id" --fork-index "$fork_index" \
     --harness-rev "$BADBATCH_REV" --implementation-rev "$LMAX_REV" \
     --harness-dirty "$BADBATCH_DIRTY" --implementation-dirty "$LMAX_DIRTY" \
+    "${AFFINITY_ARGS[@]}" \
     --impl-label "lmax-bep" \
     --output "$output_path"
 }
