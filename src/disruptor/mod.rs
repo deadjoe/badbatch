@@ -162,6 +162,22 @@ pub enum DisruptorError {
     /// advance (or exposing a never-written slot).
     #[error("Pipeline poisoned by a panicked producer or consumer")]
     Poisoned,
+
+    /// A second thread attempted to drive claim methods on a
+    /// [`SingleProducerSequencer`] while another claim was in progress.
+    ///
+    /// Single-producer sequencers store claim state in non-atomic cells; the
+    /// runtime claim lock rejects concurrent drivers instead of data-racing
+    /// (residual closure after the 2026-07-18 soundness audit).
+    #[error("Concurrent claim on a single-producer sequencer")]
+    ConcurrentClaimDriver,
+
+    /// A single-producer DSL publish re-entered `publish_event` /
+    /// `try_publish_event` from inside a translator callback while the claim
+    /// lock was already held. Nested publishes would disorder the cursor and
+    /// previously deadlocked on a non-reentrant mutex.
+    #[error("Reentrant publish on a single-producer DSL disruptor")]
+    ReentrantPublish,
 }
 
 /// Result type for Disruptor operations

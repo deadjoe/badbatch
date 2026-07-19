@@ -3,11 +3,15 @@
 //! **Legacy/extras surface.** Lightweight helper for demos/experiments with
 //! automatic batch detection and clean shutdown. Prefer the monomorphized
 //! Builder (`build_*`) or [`crate::disruptor::EventPoller`] for
-//! production-shaped topologies.
+//! production-shaped topologies — those paths poison the sequencer on handler
+//! panic automatically.
 //!
-//! Handler panics are caught: the consumer stops and re-raises on join. Pass a
-//! [`PanicHook`] (e.g. `|_| sequencer.poison()`) via the `*_with_panic_hook`
-//! constructors so producers fail fast instead of spinning on a dead gate.
+//! Handler panics are always caught: the consumer stops, records
+//! [`ElegantConsumer::is_poisoned`], runs an optional [`PanicHook`], and
+//! re-raises on join. Wire the hook to [`crate::disruptor::Sequencer::poison`]
+//! (or use [`ElegantConsumer::new_with_sequencer_poison`]) so producers fail
+//! fast instead of spinning on a dead gate. Observing `is_poisoned()` alone
+//! does **not** stop a separate producer — only a hook/sequencer poison does.
 //!
 //! Uses [`SimpleWaitStrategy`] (`backoff`); those ZSTs also implement full
 //! [`crate::disruptor::WaitStrategy`] for Builder use without adapters.
@@ -43,6 +47,8 @@ where
     sequence: Arc<CachePadded<AtomicI64>>,
     /// Shutdown signal
     shutdown: Arc<AtomicBool>,
+    /// Set when the handler panics (always; independent of [`PanicHook`]).
+    poisoned: Arc<AtomicBool>,
     /// Phantom data to hold the type parameter
     _phantom: PhantomData<T>,
 }
@@ -93,6 +99,27 @@ where
         )
     }
 
+    /// Like [`Self::new`], but poisons `sequencer` if the handler panics so
+    /// linked producers fail fast (recommended when pairing with a sequencer).
+    pub fn new_with_sequencer_poison<H, W, S>(
+        ring_buffer: Arc<RingBuffer<T>>,
+        event_handler: H,
+        wait_strategy: W,
+        sequencer: Arc<S>,
+    ) -> std::io::Result<Self>
+    where
+        H: FnMut(&T, i64, bool) + Send + 'static,
+        W: SimpleWaitStrategy + 'static,
+        S: crate::disruptor::Sequencer + 'static,
+    {
+        Self::new_with_panic_hook(
+            ring_buffer,
+            event_handler,
+            wait_strategy,
+            Arc::new(move || sequencer.poison()),
+        )
+    }
+
     fn spawn_plain<H, W>(
         ring_buffer: Arc<RingBuffer<T>>,
         event_handler: H,
@@ -106,9 +133,11 @@ where
     {
         let sequence = Arc::new(CachePadded::new(AtomicI64::new(-1)));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let poisoned = Arc::new(AtomicBool::new(false));
 
         let sequence_clone = sequence.clone();
         let shutdown_clone = shutdown.clone();
+        let poisoned_clone = Arc::clone(&poisoned);
 
         let mut builder = ThreadBuilder::new().thread_name(if core_id.is_some() {
             format!("elegant-consumer-core-{}", core_id.unwrap_or(0))
@@ -131,6 +160,7 @@ where
                 &strategy,
                 &seq,
                 &shutdown_flag,
+                &poisoned_clone,
                 panic_hook.as_ref(),
             );
         })?;
@@ -139,6 +169,7 @@ where
             thread: Some(thread),
             sequence,
             shutdown,
+            poisoned,
             _phantom: PhantomData,
         })
     }
@@ -212,9 +243,11 @@ where
     {
         let sequence = Arc::new(CachePadded::new(AtomicI64::new(-1)));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let poisoned = Arc::new(AtomicBool::new(false));
 
         let sequence_clone = sequence.clone();
         let shutdown_clone = shutdown.clone();
+        let poisoned_clone = Arc::clone(&poisoned);
 
         let thread = ThreadBuilder::new()
             .thread_name("elegant-consumer-with-state")
@@ -231,6 +264,7 @@ where
                     &strategy,
                     &seq,
                     &shutdown_flag,
+                    &poisoned_clone,
                     panic_hook.as_ref(),
                 );
             })?;
@@ -239,6 +273,7 @@ where
             thread: Some(thread),
             sequence,
             shutdown,
+            poisoned,
             _phantom: PhantomData,
         })
     }
@@ -304,6 +339,22 @@ where
             && self.thread.as_ref().is_some_and(ManagedThread::is_running)
     }
 
+    /// Whether the handler has panicked.
+    ///
+    /// Always set on panic, even without a [`PanicHook`]. Pair with
+    /// [`Self::new_with_sequencer_poison`] / `*_with_panic_hook` so producers
+    /// fail fast; this flag alone does not stop a separate publisher.
+    #[must_use]
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+
+    /// Shared poison flag (e.g. for external observers).
+    #[must_use]
+    pub fn poisoned_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.poisoned)
+    }
+
     /// Gracefully shutdown the consumer
     ///
     /// This signals the consumer to stop processing and waits for it to finish.
@@ -326,6 +377,7 @@ where
         wait_strategy: &W,
         sequence: &Arc<CachePadded<AtomicI64>>,
         shutdown: &Arc<AtomicBool>,
+        poisoned: &AtomicBool,
         panic_hook: Option<&PanicHook>,
     ) where
         H: FnMut(&T, i64, bool),
@@ -352,13 +404,14 @@ where
                     // advances past this slot.
                     let event = unsafe { ring_buffer.get(next_sequence) };
 
-                    // Catch handler panics so we can stop cleanly and optionally
-                    // poison producers (audit residual for ElegantConsumer).
+                    // Catch handler panics so we can stop cleanly, mark poisoned,
+                    // and optionally run a user hook (sequencer.poison()).
                     let result = catch_unwind(AssertUnwindSafe(|| {
                         event_handler(event, next_sequence, end_of_batch);
                     }));
                     if let Err(payload) = result {
                         shutdown.store(true, Ordering::Release);
+                        poisoned.store(true, Ordering::Release);
                         if let Some(hook) = panic_hook {
                             hook();
                         }
@@ -376,6 +429,7 @@ where
     }
 
     /// Main consumer loop with state for processing events
+    #[allow(clippy::too_many_arguments)] // loop params + poison/hook residual wiring
     fn consumer_loop_with_state<H, S, I, W>(
         ring_buffer: &Arc<RingBuffer<T>>,
         event_handler: &mut H,
@@ -383,6 +437,7 @@ where
         wait_strategy: &W,
         sequence: &Arc<CachePadded<AtomicI64>>,
         shutdown: &Arc<AtomicBool>,
+        poisoned: &AtomicBool,
         panic_hook: Option<&PanicHook>,
     ) where
         H: FnMut(&mut S, &T, i64, bool),
@@ -416,6 +471,7 @@ where
                     }));
                     if let Err(payload) = result {
                         shutdown.store(true, Ordering::Release);
+                        poisoned.store(true, Ordering::Release);
                         if let Some(hook) = panic_hook {
                             hook();
                         }
@@ -638,6 +694,7 @@ mod tests {
             thread: None,
             sequence: Arc::new(CachePadded::new(AtomicI64::new(-1))),
             shutdown: Arc::new(AtomicBool::new(true)),
+            poisoned: Arc::new(AtomicBool::new(false)),
             _phantom: PhantomData,
         };
 
@@ -879,6 +936,10 @@ mod tests {
         assert!(
             hook_fired.load(Ordering::Acquire),
             "panic hook must run before resume_unwind"
+        );
+        assert!(
+            consumer.is_poisoned(),
+            "is_poisoned must be set even without sequencer wiring"
         );
         // Thread already panicked; join via shutdown (flag is set by the loop).
         let join = consumer.shutdown();

@@ -220,13 +220,16 @@ fn benchmark_mpsc_busy_spin(group: &mut BenchmarkGroup<WallTime>, burst_size: u6
 
                 BurstProducer::new(generation, stop_flag, move || {
                     for i in 1..=burst_size {
-                        while !disruptor.try_publish_event(ClosureEventTranslator::new(
-                            move |event: &mut MPSCEvent, seq: i64| {
-                                event.producer_id = producer_id;
-                                event.value = std::hint::black_box(i as i64);
-                                event.sequence = seq;
-                            },
-                        )) {
+                        while disruptor
+                            .try_publish_event(ClosureEventTranslator::new(
+                                move |event: &mut MPSCEvent, seq: i64| {
+                                    event.producer_id = producer_id;
+                                    event.value = std::hint::black_box(i as i64);
+                                    event.sequence = seq;
+                                },
+                            ))
+                            .is_err()
+                        {
                             if stop_flag_for_burst.load(Ordering::Relaxed) {
                                 return;
                             }

@@ -13,6 +13,35 @@ compiler, or when CI stabilizes on a new stable series. Patch toolchain updates
 
 ## [0.2.0] — 2026-07
 
+### Residual soundness & API closure (2026-07-19 post-fix review)
+
+Closes residuals from the independent post-fix re-audit:
+
+- **Single-producer claim lock.** `SingleProducerSequencer` now rejects concurrent
+  claim drivers with `DisruptorError::ConcurrentClaimDriver` (try paths return
+  `None`) instead of data-racing on `next_value`/`cached_value` after an
+  `unsafe { new }` + shared `Arc`. High-level Builder/`SimpleProducer` typing
+  remains the preferred boundary.
+- **DSL `try_publish_event` → `Result<i64, TryPublishError>`.** Terminal
+  Poisoned/Shutdown are distinct from Full/Contended (breaking for DSL callers
+  that matched on `bool`).
+- **DSL re-entrant publish.** Nested `publish_event`/`try_publish_event` from a
+  translator fails with `ReentrantPublish` instead of deadlocking the claim mutex
+  or disordering the single-producer cursor.
+- **`try_run_once` panic poison.** Handler panics in the probe path poison
+  producers and re-raise, matching `run()`.
+- **`batch_publish` capacity validation.** Zero/over-capacity/unrepresentable
+  sizes return `InvalidSequence` without panicking.
+- **`CloneableProducer` wired.** Multi-mode
+  `DisruptorHandle::cloneable_producer()` is the public mint path; single mode
+  has no such method (trybuild + compile_fail).
+- **Lifecycle queries.** `DisruptorHandle` / DSL `Disruptor` expose
+  `is_poisoned()` and `is_claim_closed()`.
+- **ElegantConsumer.** Always records `is_poisoned` on handler panic;
+  `new_with_sequencer_poison` wires `Sequencer::poison` for fail-fast producers.
+- **trybuild UI suite.** `tests/ui/` covers non-Clone producer, no
+  `create_producer` / `cloneable_producer` on single-mode handles.
+
 ### Try-publish error taxonomy & probe self-activation (2026-07-19 audit — breaking)
 
 Closes the last failure-delivery gap from the 2026-07-19 audit (R1), plus two

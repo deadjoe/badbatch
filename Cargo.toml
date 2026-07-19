@@ -31,6 +31,8 @@ crossbeam = "0.8"  # For performance comparison benchmarks
 proptest = "1.11"  # Property-based testing
 # Exhaustive concurrency exploration for small WorkerPool claim models (P2).
 loom = "0.7"
+# Negative compile tests for soundness API boundaries.
+trybuild = "1.0"
 
 [features]
 # Preferred core path is always on: Builder + Producer + EventPoller + sequencers.
@@ -126,3 +128,8 @@ harness = false
 [[bench]]
 name = "comprehensive_benchmarks"
 harness = false
+
+# Compile-fail UI tests for soundness surface (clone / mode gates).
+[[test]]
+name = "ui_compile_fail"
+path = "tests/ui_compile_fail.rs"

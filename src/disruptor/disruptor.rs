@@ -83,6 +83,22 @@ where
     single_publish_lock: parking_lot::Mutex<()>,
 }
 
+thread_local! {
+    /// Tracks whether the current thread already holds the single-producer DSL
+    /// claim lock, so nested `publish_event` from a translator fails closed
+    /// instead of deadlocking (or disordering the cursor).
+    static DSL_SINGLE_CLAIM_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Clears [`DSL_SINGLE_CLAIM_HELD`] on every exit path (including panic).
+struct DslClaimHoldFlag;
+
+impl Drop for DslClaimHoldFlag {
+    fn drop(&mut self) {
+        DSL_SINGLE_CLAIM_HELD.with(|c| c.set(false));
+    }
+}
+
 impl<T, W> Disruptor<T, W>
 where
     T: Send + Sync + std::fmt::Debug + 'static,
@@ -199,15 +215,34 @@ where
     /// # Returns
     /// The remaining capacity in the ring buffer
     pub fn get_remaining_capacity(&self) -> i64 {
-        let _guard = self.claim_guard();
-        self.sequencer.remaining_capacity()
+        match self.claim_guard() {
+            Ok(_guard) => self.sequencer.remaining_capacity(),
+            // Nested call from a translator: report conservative 0 rather than
+            // deadlocking or racing claim state.
+            Err(_) => 0,
+        }
     }
 
-    /// Lock serializing single-producer claim access; no-op (None) for multi.
-    fn claim_guard(&self) -> Option<parking_lot::MutexGuard<'_, ()>> {
+    /// Lock serializing single-producer claim access; no-op guard for multi.
+    ///
+    /// Returns [`DisruptorError::ReentrantPublish`] if this thread already holds
+    /// the single-producer claim lock (nested translator publish).
+    fn claim_guard(
+        &self,
+    ) -> std::result::Result<
+        Option<(parking_lot::MutexGuard<'_, ()>, DslClaimHoldFlag)>,
+        DisruptorError,
+    > {
         match &self.sequencer {
-            SequencerEnum::Single(_) => Some(self.single_publish_lock.lock()),
-            SequencerEnum::Multi(_) => None,
+            SequencerEnum::Single(_) => {
+                if DSL_SINGLE_CLAIM_HELD.with(std::cell::Cell::get) {
+                    return Err(DisruptorError::ReentrantPublish);
+                }
+                let guard = self.single_publish_lock.lock();
+                DSL_SINGLE_CLAIM_HELD.with(|c| c.set(true));
+                Ok(Some((guard, DslClaimHoldFlag)))
+            }
+            SequencerEnum::Multi(_) => Ok(None),
         }
     }
 
@@ -468,7 +503,8 @@ where
     {
         // Serializes single-producer claim state when the DSL is shared
         // across threads; no-op for multi (soundness audit 2026-07-18).
-        let _guard = self.claim_guard();
+        // Re-entrant publish from a translator fails closed (no deadlock).
+        let _guard = self.claim_guard()?;
         // Sequencer::close on halt/shutdown makes further claims fail with Shutdown.
         let sequence = self.sequencer.next()?;
 
@@ -489,37 +525,79 @@ where
         Ok(())
     }
 
-    /// Try to publish an event without blocking
+    /// Try to publish an event without blocking.
     ///
     /// # Arguments
     /// * `translator` - The translator to populate the event
     ///
-    /// # Returns
-    /// True if published successfully, false if buffer is full
-    pub fn try_publish_event<Tr>(&self, translator: Tr) -> bool
+    /// # Errors
+    /// Same taxonomy as [`crate::disruptor::Producer::try_publish`]:
+    /// transient [`TryPublishError::Full`](crate::disruptor::TryPublishError::Full) /
+    /// [`Contended`](crate::disruptor::TryPublishError::Contended), or terminal
+    /// [`Poisoned`](crate::disruptor::TryPublishError::Poisoned) /
+    /// [`Shutdown`](crate::disruptor::TryPublishError::Shutdown).
+    ///
+    /// Previously returned `bool`, which collapsed terminal pipeline state into
+    /// "full" and invited infinite retry loops (residual 2026-07-19 audit).
+    pub fn try_publish_event<Tr>(
+        &self,
+        translator: Tr,
+    ) -> std::result::Result<i64, crate::disruptor::TryPublishError>
     where
         Tr: crate::disruptor::EventTranslator<T>,
     {
+        use crate::disruptor::TryPublishError;
+
         // Serializes single-producer claim state when the DSL is shared
         // across threads; no-op for multi (soundness audit 2026-07-18).
-        let _guard = self.claim_guard();
-        if let Some(sequence) = self.sequencer.try_next() {
-            // SAFETY: The sequencer granted exclusive access to this sequence.
-            let event = unsafe { &mut *self.ring_buffer.get_mut_unchecked(sequence) };
+        let _guard = match self.claim_guard() {
+            Ok(g) => g,
+            Err(DisruptorError::ReentrantPublish) => {
+                return Err(TryPublishError::ReentrantPublish);
+            }
+            Err(_) => return Err(TryPublishError::Shutdown),
+        };
+        let Some(sequence) = self.sequencer.try_next() else {
+            let transient = if self.sequencer.remaining_capacity() > 0 {
+                TryPublishError::Contended
+            } else {
+                TryPublishError::Full(crate::disruptor::RingBufferFull)
+            };
+            // Terminal flags win over transient classification.
+            return Err(if self.sequencer.is_poisoned() {
+                TryPublishError::Poisoned
+            } else if self.sequencer.is_closed() {
+                TryPublishError::Shutdown
+            } else {
+                transient
+            });
+        };
 
-            // Use the translator to populate the event with data. Poison on
-            // panic: an unpublished claim would expose a never-written slot.
-            let poison_guard = crate::disruptor::producer::PoisonOnPanic(&self.sequencer);
-            translator.translate_to(event, sequence);
-            std::mem::forget(poison_guard); // disarm: Drop only runs while unwinding
+        // SAFETY: The sequencer granted exclusive access to this sequence.
+        let event = unsafe { &mut *self.ring_buffer.get_mut_unchecked(sequence) };
 
-            // Publish the sequence to make it available to consumers
-            self.sequencer.publish(sequence);
-            drop(translator);
-            true
-        } else {
-            false
-        }
+        // Use the translator to populate the event with data. Poison on
+        // panic: an unpublished claim would expose a never-written slot.
+        let poison_guard = crate::disruptor::producer::PoisonOnPanic(&self.sequencer);
+        translator.translate_to(event, sequence);
+        std::mem::forget(poison_guard); // disarm: Drop only runs while unwinding
+
+        // Publish the sequence to make it available to consumers
+        self.sequencer.publish(sequence);
+        drop(translator);
+        Ok(sequence)
+    }
+
+    /// Whether the pipeline has been poisoned (consumer or claim-window panic).
+    #[must_use]
+    pub fn is_poisoned(&self) -> bool {
+        self.sequencer.is_poisoned()
+    }
+
+    /// Whether new claims are closed after halt/shutdown.
+    #[must_use]
+    pub fn is_claim_closed(&self) -> bool {
+        self.sequencer.is_closed()
     }
 }
 
@@ -875,7 +953,7 @@ mod tests {
         // Test successful publish
         let translator = TestEventTranslator::new(123);
         let result = disruptor.try_publish_event(translator);
-        assert!(result);
+        assert_eq!(result.unwrap(), 0);
 
         // Verify cursor advanced
         assert_eq!(disruptor.get_cursor().get(), 0);

@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `SimpleProducer<T, W>` in the current scope
+  --> tests/ui/simple_producer_not_clone.rs:12:28
+   |
+12 |     let _second = producer.clone();
+   |                            ^^^^^ method not found in `SimpleProducer<i64, BusySpinWaitStrategy>`

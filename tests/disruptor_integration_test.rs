@@ -61,7 +61,7 @@ fn test_single_producer_basic_functionality() {
         value: 100,
         producer_id: 1,
     };
-    assert!(disruptor.try_publish_event(translator2));
+    assert!(disruptor.try_publish_event(translator2).is_ok());
 }
 
 #[test]
