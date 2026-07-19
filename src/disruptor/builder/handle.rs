@@ -111,7 +111,8 @@ where
     /// Try to publish an event (delegated to producer)
     ///
     /// # Errors
-    /// [`TryPublishError::Full`](crate::disruptor::producer::TryPublishError::Full)
+    /// [`TryPublishError::Full`](crate::disruptor::producer::TryPublishError::Full) /
+    /// [`TryPublishError::Contended`](crate::disruptor::producer::TryPublishError::Contended)
     /// on transient backpressure (retry is meaningful); a terminal
     /// [`TryPublishError::Shutdown`](crate::disruptor::producer::TryPublishError::Shutdown)
     /// after shutdown/halt or
@@ -147,8 +148,11 @@ where
     /// Try to publish a batch of events (delegated to producer)
     ///
     /// # Errors
-    /// [`TryPublishError::MissingFreeSlots`](crate::disruptor::producer::TryPublishError::MissingFreeSlots)
-    /// on transient backpressure; a terminal
+    /// [`TryPublishError::MissingFreeSlots`](crate::disruptor::producer::TryPublishError::MissingFreeSlots) /
+    /// [`TryPublishError::Contended`](crate::disruptor::producer::TryPublishError::Contended)
+    /// on transient backpressure;
+    /// [`TryPublishError::InvalidBatchSize`](crate::disruptor::producer::TryPublishError::InvalidBatchSize)
+    /// for a zero or over-capacity request; or a terminal
     /// [`TryPublishError::Shutdown`](crate::disruptor::producer::TryPublishError::Shutdown) /
     /// [`TryPublishError::Poisoned`](crate::disruptor::producer::TryPublishError::Poisoned)
     /// where retrying can never succeed.

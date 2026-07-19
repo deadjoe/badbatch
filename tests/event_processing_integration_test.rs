@@ -292,10 +292,13 @@ fn test_exception_handling_stops_processor_by_default() {
     // On a poisoned pipeline the backlog is undrainable (the consumer is
     // dead), so draining shutdown reports Poisoned — but it must still halt
     // and join the consumer threads (see `Disruptor::shutdown`'s contract).
-    match disruptor.shutdown() {
-        Ok(()) | Err(badbatch::disruptor::DisruptorError::Poisoned) => {}
-        Err(other) => panic!("unexpected shutdown error on poisoned pipeline: {other:?}"),
-    }
+    assert!(matches!(
+        disruptor.shutdown(),
+        Err(badbatch::disruptor::DisruptorError::Poisoned)
+    ));
+    // A second call proves the first shutdown still completed halt+join and
+    // transitioned the lifecycle back to the stopped state.
+    disruptor.shutdown().unwrap();
 }
 
 #[test]

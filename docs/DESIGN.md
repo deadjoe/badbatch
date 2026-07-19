@@ -119,8 +119,9 @@ Simplified, user-friendly publishing interfaces inspired by disruptor-rs.
 - **Batch Support**: Efficient batch publishing with `BatchIterMut`
 - **Error Handling**: Fallible blocking publishes (`Result<i64>`); the
   non-blocking paths return `TryPublishError`, distinguishing transient
-  backpressure (`Full` / `MissingFreeSlots`) from terminal states
-  (`Poisoned` / `Shutdown`)
+  backpressure (`Full` / `MissingFreeSlots` / `Contended`), non-retryable
+  invalid requests (`InvalidBatchSize`), and terminal states (`Poisoned` /
+  `Shutdown`)
 - **Zero-Copy**: Direct access to ring buffer slots
 
 **API Design:**

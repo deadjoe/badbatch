@@ -47,11 +47,22 @@ impl std::error::Error for MissingFreeSlots {}
 pub enum TryPublishError {
     /// The ring buffer is full right now — transient; retrying is meaningful.
     Full(RingBufferFull),
+    /// A multi-producer claim lost a CAS race while capacity is still
+    /// available — transient; retrying is meaningful.
+    Contended,
     /// Not enough free slots for the requested batch (carries the deficit).
-    ///
-    /// Usually transient; it is permanent only when the requested batch is
-    /// larger than the ring buffer itself.
+    /// The batch size has already been validated against the ring capacity, so
+    /// this is transient backpressure and retrying is meaningful.
     MissingFreeSlots(MissingFreeSlots),
+    /// The requested batch size is zero, exceeds the ring capacity, or cannot
+    /// be represented by the sequencer — retrying the same request can never
+    /// succeed.
+    InvalidBatchSize {
+        /// Number of slots requested by the caller.
+        requested: usize,
+        /// Maximum batch size supported by this ring.
+        capacity: usize,
+    },
     /// The pipeline was poisoned by a panic in an update closure or event
     /// handler — terminal; retrying will never succeed.
     Poisoned,
@@ -61,8 +72,8 @@ pub enum TryPublishError {
 }
 
 impl TryPublishError {
-    /// `true` when retrying can never succeed ([`TryPublishError::Poisoned`]
-    /// or [`TryPublishError::Shutdown`]).
+    /// `true` when the pipeline itself is terminal
+    /// ([`TryPublishError::Poisoned`] or [`TryPublishError::Shutdown`]).
     ///
     /// The intended retry discipline:
     ///
@@ -90,9 +101,16 @@ impl TryPublishError {
     }
 
     /// `true` when the rejection is transient backpressure and retrying is
-    /// meaningful (the negation of [`Self::is_terminal`]).
+    /// meaningful.
+    ///
+    /// [`TryPublishError::InvalidBatchSize`] is neither transient nor a
+    /// terminal pipeline state: the pipeline is still usable, but retrying the
+    /// same invalid request can never succeed.
     pub fn is_transient(&self) -> bool {
-        !self.is_terminal()
+        matches!(
+            self,
+            Self::Full(_) | Self::Contended | Self::MissingFreeSlots(_)
+        )
     }
 }
 
@@ -100,7 +118,15 @@ impl std::fmt::Display for TryPublishError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Full(e) => write!(f, "{e}"),
+            Self::Contended => write!(f, "Another producer won the claim race"),
             Self::MissingFreeSlots(e) => write!(f, "{e}"),
+            Self::InvalidBatchSize {
+                requested,
+                capacity,
+            } => write!(
+                f,
+                "Invalid batch size {requested}; expected a value in 1..={capacity}"
+            ),
             Self::Poisoned => write!(
                 f,
                 "Pipeline was poisoned by a panic; publishing is disabled"
@@ -118,7 +144,9 @@ impl std::error::Error for TryPublishError {
         match self {
             Self::Full(e) => Some(e),
             Self::MissingFreeSlots(e) => Some(e),
-            Self::Poisoned | Self::Shutdown => None,
+            Self::Contended | Self::InvalidBatchSize { .. } | Self::Poisoned | Self::Shutdown => {
+                None
+            }
         }
     }
 }
@@ -148,9 +176,10 @@ where
     ///
     /// Returns a `Result` with the published sequence number or a
     /// [`TryPublishError`] describing why the claim was rejected:
-    /// [`TryPublishError::Full`] (transient backpressure — retrying is
-    /// meaningful), or a terminal state ([`TryPublishError::Poisoned`] /
-    /// [`TryPublishError::Shutdown`]) where retrying can never succeed.
+    /// [`TryPublishError::Full`] / [`TryPublishError::Contended`] (transient
+    /// backpressure — retrying is meaningful), or a terminal state
+    /// ([`TryPublishError::Poisoned`] / [`TryPublishError::Shutdown`]) where
+    /// retrying can never succeed.
     ///
     /// # Examples
     ///
@@ -176,10 +205,11 @@ where
     /// Publish a batch of Events into the Disruptor
     ///
     /// Returns a `Result` with the upper published sequence number or a
-    /// [`TryPublishError`]: [`TryPublishError::MissingFreeSlots`] when the ring
-    /// did not have enough available slots for the batch (transient unless the
-    /// batch exceeds the ring capacity), or a terminal state
-    /// ([`TryPublishError::Poisoned`] / [`TryPublishError::Shutdown`]).
+    /// [`TryPublishError`]: [`TryPublishError::MissingFreeSlots`] /
+    /// [`TryPublishError::Contended`] for transient backpressure,
+    /// [`TryPublishError::InvalidBatchSize`] for a zero or over-capacity
+    /// request, or a terminal state ([`TryPublishError::Poisoned`] /
+    /// [`TryPublishError::Shutdown`]).
     ///
     /// # Examples
     ///
@@ -407,13 +437,13 @@ where
     /// conclusive. In the race where the claim actually failed on fullness
     /// *and* a terminal flag was set concurrently, the pipeline is terminal
     /// anyway, so reporting the terminal state is strictly more useful.
-    fn classify_try_rejection(&self, transient: TryPublishError) -> TryPublishError {
+    fn classify_try_rejection(&self, fallback: TryPublishError) -> TryPublishError {
         if self.sequencer.is_poisoned() {
             TryPublishError::Poisoned
         } else if self.sequencer.is_closed() {
             TryPublishError::Shutdown
         } else {
-            transient
+            fallback
         }
     }
 
@@ -431,7 +461,15 @@ where
     {
         // Try to claim the next sequence from the sequencer
         let Some(sequence) = self.sequencer.try_next() else {
-            return Err(self.classify_try_rejection(TryPublishError::Full(RingBufferFull)));
+            let transient = if self.sequencer.remaining_capacity() > 0 {
+                // MultiProducerSequencer intentionally makes one CAS attempt on
+                // the try path. A failed CAS with capacity still available is
+                // contention, not a full ring.
+                TryPublishError::Contended
+            } else {
+                TryPublishError::Full(RingBufferFull)
+            };
+            return Err(self.classify_try_rejection(transient));
         };
 
         // Get the event at the claimed sequence and update it
@@ -455,17 +493,38 @@ where
         T: 'a,
         F: FnOnce(BatchIterMut<'a, T>),
     {
-        // Try to claim n sequences from the sequencer
-        let batch_size = i64::try_from(n).expect("batch size must fit in i64");
+        let capacity = self.sequencer.get_buffer_size();
+        if n == 0 || n > capacity {
+            return Err(
+                self.classify_try_rejection(TryPublishError::InvalidBatchSize {
+                    requested: n,
+                    capacity,
+                }),
+            );
+        }
+
+        // Try to claim n sequences from the sequencer. A real ring cannot have
+        // more than i64::MAX addressable sequence slots, but keep this public
+        // fallible API panic-free if an implementation reports otherwise.
+        let Ok(batch_size) = i64::try_from(n) else {
+            return Err(
+                self.classify_try_rejection(TryPublishError::InvalidBatchSize {
+                    requested: n,
+                    capacity,
+                }),
+            );
+        };
         let Some(end_sequence) = self.sequencer.try_next_n(batch_size) else {
             #[allow(clippy::cast_sign_loss)]
             let remaining = self.sequencer.remaining_capacity().max(0) as u64;
             let deficit = (n as u64).saturating_sub(remaining);
-            return Err(
-                self.classify_try_rejection(TryPublishError::MissingFreeSlots(MissingFreeSlots(
-                    deficit,
-                ))),
-            );
+            let transient = if deficit == 0 {
+                // Capacity remains, so the single failed CAS was contention.
+                TryPublishError::Contended
+            } else {
+                TryPublishError::MissingFreeSlots(MissingFreeSlots(deficit))
+            };
+            return Err(self.classify_try_rejection(transient));
         };
 
         let start_sequence = end_sequence - (batch_size - 1);
@@ -649,20 +708,20 @@ mod tests {
     fn test_try_batch_publish_zero_size() {
         let mut producer = create_test_producer();
 
-        let result = producer.try_batch_publish(0, |iter| {
-            // Iterator should be empty for zero-size batch
-            assert_eq!(iter.count(), 0);
-        });
+        let err = producer
+            .try_batch_publish(0, |_iter| panic!("invalid batch closure must not run"))
+            .unwrap_err();
 
-        // Zero-size batch behavior depends on sequencer implementation
-        // Some sequencers may return an error for zero-size requests
-        if result.is_err() {
-            // This is acceptable behavior for zero-size batches
-            assert!(matches!(result, Err(TryPublishError::MissingFreeSlots(_))));
-        } else {
-            // If it succeeds, sequence should not advance
-            assert_eq!(producer.current_sequence(), -1);
-        }
+        assert_eq!(
+            err,
+            TryPublishError::InvalidBatchSize {
+                requested: 0,
+                capacity: 8,
+            }
+        );
+        assert!(!err.is_transient());
+        assert!(!err.is_terminal());
+        assert_eq!(producer.current_sequence(), -1);
     }
 
     #[test]
@@ -717,9 +776,26 @@ mod tests {
         assert!(!full.is_terminal());
         assert_eq!(full.to_string(), "Ring Buffer is full");
 
+        let contended = TryPublishError::Contended;
+        assert!(contended.is_transient());
+        assert!(!contended.is_terminal());
+        assert_eq!(contended.to_string(), "Another producer won the claim race");
+
         let missing = TryPublishError::MissingFreeSlots(MissingFreeSlots(3));
         assert!(missing.is_transient());
         assert_eq!(missing.to_string(), "Missing free slots in Ring Buffer: 3");
+
+        // Invalid input is non-retryable without making the pipeline terminal.
+        let invalid = TryPublishError::InvalidBatchSize {
+            requested: 9,
+            capacity: 8,
+        };
+        assert!(!invalid.is_transient());
+        assert!(!invalid.is_terminal());
+        assert_eq!(
+            invalid.to_string(),
+            "Invalid batch size 9; expected a value in 1..=8"
+        );
 
         // Terminal variants must never be retried.
         let poisoned = TryPublishError::Poisoned;
@@ -732,6 +808,8 @@ mod tests {
 
         // The wrapped transient errors remain accessible as sources.
         assert!(std::error::Error::source(&full).is_some());
+        assert!(std::error::Error::source(&contended).is_none());
+        assert!(std::error::Error::source(&invalid).is_none());
         assert!(std::error::Error::source(&poisoned).is_none());
 
         // From conversions keep the legacy error types usable.
