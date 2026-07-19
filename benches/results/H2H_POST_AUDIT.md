@@ -1,5 +1,9 @@
 # Post-audit Java LMAX head-to-head (2026-07-19)
 
+> **Historical pre-fork evidence.** This capture predates the fork-level paired
+> protocol in `scripts/run_head_to_head.sh`. Its within-process CVs and exact
+> Rust/Java ratios are retained for audit history, not as a current ranking.
+
 Captured at commit `fa04ba6` after the P0–P2 audit rounds and the P3 hot-path
 poison fix. Full raw artifacts (gitignored):  
 `head_to_head_results/20260719_010308_51891/`.

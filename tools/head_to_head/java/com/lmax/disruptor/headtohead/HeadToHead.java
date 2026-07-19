@@ -89,7 +89,8 @@ public final class HeadToHead
             final AtomicInteger ready = new AtomicInteger();
             final AtomicLong processed = new AtomicLong();
             final AtomicLong checksum = new AtomicLong();
-            final SummingHandler handler = new SummingHandler(processed, checksum, ready);
+            final SummingHandler handler =
+                    new SummingHandler(processed, checksum, ready, config.eventsTotal);
 
             final RingBuffer<ComparisonEvent> ring =
                     RingBuffer.createSingleProducer(
@@ -166,7 +167,8 @@ public final class HeadToHead
             final AtomicInteger ready = new AtomicInteger();
             final AtomicLong processed = new AtomicLong();
             final AtomicLong checksum = new AtomicLong();
-            final SummingHandler handler = new SummingHandler(processed, checksum, ready);
+            final SummingHandler handler =
+                    new SummingHandler(processed, checksum, ready, config.eventsTotal);
 
             final RingBuffer<ComparisonEvent> ring =
                     RingBuffer.createMultiProducer(
@@ -262,7 +264,8 @@ public final class HeadToHead
                     new BatchEventProcessorBuilder()
                             .build(ring, ring.newBarrier(p1.getSequence()), stage2);
 
-            final Stage3Handler stage3 = new Stage3Handler(processed, checksum, ready);
+            final Stage3Handler stage3 =
+                    new Stage3Handler(processed, checksum, ready, config.eventsTotal);
             final BatchEventProcessor<ComparisonEvent> p3 =
                     new BatchEventProcessorBuilder()
                             .build(ring, ring.newBarrier(p2.getSequence()), stage3);
@@ -393,12 +396,21 @@ public final class HeadToHead
         private final AtomicLong processed;
         private final AtomicLong checksum;
         private final AtomicInteger ready;
+        private final long eventsTotal;
+        private final long finalSequence;
+        private long localChecksum;
 
-        SummingHandler(final AtomicLong processed, final AtomicLong checksum, final AtomicInteger ready)
+        SummingHandler(
+                final AtomicLong processed,
+                final AtomicLong checksum,
+                final AtomicInteger ready,
+                final long eventsTotal)
         {
             this.processed = processed;
             this.checksum = checksum;
             this.ready = ready;
+            this.eventsTotal = eventsTotal;
+            this.finalSequence = eventsTotal - 1L;
         }
 
         @Override
@@ -410,8 +422,12 @@ public final class HeadToHead
         @Override
         public void onEvent(final ComparisonEvent event, final long sequence, final boolean endOfBatch)
         {
-            checksum.addAndGet(event.value);
-            processed.incrementAndGet();
+            localChecksum += event.value;
+            if (sequence == finalSequence)
+            {
+                checksum.set(localChecksum);
+                processed.set(eventsTotal);
+            }
         }
     }
 
@@ -464,12 +480,21 @@ public final class HeadToHead
         private final AtomicLong processed;
         private final AtomicLong checksum;
         private final AtomicInteger ready;
+        private final long eventsTotal;
+        private final long finalSequence;
+        private long localChecksum;
 
-        Stage3Handler(final AtomicLong processed, final AtomicLong checksum, final AtomicInteger ready)
+        Stage3Handler(
+                final AtomicLong processed,
+                final AtomicLong checksum,
+                final AtomicInteger ready,
+                final long eventsTotal)
         {
             this.processed = processed;
             this.checksum = checksum;
             this.ready = ready;
+            this.eventsTotal = eventsTotal;
+            this.finalSequence = eventsTotal - 1L;
         }
 
         @Override
@@ -482,8 +507,12 @@ public final class HeadToHead
         public void onEvent(final ComparisonEvent event, final long sequence, final boolean endOfBatch)
         {
             event.stage3Value = event.stage2Value + 7L;
-            checksum.addAndGet(event.stage3Value);
-            processed.incrementAndGet();
+            localChecksum += event.stage3Value;
+            if (sequence == finalSequence)
+            {
+                checksum.set(localChecksum);
+                processed.set(eventsTotal);
+            }
         }
     }
 
@@ -545,6 +574,12 @@ public final class HeadToHead
         int warmupRounds = 3;
         int measuredRounds = 7;
         String runOrder = "standalone";
+        String pairId = "standalone";
+        int forkIndex;
+        String harnessRev = "unknown";
+        String implementationRev = "unknown";
+        boolean harnessDirty;
+        boolean implementationDirty;
         String implLabel = "lmax-bep";
         String outputPath;
         boolean quick;
@@ -577,6 +612,13 @@ public final class HeadToHead
                     case "--warmup-rounds" -> c.warmupRounds = Integer.parseInt(args[++i]);
                     case "--measured-rounds" -> c.measuredRounds = Integer.parseInt(args[++i]);
                     case "--run-order" -> c.runOrder = args[++i];
+                    case "--pair-id" -> c.pairId = args[++i];
+                    case "--fork-index" -> c.forkIndex = Integer.parseInt(args[++i]);
+                    case "--harness-rev" -> c.harnessRev = args[++i];
+                    case "--implementation-rev" -> c.implementationRev = args[++i];
+                    case "--harness-dirty" -> c.harnessDirty = Boolean.parseBoolean(args[++i]);
+                    case "--implementation-dirty" ->
+                            c.implementationDirty = Boolean.parseBoolean(args[++i]);
                     case "--impl-label" -> c.implLabel = args[++i];
                     case "--output" -> c.outputPath = args[++i];
                     case "--quick" -> c.quick = true;
@@ -747,7 +789,13 @@ public final class HeadToHead
             num(sb, "warmup_rounds", config.warmupRounds, true);
             num(sb, "measured_rounds", config.measuredRounds, true);
             field(sb, "run_order", config.runOrder, true);
-            field(sb, "git_rev", "n/a", true);
+            field(sb, "pair_id", config.pairId, true);
+            num(sb, "fork_index", config.forkIndex, true);
+            field(sb, "harness_git_rev", config.harnessRev, true);
+            field(sb, "implementation_rev", config.implementationRev, true);
+            bool(sb, "harness_dirty", config.harnessDirty, true, 2);
+            bool(sb, "implementation_dirty", config.implementationDirty, true, 2);
+            field(sb, "git_rev", config.implementationRev, true);
             sb.append("  \"rounds\": [\n");
             for (int i = 0; i < rounds.size(); i++)
             {

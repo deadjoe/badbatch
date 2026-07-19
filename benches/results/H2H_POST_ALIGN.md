@@ -1,5 +1,9 @@
 # Post-alignment H2H refresh (2026-07-19)
 
+> **Historical pre-fork evidence.** This capture predates the fork-level paired
+> protocol in `scripts/run_head_to_head.sh`. Its within-process CVs and exact
+> Rust/Java ratios are retained for audit history, not as a current ranking.
+
 Commit **`3b6d5b1`** (LMAX wait availability + terminal-stage gating), Apple M1 Max,
 `RUSTFLAGS=-C target-cpu=native`.
 
