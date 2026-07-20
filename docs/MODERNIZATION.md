@@ -104,6 +104,18 @@ Two **explicit** modes (never mixed on one stage):
 See [`PERFORMANCE.md`](PERFORMANCE.md) for the accepted evidence and current
 reproduction protocol.
 
+### AD-8: Failure delivery and logging
+
+- Correctness does not depend on a logger: built-in sequencers retain the first
+  structured `FailureRecord`, queryable through the public runtime handles.
+- Startup callbacks and requested thread affinity fail closed; shutdown callback
+  failures remain queryable without changing a completed stop into poison.
+- `ExceptionHandler` owns the recovery decision. The consumer engine owns one
+  payload-free structured report after a fatal decision.
+- Logging uses the standard `log` facade, with no library-installed backend,
+  private environment-variable parser, or direct stderr output.
+- Successful event and claim paths contain no logging call or failure-state lock.
+
 ## Non-goals (for this modernization)
 
 - Windows support

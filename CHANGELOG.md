@@ -13,6 +13,30 @@ compiler, or when CI stabilizes on a new stable series. Patch toolchain updates
 
 ## [0.2.0] — 2026-07
 
+### Structured failure delivery and standard logging (2026-07-20)
+
+- **Startup failures fail closed.** Builder `EventHandler::on_start()` errors
+  stop before the event loop and poison producers; requested CPU-affinity
+  failures follow the same rule. The classic DSL returns `Poisoned` when a
+  processor fails during startup instead of reporting a successful start.
+- **Queryable root context.** Built-in sequencers retain a first-failure-wins
+  `FailureRecord` with phase, thread, Builder stage, event sequence and error
+  message where available. `DisruptorHandle`, `SimpleProducer`,
+  `CloneableProducer`, `BatchEventProcessor` and the classic `Disruptor` expose
+  `first_failure()` as the diagnostic companion to terminal `Poisoned` errors.
+- **Lifecycle coverage.** Batch/event failures and consumer/producer panics are
+  recorded before the poison flag becomes visible. `on_shutdown()` failures are
+  queryable without reclassifying a completed stop as poisoned; later failures
+  do not overwrite the causal record.
+- **Standard facade, cold paths only.** Internal lifecycle/failure reporting now
+  uses the `log` facade (`badbatch::failure` / `badbatch::lifecycle`). The crate
+  does not initialize a logger, read `BADBATCH_LOG`, or write directly to stderr.
+  Compatibility `internal_*` macros forward to `log` without environment reads.
+- **Payload-safe defaults.** Managed failure logs include decision context but
+  never format the full ring event. `DefaultExceptionHandler` is now only the
+  stop/continue policy; the consumer engine performs one structured report.
+  Successful per-event paths contain no logging call or failure-record lock.
+
 ### Linux performance evidence and per-round diagnostics (2026-07-20)
 
 - **Reproducible H2H Linux protocol.** Rust/Java fork artifacts now carry
