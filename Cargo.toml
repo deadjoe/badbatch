@@ -52,6 +52,9 @@ deadlock-detection = ["parking_lot/deadlock_detection"]
 # ~4.3K lines that only benchmark scripts need; gated so library builds and
 # `cargo build --bins` in CI/dev stay lean.
 bench-tools = []
+# Opt-in per-round H2H probes. Kept separate so canonical benchmark hot paths
+# have no probe branches, counters, or code-layout changes.
+bench-round-diagnostics = ["bench-tools"]
 
 [profile.release]
 # Optimize for performance

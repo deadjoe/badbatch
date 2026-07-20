@@ -13,6 +13,35 @@ use std::convert::TryFrom;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
+#[cfg(feature = "bench-round-diagnostics")]
+static BENCH_ROUND_DIAGNOSTICS_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Benchmark-only snapshot of single-producer capacity-wait activity.
+///
+/// Available only with `bench-round-diagnostics`; it is not a production
+/// metrics API. One iteration means one `spin_loop()` call on the Rust path.
+#[cfg(feature = "bench-round-diagnostics")]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BenchProducerBackpressureSnapshot {
+    /// Number of claims that entered the capacity-wait loop.
+    pub entries: u64,
+    /// Total capacity-wait loop iterations across those entries.
+    pub wait_loop_iterations: u64,
+    /// Largest capacity-wait loop iteration count for one claim.
+    pub max_wait_loop_iterations: u64,
+}
+
+/// Enable or disable benchmark-only per-round capacity-wait counters.
+///
+/// Call this before starting producer threads. It exists solely for the H2H
+/// harness and is compiled out of normal and `bench-tools`-only builds.
+#[cfg(feature = "bench-round-diagnostics")]
+#[doc(hidden)]
+pub fn configure_bench_round_diagnostics(enabled: bool) {
+    BENCH_ROUND_DIAGNOSTICS_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
 /// Trait for sequencers that coordinate access to the ring buffer
 ///
 /// This trait defines the interface for sequencers, which are responsible
@@ -209,6 +238,16 @@ where
         match self {
             SequencerEnum::Single(s) => s.new_barrier_typed(sequences_to_track),
             SequencerEnum::Multi(m) => m.new_barrier_typed(sequences_to_track),
+        }
+    }
+
+    #[cfg(feature = "bench-round-diagnostics")]
+    pub(crate) fn bench_producer_backpressure_snapshot(
+        &self,
+    ) -> Option<BenchProducerBackpressureSnapshot> {
+        match self {
+            Self::Single(sequencer) => Some(sequencer.bench_backpressure_snapshot()),
+            Self::Multi(_) => None,
         }
     }
 }
@@ -439,6 +478,12 @@ where
     /// [`crate::disruptor::DisruptorError::ConcurrentClaimDriver`] / `None` instead
     /// of a data race on the `UnsafeCell`s.
     claim_lock: AtomicBool,
+    #[cfg(feature = "bench-round-diagnostics")]
+    bench_backpressure_entries: AtomicU64,
+    #[cfg(feature = "bench-round-diagnostics")]
+    bench_backpressure_iterations: AtomicU64,
+    #[cfg(feature = "bench-round-diagnostics")]
+    bench_backpressure_max_iterations: AtomicU64,
     /// Set when a consumer thread or a producer update closure panicked.
     /// Claim methods fail fast instead of spinning on a dead gating sequence.
     poisoned: AtomicBool,
@@ -498,6 +543,12 @@ where
             next_value: UnsafeCell::new(-1),
             cached_value: UnsafeCell::new(-1),
             claim_lock: AtomicBool::new(false),
+            #[cfg(feature = "bench-round-diagnostics")]
+            bench_backpressure_entries: AtomicU64::new(0),
+            #[cfg(feature = "bench-round-diagnostics")]
+            bench_backpressure_iterations: AtomicU64::new(0),
+            #[cfg(feature = "bench-round-diagnostics")]
+            bench_backpressure_max_iterations: AtomicU64::new(0),
             poisoned: AtomicBool::new(false),
             closed: AtomicBool::new(false),
         }
@@ -567,6 +618,31 @@ where
     fn gating_minimum(&self, minimum: i64) -> i64 {
         let guard = self.gating_sequences.load();
         Sequence::get_minimum_sequence_with_default(&guard, minimum)
+    }
+
+    #[cfg(feature = "bench-round-diagnostics")]
+    #[inline]
+    fn record_bench_backpressure(&self, iterations: u64) {
+        if iterations == 0 {
+            return;
+        }
+        self.bench_backpressure_entries
+            .fetch_add(1, Ordering::Relaxed);
+        self.bench_backpressure_iterations
+            .fetch_add(iterations, Ordering::Relaxed);
+        self.bench_backpressure_max_iterations
+            .fetch_max(iterations, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "bench-round-diagnostics")]
+    fn bench_backpressure_snapshot(&self) -> BenchProducerBackpressureSnapshot {
+        BenchProducerBackpressureSnapshot {
+            entries: self.bench_backpressure_entries.load(Ordering::Relaxed),
+            wait_loop_iterations: self.bench_backpressure_iterations.load(Ordering::Relaxed),
+            max_wait_loop_iterations: self
+                .bench_backpressure_max_iterations
+                .load(Ordering::Relaxed),
+        }
     }
 
     /// Check if there's available capacity for the required number of sequences
@@ -652,6 +728,10 @@ where
             // Use spin_loop() instead of yield_now() to avoid syscall overhead
             // (~1-5μs per sched_yield). PAUSE (x86) / YIELD (ARM) stays on-core.
             let mut min_sequence;
+            #[cfg(feature = "bench-round-diagnostics")]
+            let diagnostics_enabled = BENCH_ROUND_DIAGNOSTICS_ENABLED.load(Ordering::Relaxed);
+            #[cfg(feature = "bench-round-diagnostics")]
+            let mut backpressure_iterations = 0_u64;
             while {
                 min_sequence = self.gating_minimum(next_value);
                 wrap_point > min_sequence
@@ -664,7 +744,15 @@ where
                 if self.poisoned.load(Ordering::Relaxed) {
                     return Err(DisruptorError::Poisoned);
                 }
+                #[cfg(feature = "bench-round-diagnostics")]
+                if diagnostics_enabled {
+                    backpressure_iterations = backpressure_iterations.saturating_add(1);
+                }
                 std::hint::spin_loop();
+            }
+            #[cfg(feature = "bench-round-diagnostics")]
+            if diagnostics_enabled {
+                self.record_bench_backpressure(backpressure_iterations);
             }
 
             unsafe { self.set_cached_value(min_sequence) };
