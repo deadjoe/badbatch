@@ -32,6 +32,9 @@ Changelog: root [`CHANGELOG.md`](../CHANGELOG.md).
 | P1 | builder split + feature/docs tighten | done (`builder/{core,consumer,handle,fluent,entry}`; core-only CI job) |
 | P2 | Loom claim models + MPSC exactly-once stress | done (`tests/loom_work_claim.rs`, `mpsc_exactly_once_stress.rs`, CI loom job) |
 | P3 | Read-only fan-out (`fan_out_events_with`) vs WorkerPool | done (engine + builder; mix rejected; stress tests) |
+| P4 | Linux bare-metal H2H + causal performance evidence | done (paired forks, verified affinity, claim-RMW and slot-write mechanisms) |
+| P5 | Per-round batch/queue/backpressure diagnostics | tooling done; controlled Linux diagnostic pending |
+| P6 | Safe Builder-only single-driver claim specialization | planned; soundness review before implementation/measurement |
 | R1 | Review cleanup: `ConsumerAccess` + `RunMode` (no readonly bool / Option work magic) | done |
 | R2 | Unified `spawn_named` + `SharedBuilderState` push helpers | done |
 | R3 | Single `ClosureEventHandler` (`event_handler`; re-exported) | done |
@@ -81,8 +84,25 @@ Two **explicit** modes (never mixed on one stage):
 ### AD-6: CI truth
 
 - Claim only what CI runs.
-- macOS: primary local dev; Linux: CI (and later local Linux box).
+- Linux and macOS ARM64 both have stable CI jobs; the 2026-07-20 controlled
+  Linux bare-metal study is performance evidence, not CI.
 - Miri: separate nightly job; not claimed for stable until it actually runs.
+
+### AD-7: Performance evidence boundaries
+
+- Keep local macOS baselines, controlled Linux measurements and CI acceptance
+  as separately labelled evidence.
+- Never ship the measurement-only global claim-lock bypass. Public/raw
+  sequencer paths retain their checked concurrent-driver guard.
+- The safe optimization candidate is a crate-private Builder-only
+  single-driver claim entry justified by unique `SimpleProducer` ownership.
+- Diagnose pipeline batch formation per round before selecting pacing or
+  hysteresis; probe-conditioned throughput is not a canonical ranking.
+- Treat slot padding and shared-slot writes as a CPU/layout cross, not a
+  universally signed optimization.
+
+See [`PERFORMANCE.md`](PERFORMANCE.md) for the accepted evidence and current
+reproduction protocol.
 
 ## Non-goals (for this modernization)
 

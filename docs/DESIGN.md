@@ -253,9 +253,9 @@ let consumer = ElegantConsumer::with_affinity(ring_buffer,
 - **ABA Prevention**: Careful handling of sequence wraparound
 
 ### Testing Strategy
-- **Unit Tests**: 285 tests covering all core disruptor components (default features)
-- **Integration Tests**: 48 end-to-end scenarios with multiple producers/consumers
-- **Documentation Tests**: 23 API examples validated through rustdoc
+- **Unit/module tests**: `cargo test --all-features --locked` covers core components and feature surfaces
+- **Integration tests**: end-to-end producer/consumer, lifecycle, failure and stress scenarios
+- **Documentation tests**: current API examples are compiled and executed through rustdoc
 - **Property Tests**: Invariant checking with proptest for sequence ordering and ring buffer behavior
 - **Benchmark Suite**: 7 specialized benchmark files covering SPSC, MPSC, latency, throughput, and scaling
 - **Formal Verification**: TLA+ mathematical proofs for SPMC (7,197 states) and MPMC (161,285 states)
@@ -441,29 +441,46 @@ pub struct ClosureEventFactory<T, F> {
 
 ## Performance Characteristics
 
-### Latency Measurements
-Based on internal benchmarks and design characteristics:
-
-- **Single Producer**: ~10-50ns per event (depending on wait strategy)
-- **Multi Producer**: ~50-200ns per event (with contention)
-- **Batch Processing**: ~5-20ns per event (amortized)
+Performance is a property of the complete workload and host, not a fixed API
+constant. Do not use the older nanoseconds-per-event planning bands as service
+level guarantees. The current evidence, exact protocols and reproduction
+commands live in [`PERFORMANCE.md`](PERFORMANCE.md).
 
 ### Throughput Capabilities
 
-Indicative ranges (methodology-dependent). Post-modernization **median** wall-clock numbers on Apple Silicon (T6000), `BusySpin`, buffer=1024, ~2M events — see `benches/results/BASELINE.md`:
+Two complementary evidence sets are maintained:
 
-- **SPSC single-event (pad=none)**: ~**160 Melem/s** median
-- **SPSC batch publish**: ~**350–450 Melem/s** median
-- **MPSC (2–4 producers)**: ~**7–15 Melem/s** (contention-limited for trivial handlers)
-- **WorkerPool (2–4 workers)**: ~**6–11 Melem/s** (CAS work-cursor contention for trivial handlers)
-- **Pipeline 2-stage**: ~**100–130 Melem/s** median
+- the checked-in Apple Silicon baseline in
+  [`benches/results/BASELINE.md`](../benches/results/BASELINE.md), used primarily
+  for local regression comparison;
+- the controlled Linux bare-metal BadBatch-vs-LMAX study in
+  [`PERFORMANCE.md`](PERFORMANCE.md), using fresh paired processes, verified
+  per-role affinity and checksum/provenance gates.
 
-Older DESIGN band “SP 20–100M / MP 5–50M” remains a coarse planning range; prefer the checked-in baseline table for regressions.
+The stable engineering conclusions are narrower than one headline number:
+
+- batch publish is the preferred bulk-throughput path because it amortizes
+  fixed claim/publication cost;
+- the checked single-producer claim RMW is a material x86 hot-path cost, but its
+  lock cannot be removed from public/raw sequencer paths;
+- multi-producer contention must be studied independently from any
+  single-producer specialization;
+- pipeline throughput depends on batch formation, scheduling and cache-line
+  ownership as well as instruction count;
+- slot padding is workload- and CPU-dependent. It severely hurt the tiny-event
+  Apple Silicon baseline, while the corresponding Linux padding/write cross is
+  still unresolved.
 
 ### Scalability Characteristics
-- **CPU Cores**: Linear scaling up to memory bandwidth limits
-- **Buffer Size**: Logarithmic impact on latency, linear on memory
-- **Consumer Count**: Minimal impact with proper CPU affinity
+
+- **CPU cores:** adding producers or workers can reduce throughput for trivial
+  handlers because more threads contend on a shared claim/work cursor. Scaling
+  must be demonstrated with representative handler work.
+- **Buffer size:** changes wrap frequency, working-set size, batch formation and
+  cache behavior; its performance impact is not assumed monotonic.
+- **Consumer count/topology:** affinity helps experimental control but does not
+  make extra consumers free. Pipeline stages, fan-out and WorkerPool consumers
+  have different dependency and ownership costs.
 
 ## Integration Patterns
 
@@ -508,9 +525,9 @@ let mut producer = build_single_producer(1024, factory, BusySpinWaitStrategy)
 ## Testing and Validation
 
 ### Test Coverage
-- **Unit Tests**: 285 tests covering all core disruptor components (default features)
-- **Integration Tests**: 48 end-to-end scenarios with multiple producers/consumers
-- **Documentation Tests**: 23 API examples validated through rustdoc  
+- **Unit/module tests**: the all-features suite covers core components and optional surfaces
+- **Integration Tests**: end-to-end scenarios cover multiple producers/consumers, lifecycle and failure semantics
+- **Documentation Tests**: API examples are validated through rustdoc
 - **Property Tests**: Invariant checking with proptest for sequence ordering and ring buffer behavior
 - **Benchmark Tests**: 7 comprehensive benchmark suites with criterion.rs statistical analysis
 - **Formal Verification**: TLA+ models proving correctness of concurrent algorithms
@@ -521,8 +538,8 @@ let mut producer = build_single_producer(1024, factory, BusySpinWaitStrategy)
 Current CI (`.github/workflows/test.yml`):
 
 - **Rust**: latest **stable** for build/test/clippy/fmt/coverage; **nightly** only for Miri
-- **Platforms**: **Linux** (`ubuntu-latest`) in CI; **macOS** is the primary local development platform
-- **Architectures**: CI runners provide the host arch of the GitHub runner (typically x86_64 Linux); local development commonly runs on ARM64 (Apple Silicon)
+- **Platforms**: **Linux** (`ubuntu-latest`) and **macOS ARM64** (`macos-14`) stable jobs
+- **Architectures**: CI covers the hosted x86_64 Linux and Apple Silicon macOS environments; controlled bare-metal numbers remain separate performance evidence
 - **Windows**: **not supported / not tested**
 - **Miri**: run as a separate nightly job on a subset of tests (see workflow); not a full substitute for loom/TLA+
 
@@ -531,7 +548,8 @@ See also [`MODERNIZATION.md`](MODERNIZATION.md) for active modernization phases 
 ### Benchmarking Strategy
 - **Comprehensive Suite**: 7 specialized benchmark categories covering all performance aspects
 - **Statistical Analysis**: Criterion.rs with latency histograms (P50, P95, P99, P99.9)
-- **Comparative Testing**: Head-to-head performance against std::mpsc and crossbeam channels
+- **Comparative Testing**: channel-oriented Criterion comparisons plus the matched BadBatch-vs-LMAX Java fork harness
+- **Round diagnostics**: opt-in per-round batch-size, queue-depth and producer-backpressure capture for mechanism studies
 - **Scaling Analysis**: Buffer size scaling from 64 to 8192 slots
 - **Wait Strategy Optimization**: Performance comparison across all wait strategies
 - **Memory Profiling**: Zero-allocation runtime validation and memory usage patterns
