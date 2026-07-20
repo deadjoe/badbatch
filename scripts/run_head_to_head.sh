@@ -19,6 +19,7 @@ BUFFER_OVERRIDE=""
 FORKS_OVERRIDE=""
 SEED="1"
 CPU_LIST=""
+ROUND_DIAGNOSTICS=false
 
 usage() {
   cat <<'EOF'
@@ -38,6 +39,7 @@ Options:
   --events-total <N>           override events for all scenarios
   --buffer-size <N>            override buffer size
   --cpu-list <N,N,...>         Linux logical CPUs; pins every measured worker role
+  --round-diagnostics          opt-in per-round batch/backpressure probe
   --results-dir <PATH>         must be absent or empty
 
 Examples:
@@ -58,6 +60,7 @@ while [[ $# -gt 0 ]]; do
     --events-total) EVENTS_OVERRIDE="${2:?}"; shift 2 ;;
     --buffer-size) BUFFER_OVERRIDE="${2:?}"; shift 2 ;;
     --cpu-list) CPU_LIST="${2:?}"; shift 2 ;;
+    --round-diagnostics) ROUND_DIAGNOSTICS=true; shift ;;
     --results-dir) RESULTS_DIR="${2:?}"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
@@ -123,15 +126,40 @@ mkdir -p "$RESULTS_DIR"
 
 echo "[INFO] Results -> $RESULTS_DIR"
 echo "[INFO] Building Rust h2h_rust (release)..."
-cargo build --release --features bench-tools --bin h2h_rust
+RUST_FEATURES="bench-tools"
+ROUND_DIAGNOSTIC_ARG=""
+if [[ "$ROUND_DIAGNOSTICS" == true ]]; then
+  RUST_FEATURES="bench-tools,bench-round-diagnostics"
+  ROUND_DIAGNOSTIC_ARG="--round-diagnostics"
+fi
+cargo build --release --features "$RUST_FEATURES" --bin h2h_rust
 
 echo "[INFO] Compiling Java HeadToHead + LMAX sources..."
 JAVA_CP="$RESULTS_DIR/java_classes"
 mkdir -p "$JAVA_CP"
 # Java 17+ for modern switch syntax in the harness.
-# shellcheck disable=SC2046
-javac --release 17 -d "$JAVA_CP" \
-  $(find examples/disruptor/src/main/java tools/head_to_head/java -name '*.java')
+JAVA_SOURCES=()
+JAVA_INSTRUMENTED_SOURCE_SHA="none"
+if [[ "$ROUND_DIAGNOSTICS" == true ]]; then
+  JAVA_INSTRUMENTED_SOURCE="$RESULTS_DIR/java_instrumented_sources/com/lmax/disruptor/SingleProducerSequencer.java"
+  python3 tools/head_to_head/instrument_lmax.py \
+    examples/disruptor/src/main/java/com/lmax/disruptor/SingleProducerSequencer.java \
+    "$JAVA_INSTRUMENTED_SOURCE"
+  while IFS= read -r -d '' java_source; do
+    JAVA_SOURCES+=("$java_source")
+  done < <(find examples/disruptor/src/main/java -name '*.java' \
+    ! -path '*/com/lmax/disruptor/SingleProducerSequencer.java' -print0)
+  JAVA_SOURCES+=("$JAVA_INSTRUMENTED_SOURCE")
+  JAVA_INSTRUMENTED_SOURCE_SHA="$(shasum -a 256 "$JAVA_INSTRUMENTED_SOURCE" | awk '{print $1}')"
+else
+  while IFS= read -r -d '' java_source; do
+    JAVA_SOURCES+=("$java_source")
+  done < <(find examples/disruptor/src/main/java -name '*.java' -print0)
+fi
+while IFS= read -r -d '' java_source; do
+  JAVA_SOURCES+=("$java_source")
+done < <(find tools/head_to_head/java -name '*.java' -print0)
+javac --release 17 -d "$JAVA_CP" "${JAVA_SOURCES[@]}"
 
 BADBATCH_REV="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 LMAX_REV="$(git -C examples/disruptor rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -189,6 +217,8 @@ JAVA_CLASSES_SHA="$(directory_hash "$JAVA_CP")"
   echo "lmax_tree_sha256=$LMAX_TREE_SHA"
   echo "rust_binary_sha256=$RUST_BINARY_SHA"
   echo "java_classes_sha256=$JAVA_CLASSES_SHA"
+  echo "round_diagnostics=$ROUND_DIAGNOSTICS"
+  echo "java_instrumented_single_producer_sha256=$JAVA_INSTRUMENTED_SOURCE_SHA"
   echo "rustc=$(rustc --version 2>/dev/null || true)"
   echo "cargo=$(cargo --version 2>/dev/null || true)"
   echo "java=$(java -version 2>&1 | head -1)"
@@ -303,6 +333,7 @@ run_rust() {
     --harness-rev "$BADBATCH_REV" --implementation-rev "$BADBATCH_REV" \
     --harness-dirty "$BADBATCH_DIRTY" --implementation-dirty "$BADBATCH_DIRTY" \
     "${AFFINITY_ARGS[@]}" \
+    ${ROUND_DIAGNOSTIC_ARG:+"$ROUND_DIAGNOSTIC_ARG"} \
     --impl-label "badbatch-builder" \
     --output "$output_path"
 }
@@ -325,6 +356,7 @@ run_java() {
     --harness-rev "$BADBATCH_REV" --implementation-rev "$LMAX_REV" \
     --harness-dirty "$BADBATCH_DIRTY" --implementation-dirty "$LMAX_DIRTY" \
     "${AFFINITY_ARGS[@]}" \
+    ${ROUND_DIAGNOSTIC_ARG:+"$ROUND_DIAGNOSTIC_ARG"} \
     --impl-label "lmax-bep" \
     --output "$output_path"
 }

@@ -8,6 +8,7 @@ import pathlib
 import tempfile
 import unittest
 
+import instrument_lmax
 import record_fork
 import report_forks
 
@@ -35,6 +36,43 @@ def artifact(language: str, pair_id: str, fork_index: int, ops: float) -> dict:
         ],
         "summary": {"checksum_valid_all": True},
     }
+
+
+def add_round_diagnostics(data: dict) -> None:
+    data["round_diagnostics"] = True
+    for index, round_ in enumerate(data["rounds"], 1):
+        round_["index"] = index
+        round_["events"] = data["events_total"]
+        histogram = {
+            "count": 2,
+            "sum": 1000,
+            "min": 400,
+            "max": 600,
+            "mean": 500.0,
+            "log2_bins": [0] * 8 + [1, 1] + [0] * 54,
+        }
+        queue = {
+            "count": 2,
+            "sum": 1200,
+            "min": 500,
+            "max": 700,
+            "mean": 600.0,
+            "log2_bins": [0] * 8 + [1, 1] + [0] * 54,
+        }
+        round_["diagnostics"] = {
+            "batch_processing": [
+                {"role": "consumer", "batch_size": histogram, "queue_depth": queue}
+            ],
+            "producer_backpressure": {
+                "supported": True,
+                "iteration_action": (
+                    "spin_loop" if data["language"] == "rust" else "park_nanos_1_request"
+                ),
+                "entries": 3,
+                "wait_loop_iterations": 9,
+                "max_wait_loop_iterations": 4,
+            },
+        }
 
 
 class ForkReportTest(unittest.TestCase):
@@ -126,6 +164,33 @@ class ForkReportTest(unittest.TestCase):
             sample = report_forks.load_sample(path)
             self.assertEqual("legacy-unrecorded", sample.cpu_affinity_mode)
             self.assertFalse(sample.affinity_verified_all)
+
+    def test_flattens_diagnostics_without_losing_round_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            for language in ("rust", "java"):
+                data = artifact(language, "unicast-001", 1, 100.0)
+                add_round_diagnostics(data)
+                (root / f"{language}_unicast-001.json").write_text(json.dumps(data))
+
+            self.assertEqual(2, report_forks.write_diagnostic_csvs(root))
+            batch_lines = (root / "round_batch_diagnostics.csv").read_text().splitlines()
+            producer_lines = (
+                root / "round_producer_backpressure.csv"
+            ).read_text().splitlines()
+            self.assertEqual(5, len(batch_lines))
+            self.assertEqual(5, len(producer_lines))
+            self.assertIn("round_index", batch_lines[0])
+            self.assertIn("warmup", batch_lines[1])
+            self.assertIn("measured", batch_lines[2])
+
+    def test_lmax_instrumentation_fails_closed_on_source_drift(self) -> None:
+        source = "prefix\n" + instrument_lmax.ORIGINAL + "suffix\n"
+        patched = instrument_lmax.instrument(source)
+        self.assertIn("H2HDiagnostics.recordProducerBackpressure", patched)
+        self.assertNotEqual(source, patched)
+        with self.assertRaisesRegex(ValueError, "found 0"):
+            instrument_lmax.instrument("unrecognized source")
 
 
 if __name__ == "__main__":

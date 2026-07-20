@@ -2,6 +2,10 @@
 
 Same-machine comparison harness. **Not** a substitute for Criterion benches, and **not** a claim of portable absolute performance.
 
+Accepted macOS/Linux evidence and the current engineering interpretation are
+summarized in [`docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md); this document
+defines the runner and artifact contract.
+
 ## Why this exists
 
 Official LMAX `perftest` / JMH numbers are hard to map 1:1 onto BadBatch’s Builder API and Criterion suites (different event models, harnesses, and metrics). This tool runs **matched scenarios** on one host:
@@ -51,6 +55,10 @@ bash scripts/run_head_to_head.sh --scenario pipeline --mode full \
 
 # Rust 128B slot padding (Java still heap objects — interpret carefully)
 bash scripts/run_head_to_head.sh --scenario unicast --event-padding 128 --mode quick
+
+# Probe every warmup/measured round (diagnostic throughput, not canonical ranking)
+bash scripts/run_head_to_head.sh --scenario pipeline --mode full --forks 20 \
+  --seed 20260719 --cpu-list 2,3,4,5 --round-diagnostics
 ```
 
 Outputs go to `head_to_head_results/<timestamp>/`:
@@ -63,6 +71,28 @@ Outputs go to `head_to_head_results/<timestamp>/`:
 | `fork_samples.csv` | paired fork scatter input |
 | `fork_summary.json` | aggregate fork statistics |
 | `REPORT.md` | fork summary, every pair, and interpretation boundary |
+| `round_batch_diagnostics.csv` | opt-in per-round, per-stage batch-size/queue-depth histograms |
+| `round_producer_backpressure.csv` | opt-in per-round producer capacity-wait counters |
+
+## Per-round diagnostic mode
+
+`--round-diagnostics` is deliberately separate from the canonical benchmark:
+
+- Rust is rebuilt with `bench-round-diagnostics`; normal and `bench-tools`-only
+  builds contain no hot-path probe fields, counters or branches.
+- Java compiles a verified temporary copy of LMAX `SingleProducerSequencer.java`
+  under the results directory. The pinned `examples/disruptor` checkout is never
+  edited. Its generated-source SHA256 is recorded in `environment.txt`.
+- Every warmup and measured round retains its own consumer-stage batch-size and
+  queue-depth histograms, plus producer backpressure entries, total wait-loop
+  iterations, and maximum iterations for one entry. Nothing is collapsed to a
+  process-level mode before it reaches raw JSON/CSV.
+- Histogram bin `i` is floor-log2: `[2^i, 2^(i+1)-1]` (64 counters).
+- Rust iterations count `spin_loop()` calls; Java iterations count
+  `parkNanos(1L)` requests. Those are different physical actions, so compare
+  per-round correlation and entry incidence, not the raw counts as equal time.
+- Probe-enabled throughput is conditioned on instrumentation overhead. Use it
+  to distinguish batch/backpressure hypotheses, not as the headline H2H ratio.
 
 ## How to answer “what’s the gap?”
 

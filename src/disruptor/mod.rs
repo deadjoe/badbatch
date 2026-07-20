@@ -101,6 +101,9 @@ pub use producer_type::ProducerType;
 pub use ring_buffer::{RingBuffer, SlotPadding};
 pub use sequence::Sequence;
 pub use sequence_barrier::{ProcessingSequenceBarrier, SequenceBarrier};
+#[cfg(feature = "bench-round-diagnostics")]
+#[doc(hidden)]
+pub use sequencer::{configure_bench_round_diagnostics, BenchProducerBackpressureSnapshot};
 pub use sequencer::{MultiProducerSequencer, Sequencer, SequencerEnum, SingleProducerSequencer};
 pub use wait_strategy::{
     BlockingWaitStrategy, BusySpinWaitStrategy, SleepingWaitStrategy, WaitStrategy,

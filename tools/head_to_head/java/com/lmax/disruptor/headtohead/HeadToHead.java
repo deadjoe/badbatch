@@ -4,6 +4,7 @@ import com.lmax.disruptor.BatchEventProcessor;
 import com.lmax.disruptor.BatchEventProcessorBuilder;
 import com.lmax.disruptor.BusySpinWaitStrategy;
 import com.lmax.disruptor.EventHandler;
+import com.lmax.disruptor.H2HDiagnostics;
 import com.lmax.disruptor.RingBuffer;
 import com.lmax.disruptor.SequenceBarrier;
 import com.lmax.disruptor.WaitStrategy;
@@ -49,6 +50,7 @@ public final class HeadToHead
     public static void main(final String[] args) throws Exception
     {
         final Config config = Config.parse(args);
+        H2HDiagnostics.configure(config.roundDiagnostics);
         final List<Round> rounds = runScenario(config);
         final Summary summary = Summary.from(rounds, config.warmupRounds);
         final String json = Json.emit(config, rounds, summary);
@@ -98,8 +100,14 @@ public final class HeadToHead
             final AtomicInteger ready = new AtomicInteger();
             final AtomicLong processed = new AtomicLong();
             final AtomicLong checksum = new AtomicLong();
-            final SummingHandler handler =
-                    new SummingHandler(processed, checksum, ready, config.eventsTotal, affinity, 1,
+            final BatchRecorder batchRecorder =
+                    config.roundDiagnostics ? new BatchRecorder("consumer") : null;
+            final EventHandler<ComparisonEvent> handler = config.roundDiagnostics
+                    ? new DiagnosticSummingHandler(
+                            processed, checksum, ready, config.eventsTotal, affinity, 1,
+                            "consumer", batchRecorder)
+                    : new SummingHandler(
+                            processed, checksum, ready, config.eventsTotal, affinity, 1,
                             "consumer");
 
             final RingBuffer<ComparisonEvent> ring =
@@ -116,6 +124,10 @@ public final class HeadToHead
             waitForCount(ready, 1, "unicast consumer ready");
             affinity.verify("unicast consumer");
 
+            if (config.roundDiagnostics)
+            {
+                H2HDiagnostics.beginRound();
+            }
             final long start = System.nanoTime();
             if (batch)
             {
@@ -152,16 +164,22 @@ public final class HeadToHead
             }
             waitForCount(processed, config.eventsTotal, "unicast completion");
             final long elapsed = System.nanoTime() - start;
+            final H2HDiagnostics.Snapshot producerBackpressure =
+                    config.roundDiagnostics ? H2HDiagnostics.snapshot() : null;
 
+            processor.halt();
+            shutdown(executor);
+            final RoundDiagnostics diagnostics = config.roundDiagnostics
+                    ? RoundDiagnostics.single(batchRecorder.snapshot(config.eventsTotal),
+                            producerBackpressure)
+                    : null;
             rounds.add(Round.of(
                     i + 1,
                     i < config.warmupRounds ? "warmup" : "measured",
                     elapsed,
                     config.eventsTotal,
-                    checksum.get() == expected));
-
-            processor.halt();
-            shutdown(executor);
+                    checksum.get() == expected,
+                    diagnostics));
         }
         return rounds;
     }
@@ -179,8 +197,14 @@ public final class HeadToHead
             final AtomicInteger ready = new AtomicInteger();
             final AtomicLong processed = new AtomicLong();
             final AtomicLong checksum = new AtomicLong();
-            final SummingHandler handler =
-                    new SummingHandler(processed, checksum, ready, config.eventsTotal, affinity, 3,
+            final BatchRecorder batchRecorder =
+                    config.roundDiagnostics ? new BatchRecorder("consumer") : null;
+            final EventHandler<ComparisonEvent> handler = config.roundDiagnostics
+                    ? new DiagnosticSummingHandler(
+                            processed, checksum, ready, config.eventsTotal, affinity, 3,
+                            "consumer", batchRecorder)
+                    : new SummingHandler(
+                            processed, checksum, ready, config.eventsTotal, affinity, 3,
                             "consumer");
 
             final RingBuffer<ComparisonEvent> ring =
@@ -242,15 +266,18 @@ public final class HeadToHead
             waitForCount(processed, config.eventsTotal, "mpsc completion");
             final long elapsed = System.nanoTime() - start;
 
+            processor.halt();
+            shutdown(executor);
+            final RoundDiagnostics diagnostics = config.roundDiagnostics
+                    ? RoundDiagnostics.multiProducer(batchRecorder.snapshot(config.eventsTotal))
+                    : null;
             rounds.add(Round.of(
                     i + 1,
                     i < config.warmupRounds ? "warmup" : "measured",
                     elapsed,
                     config.eventsTotal,
-                    checksum.get() == expected));
-
-            processor.halt();
-            shutdown(executor);
+                    checksum.get() == expected,
+                    diagnostics));
         }
         return rounds;
     }
@@ -272,17 +299,31 @@ public final class HeadToHead
                     RingBuffer.createSingleProducer(
                             ComparisonEvent::new, config.bufferSize, waitStrategy(config.wait));
 
-            final Stage1Handler stage1 = new Stage1Handler(ready, affinity, 1);
+            final BatchRecorder stage1Recorder =
+                    config.roundDiagnostics ? new BatchRecorder("stage_1") : null;
+            final EventHandler<ComparisonEvent> stage1 = config.roundDiagnostics
+                    ? new DiagnosticStage1Handler(ready, affinity, 1, stage1Recorder)
+                    : new Stage1Handler(ready, affinity, 1);
             final BatchEventProcessor<ComparisonEvent> p1 =
                     new BatchEventProcessorBuilder().build(ring, ring.newBarrier(), stage1);
 
-            final Stage2Handler stage2 = new Stage2Handler(ready, affinity, 2);
+            final BatchRecorder stage2Recorder =
+                    config.roundDiagnostics ? new BatchRecorder("stage_2") : null;
+            final EventHandler<ComparisonEvent> stage2 = config.roundDiagnostics
+                    ? new DiagnosticStage2Handler(ready, affinity, 2, stage2Recorder)
+                    : new Stage2Handler(ready, affinity, 2);
             final BatchEventProcessor<ComparisonEvent> p2 =
                     new BatchEventProcessorBuilder()
                             .build(ring, ring.newBarrier(p1.getSequence()), stage2);
 
-            final Stage3Handler stage3 =
-                    new Stage3Handler(processed, checksum, ready, config.eventsTotal, affinity, 3);
+            final BatchRecorder stage3Recorder =
+                    config.roundDiagnostics ? new BatchRecorder("stage_3") : null;
+            final EventHandler<ComparisonEvent> stage3 = config.roundDiagnostics
+                    ? new DiagnosticStage3Handler(
+                            processed, checksum, ready, config.eventsTotal, affinity, 3,
+                            stage3Recorder)
+                    : new Stage3Handler(
+                            processed, checksum, ready, config.eventsTotal, affinity, 3);
             final BatchEventProcessor<ComparisonEvent> p3 =
                     new BatchEventProcessorBuilder()
                             .build(ring, ring.newBarrier(p2.getSequence()), stage3);
@@ -297,6 +338,10 @@ public final class HeadToHead
             waitForCount(ready, 3, "pipeline stages ready");
             affinity.verify("pipeline stages");
 
+            if (config.roundDiagnostics)
+            {
+                H2HDiagnostics.beginRound();
+            }
             final long start = System.nanoTime();
             for (long v = 0; v < config.eventsTotal; v++)
             {
@@ -310,18 +355,29 @@ public final class HeadToHead
             }
             waitForCount(processed, config.eventsTotal, "pipeline completion");
             final long elapsed = System.nanoTime() - start;
-
-            rounds.add(Round.of(
-                    i + 1,
-                    i < config.warmupRounds ? "warmup" : "measured",
-                    elapsed,
-                    config.eventsTotal,
-                    checksum.get() == expected));
+            final H2HDiagnostics.Snapshot producerBackpressure =
+                    config.roundDiagnostics ? H2HDiagnostics.snapshot() : null;
 
             p1.halt();
             p2.halt();
             p3.halt();
             shutdown(executor);
+            final RoundDiagnostics diagnostics = config.roundDiagnostics
+                    ? new RoundDiagnostics(
+                            List.of(
+                                    stage1Recorder.snapshot(config.eventsTotal),
+                                    stage2Recorder.snapshot(config.eventsTotal),
+                                    stage3Recorder.snapshot(config.eventsTotal)),
+                            producerBackpressure,
+                            true)
+                    : null;
+            rounds.add(Round.of(
+                    i + 1,
+                    i < config.warmupRounds ? "warmup" : "measured",
+                    elapsed,
+                    config.eventsTotal,
+                    checksum.get() == expected,
+                    diagnostics));
         }
         return rounds;
     }
@@ -482,6 +538,97 @@ public final class HeadToHead
         long stage3Value;
     }
 
+    private static final class Log2Histogram
+    {
+        private static final int BINS = 64;
+        private long count;
+        private long sum;
+        private long min = Long.MAX_VALUE;
+        private long max;
+        private final long[] bins = new long[BINS];
+
+        void observe(final long value)
+        {
+            if (value <= 0L)
+            {
+                throw new IllegalArgumentException("histogram values must be positive");
+            }
+            final int bin = 63 - Long.numberOfLeadingZeros(value);
+            count++;
+            sum += value;
+            min = Math.min(min, value);
+            max = Math.max(max, value);
+            bins[bin]++;
+        }
+
+        HistogramSnapshot snapshot()
+        {
+            return new HistogramSnapshot(
+                    count,
+                    sum,
+                    count == 0L ? 0L : min,
+                    max,
+                    bins.clone());
+        }
+    }
+
+    private record HistogramSnapshot(long count, long sum, long min, long max, long[] log2Bins)
+    {
+    }
+
+    private record ConsumerBatchDiagnostics(
+            String role, HistogramSnapshot batchSize, HistogramSnapshot queueDepth)
+    {
+    }
+
+    private static final class BatchRecorder
+    {
+        private final String role;
+        private final Log2Histogram batchSize = new Log2Histogram();
+        private final Log2Histogram queueDepth = new Log2Histogram();
+
+        BatchRecorder(final String role)
+        {
+            this.role = role;
+        }
+
+        void observe(final long size, final long depth)
+        {
+            batchSize.observe(size);
+            queueDepth.observe(depth);
+        }
+
+        ConsumerBatchDiagnostics snapshot(final long expectedEvents)
+        {
+            final HistogramSnapshot sizes = batchSize.snapshot();
+            if (sizes.sum() != expectedEvents)
+            {
+                throw new IllegalStateException(
+                        role + " batch diagnostics saw " + sizes.sum()
+                                + " events, expected " + expectedEvents);
+            }
+            return new ConsumerBatchDiagnostics(role, sizes, queueDepth.snapshot());
+        }
+    }
+
+    private record RoundDiagnostics(
+            List<ConsumerBatchDiagnostics> consumers,
+            H2HDiagnostics.Snapshot producerBackpressure,
+            boolean producerSupported)
+    {
+        static RoundDiagnostics single(
+                final ConsumerBatchDiagnostics consumer,
+                final H2HDiagnostics.Snapshot producerBackpressure)
+        {
+            return new RoundDiagnostics(List.of(consumer), producerBackpressure, true);
+        }
+
+        static RoundDiagnostics multiProducer(final ConsumerBatchDiagnostics consumer)
+        {
+            return new RoundDiagnostics(List.of(consumer), null, false);
+        }
+    }
+
     private static final class SummingHandler implements EventHandler<ComparisonEvent>
     {
         private final AtomicLong processed;
@@ -634,6 +781,202 @@ public final class HeadToHead
         }
     }
 
+    // Diagnostic variants duplicate the tiny hot-path handlers so there is no
+    // per-event delegate call. Only onBatchStart carries probe work.
+    private static final class DiagnosticSummingHandler implements EventHandler<ComparisonEvent>
+    {
+        private final AtomicLong processed;
+        private final AtomicLong checksum;
+        private final AtomicInteger ready;
+        private final long eventsTotal;
+        private final long finalSequence;
+        private final AffinityTracker affinity;
+        private final int cpuIndex;
+        private final String role;
+        private final BatchRecorder recorder;
+        private long localChecksum;
+
+        DiagnosticSummingHandler(
+                final AtomicLong processed,
+                final AtomicLong checksum,
+                final AtomicInteger ready,
+                final long eventsTotal,
+                final AffinityTracker affinity,
+                final int cpuIndex,
+                final String role,
+                final BatchRecorder recorder)
+        {
+            this.processed = processed;
+            this.checksum = checksum;
+            this.ready = ready;
+            this.eventsTotal = eventsTotal;
+            this.finalSequence = eventsTotal - 1L;
+            this.affinity = affinity;
+            this.cpuIndex = cpuIndex;
+            this.role = role;
+            this.recorder = recorder;
+        }
+
+        @Override
+        public void onBatchStart(final long batchSize, final long queueDepth)
+        {
+            recorder.observe(batchSize, queueDepth);
+        }
+
+        @Override
+        public void onStart()
+        {
+            affinity.pinCurrent(cpuIndex, role);
+            ready.incrementAndGet();
+        }
+
+        @Override
+        public void onEvent(final ComparisonEvent event, final long sequence, final boolean endOfBatch)
+        {
+            localChecksum += event.value;
+            if (sequence == finalSequence)
+            {
+                checksum.set(localChecksum);
+                processed.set(eventsTotal);
+            }
+        }
+    }
+
+    private static final class DiagnosticStage1Handler implements EventHandler<ComparisonEvent>
+    {
+        private final AtomicInteger ready;
+        private final AffinityTracker affinity;
+        private final int cpuIndex;
+        private final BatchRecorder recorder;
+
+        DiagnosticStage1Handler(
+                final AtomicInteger ready,
+                final AffinityTracker affinity,
+                final int cpuIndex,
+                final BatchRecorder recorder)
+        {
+            this.ready = ready;
+            this.affinity = affinity;
+            this.cpuIndex = cpuIndex;
+            this.recorder = recorder;
+        }
+
+        @Override
+        public void onBatchStart(final long batchSize, final long queueDepth)
+        {
+            recorder.observe(batchSize, queueDepth);
+        }
+
+        @Override
+        public void onStart()
+        {
+            affinity.pinCurrent(cpuIndex, "stage_1");
+            ready.incrementAndGet();
+        }
+
+        @Override
+        public void onEvent(final ComparisonEvent event, final long sequence, final boolean endOfBatch)
+        {
+            event.stage1Value = event.value + 1L;
+        }
+    }
+
+    private static final class DiagnosticStage2Handler implements EventHandler<ComparisonEvent>
+    {
+        private final AtomicInteger ready;
+        private final AffinityTracker affinity;
+        private final int cpuIndex;
+        private final BatchRecorder recorder;
+
+        DiagnosticStage2Handler(
+                final AtomicInteger ready,
+                final AffinityTracker affinity,
+                final int cpuIndex,
+                final BatchRecorder recorder)
+        {
+            this.ready = ready;
+            this.affinity = affinity;
+            this.cpuIndex = cpuIndex;
+            this.recorder = recorder;
+        }
+
+        @Override
+        public void onBatchStart(final long batchSize, final long queueDepth)
+        {
+            recorder.observe(batchSize, queueDepth);
+        }
+
+        @Override
+        public void onStart()
+        {
+            affinity.pinCurrent(cpuIndex, "stage_2");
+            ready.incrementAndGet();
+        }
+
+        @Override
+        public void onEvent(final ComparisonEvent event, final long sequence, final boolean endOfBatch)
+        {
+            event.stage2Value = event.stage1Value + 3L;
+        }
+    }
+
+    private static final class DiagnosticStage3Handler implements EventHandler<ComparisonEvent>
+    {
+        private final AtomicLong processed;
+        private final AtomicLong checksum;
+        private final AtomicInteger ready;
+        private final long eventsTotal;
+        private final long finalSequence;
+        private final AffinityTracker affinity;
+        private final int cpuIndex;
+        private final BatchRecorder recorder;
+        private long localChecksum;
+
+        DiagnosticStage3Handler(
+                final AtomicLong processed,
+                final AtomicLong checksum,
+                final AtomicInteger ready,
+                final long eventsTotal,
+                final AffinityTracker affinity,
+                final int cpuIndex,
+                final BatchRecorder recorder)
+        {
+            this.processed = processed;
+            this.checksum = checksum;
+            this.ready = ready;
+            this.eventsTotal = eventsTotal;
+            this.finalSequence = eventsTotal - 1L;
+            this.affinity = affinity;
+            this.cpuIndex = cpuIndex;
+            this.recorder = recorder;
+        }
+
+        @Override
+        public void onBatchStart(final long batchSize, final long queueDepth)
+        {
+            recorder.observe(batchSize, queueDepth);
+        }
+
+        @Override
+        public void onStart()
+        {
+            affinity.pinCurrent(cpuIndex, "stage_3");
+            ready.incrementAndGet();
+        }
+
+        @Override
+        public void onEvent(final ComparisonEvent event, final long sequence, final boolean endOfBatch)
+        {
+            event.stage3Value = event.stage2Value + 7L;
+            localChecksum += event.stage3Value;
+            if (sequence == finalSequence)
+            {
+                checksum.set(localChecksum);
+                processed.set(eventsTotal);
+            }
+        }
+    }
+
     // --- config / results ----------------------------------------------------------
 
     enum Scenario
@@ -701,6 +1044,7 @@ public final class HeadToHead
         String implLabel = "lmax-bep";
         String outputPath;
         boolean quick;
+        boolean roundDiagnostics;
         List<Integer> cpuList = List.of();
         boolean affinityVerifiedAll;
 
@@ -742,6 +1086,7 @@ public final class HeadToHead
                     case "--impl-label" -> c.implLabel = args[++i];
                     case "--output" -> c.outputPath = args[++i];
                     case "--cpu-list" -> c.cpuList = parseCpuList(args[++i]);
+                    case "--round-diagnostics" -> c.roundDiagnostics = true;
                     case "--quick" -> c.quick = true;
                     case "--help", "-h" ->
                     {
@@ -858,6 +1203,7 @@ public final class HeadToHead
         final long events;
         final double opsPerSec;
         final boolean checksumValid;
+        final RoundDiagnostics diagnostics;
 
         private Round(
                 final int index,
@@ -865,7 +1211,8 @@ public final class HeadToHead
                 final long elapsedNs,
                 final long events,
                 final double opsPerSec,
-                final boolean checksumValid)
+                final boolean checksumValid,
+                final RoundDiagnostics diagnostics)
         {
             this.index = index;
             this.phase = phase;
@@ -873,6 +1220,7 @@ public final class HeadToHead
             this.events = events;
             this.opsPerSec = opsPerSec;
             this.checksumValid = checksumValid;
+            this.diagnostics = diagnostics;
         }
 
         static Round of(
@@ -880,10 +1228,11 @@ public final class HeadToHead
                 final String phase,
                 final long elapsedNs,
                 final long events,
-                final boolean checksumValid)
+                final boolean checksumValid,
+                final RoundDiagnostics diagnostics)
         {
             final double ops = events / (elapsedNs / 1_000_000_000.0);
-            return new Round(index, phase, elapsedNs, events, ops, checksumValid);
+            return new Round(index, phase, elapsedNs, events, ops, checksumValid, diagnostics);
         }
     }
 
@@ -967,6 +1316,10 @@ public final class HeadToHead
             num(sb, "batch_size", config.batchSize, true);
             num(sb, "warmup_rounds", config.warmupRounds, true);
             num(sb, "measured_rounds", config.measuredRounds, true);
+            if (config.roundDiagnostics)
+            {
+                bool(sb, "round_diagnostics", true, true, 2);
+            }
             field(sb, "run_order", config.runOrder, true);
             field(sb, "pair_id", config.pairId, true);
             num(sb, "fork_index", config.forkIndex, true);
@@ -1016,7 +1369,11 @@ public final class HeadToHead
                 num(sb, "elapsed_ns", r.elapsedNs, true, 6);
                 num(sb, "events", r.events, true, 6);
                 fnum(sb, "ops_per_sec", r.opsPerSec, true, 6);
-                bool(sb, "checksum_valid", r.checksumValid, false, 6);
+                bool(sb, "checksum_valid", r.checksumValid, r.diagnostics != null, 6);
+                if (r.diagnostics != null)
+                {
+                    diagnostics(sb, r.diagnostics);
+                }
                 sb.append(i + 1 == rounds.size() ? "    }\n" : "    },\n");
             }
             sb.append("  ],\n");
@@ -1031,6 +1388,84 @@ public final class HeadToHead
             sb.append("  }\n");
             sb.append("}\n");
             return sb.toString();
+        }
+
+        private static void diagnostics(
+                final StringBuilder sb, final RoundDiagnostics diagnostics)
+        {
+            sb.append("      \"diagnostics\": {\n");
+            sb.append("        \"batch_processing\": [\n");
+            for (int i = 0; i < diagnostics.consumers().size(); i++)
+            {
+                final ConsumerBatchDiagnostics consumer = diagnostics.consumers().get(i);
+                sb.append("          {\n");
+                field(sb, "role", consumer.role(), true, 12);
+                sb.append("            \"batch_size\": ");
+                histogram(sb, consumer.batchSize(), 12);
+                sb.append(",\n");
+                sb.append("            \"queue_depth\": ");
+                histogram(sb, consumer.queueDepth(), 12);
+                sb.append('\n');
+                sb.append(i + 1 == diagnostics.consumers().size()
+                        ? "          }\n"
+                        : "          },\n");
+            }
+            sb.append("        ],\n");
+            sb.append("        \"producer_backpressure\": {\n");
+            bool(sb, "supported", diagnostics.producerSupported(), true, 10);
+            field(
+                    sb,
+                    "iteration_action",
+                    diagnostics.producerSupported()
+                            ? "park_nanos_1_request"
+                            : "unsupported_multi_producer",
+                    true,
+                    10);
+            final H2HDiagnostics.Snapshot producer = diagnostics.producerBackpressure();
+            num(sb, "entries", producer == null ? 0L : producer.entries(), true, 10);
+            num(
+                    sb,
+                    "wait_loop_iterations",
+                    producer == null ? 0L : producer.waitLoopIterations(),
+                    true,
+                    10);
+            num(
+                    sb,
+                    "max_wait_loop_iterations",
+                    producer == null ? 0L : producer.maxWaitLoopIterations(),
+                    false,
+                    10);
+            sb.append("        }\n");
+            sb.append("      }\n");
+        }
+
+        private static void histogram(
+                final StringBuilder sb, final HistogramSnapshot histogram, final int indent)
+        {
+            sb.append("{\n");
+            num(sb, "count", histogram.count(), true, indent + 2);
+            num(sb, "sum", histogram.sum(), true, indent + 2);
+            num(sb, "min", histogram.min(), true, indent + 2);
+            num(sb, "max", histogram.max(), true, indent + 2);
+            fnum(
+                    sb,
+                    "mean",
+                    histogram.count() == 0L
+                            ? 0.0
+                            : (double) histogram.sum() / histogram.count(),
+                    true,
+                    indent + 2);
+            sb.append(" ".repeat(indent + 2)).append("\"log2_bins\": [");
+            for (int i = 0; i < histogram.log2Bins().length; i++)
+            {
+                if (i > 0)
+                {
+                    sb.append(", ");
+                }
+                sb.append(histogram.log2Bins()[i]);
+            }
+            sb.append("]\n");
+            sb.append(" ".repeat(indent)).append('}');
         }
 
         private static void field(

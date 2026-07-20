@@ -78,6 +78,18 @@ where
         &mut self.producer
     }
 
+    /// Return benchmark-only single-producer capacity-wait counters.
+    ///
+    /// `None` means this is a multi-producer handle. This API is compiled only
+    /// for the opt-in per-round H2H diagnostics build.
+    #[cfg(feature = "bench-round-diagnostics")]
+    #[doc(hidden)]
+    pub fn bench_producer_backpressure_snapshot(
+        &self,
+    ) -> Option<crate::disruptor::sequencer::BenchProducerBackpressureSnapshot> {
+        self.core.sequencer.bench_producer_backpressure_snapshot()
+    }
+
     /// Consume the handle and return the producer
     ///
     /// Stops consumer threads and removes gating so the ring can wrap freely,

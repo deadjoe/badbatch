@@ -34,6 +34,7 @@ assert len({path.name for path in rust + java}) == 4
 orders = set()
 for path in rust + java:
     data = json.loads(path.read_text())
+    assert "round_diagnostics" not in data
     measured = [round_ for round_ in data["rounds"] if round_["phase"] == "measured"]
     assert len(measured) == 1, (path, measured)
     assert data["summary"]["checksum_valid_all"], path
@@ -68,5 +69,53 @@ with (root / "fork_samples.csv").open() as handle:
 assert len(rows) == 2, rows
 assert (root / "fork_summary.json").exists()
 assert (root / "REPORT.md").exists()
+assert not (root / "round_batch_diagnostics.csv").exists()
+assert not (root / "round_producer_backpressure.csv").exists()
 print(f"h2h smoke artifacts verified: {root}")
+PY
+
+DIAGNOSTIC_RESULTS_DIR="$(mktemp -d "${TMP_ROOT%/}/badbatch-h2h-diagnostic-smoke.XXXXXX")"
+bash scripts/run_head_to_head.sh \
+  --scenario pipeline \
+  --mode quick \
+  --order rust-first \
+  --forks 1 \
+  --events-total 10000 \
+  --buffer-size 64 \
+  --round-diagnostics \
+  --results-dir "$DIAGNOSTIC_RESULTS_DIR"
+
+python3 - "$DIAGNOSTIC_RESULTS_DIR" <<'PY'
+import csv, json, pathlib, sys
+
+root = pathlib.Path(sys.argv[1])
+for path in (next(root.glob("rust_*.json")), next(root.glob("java_*.json"))):
+    data = json.loads(path.read_text())
+    assert data["round_diagnostics"] is True
+    assert len(data["rounds"]) == 2
+    for round_ in data["rounds"]:
+        diagnostics = round_["diagnostics"]
+        assert [item["role"] for item in diagnostics["batch_processing"]] == [
+            "stage_1", "stage_2", "stage_3"
+        ]
+        for item in diagnostics["batch_processing"]:
+            batch = item["batch_size"]
+            queue = item["queue_depth"]
+            assert batch["sum"] == round_["events"]
+            assert sum(batch["log2_bins"]) == batch["count"]
+            assert sum(queue["log2_bins"]) == queue["count"]
+        producer = diagnostics["producer_backpressure"]
+        assert producer["supported"] is True
+        assert producer["iteration_action"] in {"spin_loop", "park_nanos_1_request"}
+
+with (root / "round_batch_diagnostics.csv").open() as handle:
+    batch_rows = list(csv.DictReader(handle))
+with (root / "round_producer_backpressure.csv").open() as handle:
+    producer_rows = list(csv.DictReader(handle))
+assert len(batch_rows) == 12, len(batch_rows)  # 2 languages x 2 rounds x 3 stages
+assert len(producer_rows) == 4, len(producer_rows)
+assert {row["round_index"] for row in batch_rows} == {"1", "2"}
+assert {row["phase"] for row in batch_rows} == {"warmup", "measured"}
+assert "Probe-conditioned run" in (root / "REPORT.md").read_text()
+print(f"h2h diagnostic smoke artifacts verified: {root}")
 PY

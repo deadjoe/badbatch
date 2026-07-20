@@ -33,6 +33,7 @@ class Sample:
     requested_cpu_list: tuple[int, ...]
     affinity_verified_all: bool
     role_cpu_map: tuple[tuple[str, int], ...]
+    round_diagnostics: bool
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,7 @@ def load_sample(path: pathlib.Path) -> Sample:
         requested_cpu_list=requested_cpu_list,
         affinity_verified_all=bool(affinity.get("verified_all", False)),
         role_cpu_map=role_cpu_map,
+        round_diagnostics=bool(data.get("round_diagnostics", False)),
     )
 
 
@@ -144,6 +146,7 @@ def load_pairs(results_dir: pathlib.Path) -> list[Pair]:
             and rust.requested_cpu_list == java.requested_cpu_list
             and rust.affinity_verified_all == java.affinity_verified_all
             and rust.role_cpu_map == java.role_cpu_map
+            and rust.round_diagnostics == java.round_diagnostics
         )
         if not comparable:
             raise ValueError(f"metadata mismatch in pair {scenario}/{pair_id}")
@@ -219,10 +222,139 @@ def write_csv(results_dir: pathlib.Path, pairs: list[Pair]) -> None:
             writer.writerow(row)
 
 
+def _validated_histogram(
+    histogram: Any, *, path: pathlib.Path, label: str
+) -> dict[str, Any]:
+    if not isinstance(histogram, dict):
+        raise ValueError(f"{path}: {label} must be an object")
+    required = ("count", "sum", "min", "max", "mean", "log2_bins")
+    missing = [key for key in required if key not in histogram]
+    if missing:
+        raise ValueError(f"{path}: {label} missing {', '.join(missing)}")
+    bins = histogram["log2_bins"]
+    if not isinstance(bins, list) or len(bins) != 64:
+        raise ValueError(f"{path}: {label}.log2_bins must contain 64 counters")
+    if sum(int(value) for value in bins) != int(histogram["count"]):
+        raise ValueError(f"{path}: {label} bin counts do not sum to count")
+    return histogram
+
+
+def write_diagnostic_csvs(results_dir: pathlib.Path) -> int:
+    """Validate and flatten opt-in diagnostics without aggregating away round identity."""
+    artifacts: list[tuple[pathlib.Path, dict[str, Any]]] = []
+    for pattern in ("rust_*.json", "java_*.json"):
+        for path in sorted(results_dir.glob(pattern)):
+            artifacts.append((path, json.loads(path.read_text())))
+    enabled = [bool(data.get("round_diagnostics", False)) for _, data in artifacts]
+    if not any(enabled):
+        return 0
+    if not all(enabled):
+        raise ValueError("diagnostic and canonical artifacts cannot share one results directory")
+
+    batch_rows: list[dict[str, Any]] = []
+    producer_rows: list[dict[str, Any]] = []
+    for path, data in artifacts:
+        for round_ in data.get("rounds", []):
+            diagnostics = round_.get("diagnostics")
+            if not isinstance(diagnostics, dict):
+                raise ValueError(f"{path}: every diagnostic round must contain diagnostics")
+            consumers = diagnostics.get("batch_processing")
+            if not isinstance(consumers, list) or not consumers:
+                raise ValueError(f"{path}: diagnostics.batch_processing must be non-empty")
+            for consumer in consumers:
+                role = str(consumer.get("role", ""))
+                if not role:
+                    raise ValueError(f"{path}: diagnostic consumer role is missing")
+                batch = _validated_histogram(
+                    consumer.get("batch_size"), path=path, label=f"{role}.batch_size"
+                )
+                queue = _validated_histogram(
+                    consumer.get("queue_depth"), path=path, label=f"{role}.queue_depth"
+                )
+                if int(batch["sum"]) != int(round_["events"]):
+                    raise ValueError(f"{path}: {role} batch_size.sum does not equal round events")
+                if int(batch["count"]) != int(queue["count"]):
+                    raise ValueError(f"{path}: {role} histogram observation counts differ")
+                batch_rows.append(
+                    {
+                        "language": data["language"],
+                        "scenario": data["scenario"],
+                        "pair_id": data["pair_id"],
+                        "fork_index": data["fork_index"],
+                        "round_index": round_["index"],
+                        "phase": round_["phase"],
+                        "ops_per_sec": round_["ops_per_sec"],
+                        "role": role,
+                        "batch_observations": batch["count"],
+                        "batch_events_sum": batch["sum"],
+                        "batch_min": batch["min"],
+                        "batch_max": batch["max"],
+                        "batch_mean": batch["mean"],
+                        "batch_log2_bins": json.dumps(batch["log2_bins"], separators=(",", ":")),
+                        "queue_min": queue["min"],
+                        "queue_max": queue["max"],
+                        "queue_mean": queue["mean"],
+                        "queue_log2_bins": json.dumps(queue["log2_bins"], separators=(",", ":")),
+                    }
+                )
+            producer = diagnostics.get("producer_backpressure")
+            if not isinstance(producer, dict):
+                raise ValueError(f"{path}: producer_backpressure must be an object")
+            supported = bool(producer.get("supported", False))
+            expected_supported = data["scenario"] != "mpsc_batch"
+            if supported != expected_supported:
+                raise ValueError(f"{path}: producer backpressure support does not match scenario")
+            expected_action = (
+                "unsupported_multi_producer"
+                if not supported
+                else "spin_loop"
+                if data["language"] == "rust"
+                else "park_nanos_1_request"
+            )
+            if producer.get("iteration_action") != expected_action:
+                raise ValueError(f"{path}: unexpected producer backpressure iteration action")
+            entries = int(producer.get("entries", 0))
+            iterations = int(producer.get("wait_loop_iterations", 0))
+            maximum = int(producer.get("max_wait_loop_iterations", 0))
+            if min(entries, iterations, maximum) < 0:
+                raise ValueError(f"{path}: producer backpressure counters must be non-negative")
+            if (entries == 0) != (iterations == 0 and maximum == 0):
+                raise ValueError(f"{path}: producer backpressure zero counters are inconsistent")
+            if entries > 0 and (iterations < entries or maximum == 0 or maximum > iterations):
+                raise ValueError(f"{path}: producer backpressure counters are inconsistent")
+            producer_rows.append(
+                {
+                    "language": data["language"],
+                    "scenario": data["scenario"],
+                    "pair_id": data["pair_id"],
+                    "fork_index": data["fork_index"],
+                    "round_index": round_["index"],
+                    "phase": round_["phase"],
+                    "ops_per_sec": round_["ops_per_sec"],
+                    "supported": supported,
+                    "iteration_action": expected_action,
+                    "entries": entries,
+                    "wait_loop_iterations": iterations,
+                    "max_wait_loop_iterations": maximum,
+                }
+            )
+
+    for name, rows in (
+        ("round_batch_diagnostics.csv", batch_rows),
+        ("round_producer_backpressure.csv", producer_rows),
+    ):
+        with (results_dir / name).open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+    return len(artifacts)
+
+
 def render_report(
     results_dir: pathlib.Path,
     pairs: list[Pair],
     summary: dict[str, dict[str, Any]],
+    diagnostic_artifacts: int = 0,
 ) -> str:
     environment_path = results_dir / "environment.txt"
     environment = environment_path.read_text() if environment_path.exists() else "missing"
@@ -270,6 +402,14 @@ def render_report(
             "- Per-thread CPU affinity metadata must match within every Rust/Java pair; when requested, each process hard-fails before timing unless every measured role verifies its CPU.\n",
         ]
     )
+    if diagnostic_artifacts:
+        lines.extend(
+            [
+                "- **Probe-conditioned run:** per-round handler and producer counters were enabled; throughput here is diagnostic evidence, not a canonical Rust/Java ranking.\n",
+                "- Round identity is preserved in `round_batch_diagnostics.csv` and `round_producer_backpressure.csv`; log2 bin `i` covers `[2^i, 2^(i+1)-1]`.\n",
+                "- Producer iteration counts describe different actions: Rust `spin_loop` calls versus Java `parkNanos(1L)` requests; compare entries and round correlation, not raw iteration counts as equal-duration work.\n",
+            ]
+        )
     if minimum_pairs < 20:
         lines.append(
             f"- **Exploratory only:** the smallest scenario has {minimum_pairs} pairs; use at least 20 paired forks for a serious modal-frequency/ranking study.\n"
@@ -284,8 +424,9 @@ def main() -> None:
     pairs = load_pairs(args.results_dir)
     summary = summarize_pairs(pairs)
     write_csv(args.results_dir, pairs)
+    diagnostic_artifacts = write_diagnostic_csvs(args.results_dir)
     (args.results_dir / "fork_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    report = render_report(args.results_dir, pairs, summary)
+    report = render_report(args.results_dir, pairs, summary, diagnostic_artifacts)
     (args.results_dir / "REPORT.md").write_text(report)
 
     print("Fork-level Head-to-Head Summary")
