@@ -13,6 +13,32 @@ compiler, or when CI stabilizes on a new stable series. Patch toolchain updates
 
 ## [0.2.0] — 2026-07
 
+### Linux performance evidence and per-round diagnostics (2026-07-20)
+
+- **Reproducible H2H Linux protocol.** Rust/Java fork artifacts now carry
+  verified per-role affinity, revision/dirty state, source-tree and binary
+  hashes, per-fork host snapshots, balanced order and checksum evidence.
+- **Controlled bare-metal study.** A 20-pair four-scenario baseline plus
+  measurement-only claim-lock, handler-write and PMU/c2c experiments identified
+  the checked single-producer atomic RMW as a material x86 fixed cost and shared
+  ring-slot writes as a secondary ownership-traffic cost. The unsafe global
+  bypass remains explicitly non-shippable.
+- **`bench-round-diagnostics`.** New opt-in benchmark feature and
+  `--round-diagnostics` runner mode preserve every warmup/measured round with
+  per-stage batch-size/queue-depth histograms and producer capacity-wait
+  counters. Canonical Rust hot paths compile without these probes.
+- **Java probe isolation.** Diagnostic runs generate and hash a temporary,
+  source-verified instrumented LMAX `SingleProducerSequencer`; the pinned
+  upstream checkout stays unchanged.
+- **Diagnostic artifacts.** Reports validate and flatten per-round data to
+  `round_batch_diagnostics.csv` and
+  `round_producer_backpressure.csv`, while marking probe throughput as
+  non-canonical evidence.
+- **Documentation.** [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) records the
+  Linux/macOS evidence, safety boundary, unresolved batch/padding questions and
+  reproduction commands without publishing VPS credentials or operational
+  details.
+
 ### Pipeline wait/gating LMAX alignment (2026-07-19)
 
 - **Wait availability:** non-blocking strategies (`Yielding`, `BusySpin`,
