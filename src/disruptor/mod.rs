@@ -47,8 +47,12 @@ pub mod wait_strategy;
 // Simplified wait strategies (inspired by disruptor-rs)
 pub mod simple_wait_strategy;
 
-// Internal logging utilities
+// Compatibility macros for the pre-0.2 internal logging surface.
+#[doc(hidden)]
 pub mod internal_log;
+
+// Structured pipeline failure context
+mod failure;
 
 // Event processing
 pub mod event_processor;
@@ -97,6 +101,7 @@ pub use event_translator::{
     EventTranslator, EventTranslatorOneArg, EventTranslatorThreeArg, EventTranslatorTwoArg,
 };
 pub use exception_handler::{DefaultExceptionHandler, ErrorDecision, ExceptionHandler};
+pub use failure::{FailurePhase, FailureRecord};
 pub use producer_type::ProducerType;
 pub use ring_buffer::{RingBuffer, SlotPadding};
 pub use sequence::Sequence;
@@ -159,11 +164,11 @@ pub enum DisruptorError {
     #[error("Shutdown error: {0}")]
     ShutdownError(String),
 
-    /// Returned when the pipeline is poisoned: a consumer thread panicked or a
-    /// producer's update closure panicked between claim and publish. Publishing
-    /// fails instead of spinning forever on a gating sequence that will never
-    /// advance (or exposing a never-written slot).
-    #[error("Pipeline poisoned by a panicked producer or consumer")]
+    /// Returned when a fatal consumer/producer failure poisons the pipeline.
+    /// Publishing fails instead of spinning forever on a gating sequence that
+    /// will never advance (or exposing a never-written slot). Built-in runtime
+    /// handles expose the causal [`FailureRecord`] through `first_failure()`.
+    #[error("Pipeline poisoned by a fatal producer or consumer failure")]
     Poisoned,
 
     /// A second thread attempted to drive claim methods on a

@@ -123,6 +123,16 @@
 //! ```
 //!
 //! Default remains no slot padding (`SlotPadding::None`); measure before enabling.
+//!
+//! ## Failure diagnostics
+//!
+//! Managed pipelines retain the first structured [`FailureRecord`], including
+//! the context behind a terminal poison state. Query it through
+//! `DisruptorHandle::first_failure()`,
+//! [`SimpleProducer::first_failure`], [`BatchEventProcessor::first_failure`] or
+//! the classic `Disruptor::first_failure()` surface. Lifecycle and failure logs
+//! use the standard `log` facade; BadBatch does not install a logger or include
+//! ring event payloads in default records.
 
 #![allow(
     clippy::doc_markdown,
@@ -161,6 +171,8 @@ pub use disruptor::{
     EventTranslatorTwoArg,
     // Exception handling
     ExceptionHandler,
+    FailurePhase,
+    FailureRecord,
     MultiProducerSequencer,
     Polling,
     Producer,

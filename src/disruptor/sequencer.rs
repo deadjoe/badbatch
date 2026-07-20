@@ -5,9 +5,12 @@
 //! overwrite events that haven't been consumed yet.
 
 use crate::disruptor::sequence_barrier::ProcessingSequenceBarrier;
-use crate::disruptor::{is_power_of_two, DisruptorError, Result, Sequence, WaitStrategy};
+use crate::disruptor::{
+    is_power_of_two, DisruptorError, FailureRecord, Result, Sequence, WaitStrategy,
+};
 use arc_swap::ArcSwap;
 use crossbeam_utils::CachePadded;
+use parking_lot::Mutex;
 use std::cell::UnsafeCell;
 use std::convert::TryFrom;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
@@ -164,9 +167,9 @@ pub trait Sequencer: Send + Sync + std::fmt::Debug {
     /// True if the buffer has capacity, false otherwise
     fn has_available_capacity(&self, required_capacity: usize) -> bool;
 
-    /// Poison the pipeline: a consumer thread or a producer update closure
-    /// panicked. Blocking claim calls return [`crate::disruptor::DisruptorError::Poisoned`]
-    /// and try-claims fail, instead of spinning on a gating sequence that will
+    /// Poison the pipeline after a fatal consumer/producer failure. Blocking
+    /// claim calls return [`crate::disruptor::DisruptorError::Poisoned`] and
+    /// try-claims fail, instead of spinning on a gating sequence that will
     /// never advance (or exposing a never-written slot).
     ///
     /// Default is a no-op so external `Sequencer` implementations keep
@@ -176,6 +179,26 @@ pub trait Sequencer: Send + Sync + std::fmt::Debug {
     /// Whether [`Sequencer::poison`] has been called.
     fn is_poisoned(&self) -> bool {
         false
+    }
+
+    /// Retain a structured pipeline failure if no earlier failure was recorded.
+    ///
+    /// The default is a no-op so external `Sequencer` implementations keep
+    /// compiling. Built-in sequencers use first-failure-wins semantics.
+    fn record_failure(&self, _failure: &FailureRecord) {}
+
+    /// Return the first structured pipeline failure, when the sequencer stores one.
+    fn first_failure(&self) -> Option<FailureRecord> {
+        None
+    }
+
+    /// Record a failure before poisoning the pipeline.
+    ///
+    /// Recording first ensures a thread that observes the poisoned flag can
+    /// immediately retrieve the causal context through [`Sequencer::first_failure`].
+    fn poison_with_failure(&self, failure: &FailureRecord) {
+        self.record_failure(failure);
+        self.poison();
     }
 
     /// Close the claim path after a clean shutdown/halt: further `next` /
@@ -357,6 +380,21 @@ where
     }
 
     #[inline]
+    fn record_failure(&self, failure: &FailureRecord) {
+        dispatch_sequencer!(self, record_failure, failure);
+    }
+
+    #[inline]
+    fn first_failure(&self) -> Option<FailureRecord> {
+        dispatch_sequencer!(self, first_failure)
+    }
+
+    #[inline]
+    fn poison_with_failure(&self, failure: &FailureRecord) {
+        dispatch_sequencer!(self, poison_with_failure, failure);
+    }
+
+    #[inline]
     fn close(&self) {
         dispatch_sequencer!(self, close);
     }
@@ -484,12 +522,15 @@ where
     bench_backpressure_iterations: AtomicU64,
     #[cfg(feature = "bench-round-diagnostics")]
     bench_backpressure_max_iterations: AtomicU64,
-    /// Set when a consumer thread or a producer update closure panicked.
-    /// Claim methods fail fast instead of spinning on a dead gating sequence.
+    /// Set after a fatal consumer/producer failure. Claim methods fail fast
+    /// instead of spinning on a dead gating sequence.
     poisoned: AtomicBool,
     /// Set on clean halt/shutdown: further claims return Shutdown instead of
     /// writing into a stopped pipeline (audit residual: publish-after-halt).
     closed: AtomicBool,
+    /// First causal failure. Accessed only on failure/diagnostic paths and kept
+    /// after the hot poison/closed flags to avoid separating them in the layout.
+    first_failure: Mutex<Option<FailureRecord>>,
 }
 
 // SAFETY: `next_value` / `cached_value` are only read/written while `claim_lock`
@@ -551,6 +592,7 @@ where
             bench_backpressure_max_iterations: AtomicU64::new(0),
             poisoned: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            first_failure: Mutex::new(None),
         }
     }
 
@@ -868,6 +910,17 @@ where
         self.poisoned.load(Ordering::Acquire)
     }
 
+    fn record_failure(&self, failure: &FailureRecord) {
+        let mut first_failure = self.first_failure.lock();
+        if first_failure.is_none() {
+            *first_failure = Some(failure.clone());
+        }
+    }
+
+    fn first_failure(&self) -> Option<FailureRecord> {
+        self.first_failure.lock().clone()
+    }
+
     fn close(&self) {
         self.closed.store(true, Ordering::Release);
         self.wait_strategy.signal_all_when_blocking();
@@ -941,11 +994,14 @@ where
     cached_gating_sequence: CachePadded<AtomicI64>,
     /// Legacy available buffer for backward compatibility with small buffers (< 64)
     available_buffer: Vec<AtomicI32>,
-    /// Set when a consumer thread or a producer update closure panicked.
-    /// Claim methods fail fast instead of spinning on a dead gating sequence.
+    /// Set after a fatal consumer/producer failure. Claim methods fail fast
+    /// instead of spinning on a dead gating sequence.
     poisoned: AtomicBool,
     /// Set on clean halt/shutdown: further claims return Shutdown.
     closed: AtomicBool,
+    /// First causal failure. Accessed only on failure/diagnostic paths and kept
+    /// after the hot poison/closed flags to avoid separating them in the layout.
+    first_failure: Mutex<Option<FailureRecord>>,
 }
 
 impl<W> MultiProducerSequencer<W>
@@ -1008,6 +1064,7 @@ where
             available_buffer,
             poisoned: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            first_failure: Mutex::new(None),
         }
     }
 
@@ -1480,6 +1537,17 @@ where
 
     fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
+    }
+
+    fn record_failure(&self, failure: &FailureRecord) {
+        let mut first_failure = self.first_failure.lock();
+        if first_failure.is_none() {
+            *first_failure = Some(failure.clone());
+        }
+    }
+
+    fn first_failure(&self) -> Option<FailureRecord> {
+        self.first_failure.lock().clone()
     }
 
     fn close(&self) {

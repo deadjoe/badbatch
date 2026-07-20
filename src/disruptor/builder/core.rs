@@ -5,11 +5,12 @@
 use super::consumer::{Consumer, ConsumerInfo, ConsumerThreadConfig};
 use crate::disruptor::{
     event_factory::ClosureEventFactory,
+    failure::{log_failure, panic_payload_message, FailureDecision},
     producer::SimpleProducer,
     ring_buffer::SlotPadding,
     sequence_barrier::ProcessingSequenceBarrier,
     sequencer::{MultiProducerSequencer, SequencerEnum, SingleProducerSequencer},
-    RingBuffer, Sequence, Sequencer, WaitStrategy,
+    FailurePhase, FailureRecord, RingBuffer, Sequence, Sequencer, WaitStrategy,
 };
 use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
 
@@ -92,14 +93,14 @@ where
 
         for mut consumer in self.consumers.drain(..) {
             if let Some(handle) = consumer.join_handle.take() {
-                if let Err(e) = handle.join() {
-                    #[cfg(debug_assertions)]
-                    eprintln!(
-                        "Error joining consumer thread '{}': {e:?}",
-                        consumer.thread_name
-                    );
-                    #[cfg(not(debug_assertions))]
-                    let _ = e;
+                if let Err(payload) = handle.join() {
+                    let failure = FailureRecord::new(
+                        FailurePhase::ConsumerPanic,
+                        panic_payload_message(payload.as_ref()),
+                    )
+                    .with_thread_name(&consumer.thread_name);
+                    self.sequencer.record_failure(&failure);
+                    log_failure(&failure, FailureDecision::Record);
                 }
             }
         }
@@ -275,6 +276,7 @@ where
             ConsumerThreadConfig {
                 thread_name,
                 cpu_affinity,
+                stage_index,
                 shutdown_flag: Arc::clone(&shutdown_flag),
                 run_mode,
             },

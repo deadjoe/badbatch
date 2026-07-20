@@ -212,12 +212,14 @@ fn set_affinity_if_defined(affinity: Option<CoreId>, thread_name: &str) {
     if let Some(core_id) = affinity {
         let success = core_affinity::set_for_current(core_id);
         if success {
-            crate::internal_debug!(
+            log::debug!(
+                target: "badbatch::lifecycle",
                 "Successfully pinned thread '{thread_name}' to CPU core {}",
                 core_id.id
             );
         } else {
-            crate::internal_warn!(
+            log::warn!(
+                target: "badbatch::lifecycle",
                 "Warning: Could not pin thread '{thread_name}' to CPU core {}",
                 core_id.id
             );

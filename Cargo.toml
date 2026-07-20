@@ -18,6 +18,10 @@ path = "src/lib.rs"
 # Error handling
 thiserror = "2.0"
 
+# Standard library logging facade. BadBatch never installs a logger; applications
+# choose the backend and filtering policy. Calls are confined to lifecycle/error paths.
+log = "0.4"
+
 # Synchronization primitives
 parking_lot = "0.12"
 crossbeam-utils = "0.8"

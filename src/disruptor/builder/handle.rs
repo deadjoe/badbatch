@@ -3,7 +3,7 @@
 use super::core::DisruptorCore;
 use crate::disruptor::{
     producer::{Producer, SimpleProducer},
-    Sequencer, WaitStrategy,
+    FailureRecord, Sequencer, WaitStrategy,
 };
 use std::marker::PhantomData;
 
@@ -257,7 +257,7 @@ where
         self.is_shutdown
     }
 
-    /// Whether the pipeline was poisoned (consumer panic or claim-window panic).
+    /// Whether the pipeline was poisoned by a fatal consumer/producer failure.
     ///
     /// Once true, further publishes fail with
     /// [`crate::disruptor::DisruptorError::Poisoned`] /
@@ -265,6 +265,16 @@ where
     #[must_use]
     pub fn is_poisoned(&self) -> bool {
         self.core.sequencer.is_poisoned()
+    }
+
+    /// Return the first structured failure retained by the pipeline.
+    ///
+    /// This is the diagnostic companion to [`Self::is_poisoned`] and terminal
+    /// `Poisoned` publish errors. Handler errors include phase, thread, Builder
+    /// stage and event sequence when available; event payloads are never stored.
+    #[must_use]
+    pub fn first_failure(&self) -> Option<FailureRecord> {
+        self.core.sequencer.first_failure()
     }
 
     /// Whether the sequencer claim path is closed (after halt/shutdown).

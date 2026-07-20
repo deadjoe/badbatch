@@ -6,8 +6,9 @@
 
 use crate::disruptor::{
     consumer_engine::{self, StopFlag},
-    DisruptorError, EventHandler, ExceptionHandler, ProcessingSequenceBarrier, Result, RingBuffer,
-    Sequence, SequenceBarrier, WaitStrategy,
+    failure::{current_thread_name, panic_payload_message},
+    DisruptorError, EventHandler, ExceptionHandler, FailurePhase, FailureRecord,
+    ProcessingSequenceBarrier, Result, RingBuffer, Sequence, SequenceBarrier, WaitStrategy,
 };
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +37,15 @@ pub trait EventProcessor: Send + Sync + std::fmt::Debug {
     /// # Returns
     /// True if the processor is currently running, false otherwise
     fn is_running(&self) -> bool;
+
+    /// Whether the startup callback for the current `run()` completed.
+    ///
+    /// The default preserves compatibility for external processors that do not
+    /// expose a separate startup handshake. Built-in processors override it so
+    /// the classic DSL does not return from `start()` before `on_start()`.
+    fn is_startup_complete(&self) -> bool {
+        self.is_running()
+    }
 
     /// Run the event processor
     ///
@@ -148,6 +158,8 @@ where
     sequence: Arc<Sequence>,
     /// Flag indicating if the processor is running
     running: AtomicBool,
+    /// Set after `on_start()` returns (successfully or with a recorded error).
+    startup_complete: AtomicBool,
 }
 
 impl<T, H, W> BatchEventProcessor<T, H, W>
@@ -187,18 +199,69 @@ where
             exception_handler,
             sequence: Arc::new(Sequence::new_with_initial_value()),
             running: AtomicBool::new(false),
+            startup_complete: AtomicBool::new(false),
+        }
+    }
+
+    /// Return the first structured failure retained by this processor's pipeline.
+    #[must_use]
+    pub fn first_failure(&self) -> Option<FailureRecord> {
+        self.sequence_barrier.first_failure()
+    }
+
+    fn failure(
+        phase: FailurePhase,
+        message: impl Into<String>,
+        sequence: Option<i64>,
+    ) -> FailureRecord {
+        let mut failure =
+            FailureRecord::new(phase, message).with_thread_name(current_thread_name());
+        if let Some(sequence) = sequence {
+            failure = failure.with_sequence(sequence);
+        }
+        failure
+    }
+
+    fn invoke_on_start(&self) -> bool {
+        // Contended lock means the processor is already being driven by another
+        // thread; starting it twice concurrently is a misuse we degrade gracefully.
+        let Some(mut handler) = self.event_handler.try_lock() else {
+            return true;
+        };
+        if let Err(error) = handler.on_start() {
+            let failure = Self::failure(FailurePhase::HandlerStart, error.to_string(), None);
+            self.sequence_barrier.poison_with_failure(&failure);
+            self.exception_handler.handle_on_start_exception(error);
+            return false;
+        }
+        true
+    }
+
+    fn invoke_on_shutdown(&self) {
+        let Some(mut handler) = self.event_handler.try_lock() else {
+            return;
+        };
+        if let Err(error) = handler.on_shutdown() {
+            let failure = Self::failure(FailurePhase::HandlerShutdown, error.to_string(), None);
+            self.sequence_barrier.record_failure(&failure);
+            self.exception_handler.handle_on_shutdown_exception(error);
         }
     }
 
     /// Process events using the unified sequential consumer engine.
     fn process_events(&self) {
-        self.on_start();
+        let started = self.invoke_on_start();
+        self.startup_complete.store(true, Ordering::Release);
+        if !started {
+            self.running.store(false, Ordering::Release);
+            return;
+        }
 
         // Halt may race with on_start (start() returns as soon as `running` is
         // true, which is set by `run()`'s CAS before on_start). Re-check here so
         // we never enter the wait loop after an early halt undid the race window.
         if !self.running.load(Ordering::Acquire) {
-            self.on_shutdown();
+            self.invoke_on_shutdown();
             return;
         }
 
@@ -215,7 +278,7 @@ where
         );
         drop(handler);
 
-        self.on_shutdown();
+        self.invoke_on_shutdown();
     }
 }
 
@@ -249,6 +312,10 @@ where
         self.running.load(Ordering::Acquire)
     }
 
+    fn is_startup_complete(&self) -> bool {
+        self.startup_complete.load(Ordering::Acquire)
+    }
+
     fn run(&self) -> Result<()> {
         // Check if already running
         if self
@@ -258,6 +325,8 @@ where
         {
             return Err(DisruptorError::AlreadyRunning);
         }
+
+        self.startup_complete.store(false, Ordering::Release);
 
         // Clear any existing alerts
         self.sequence_barrier.clear_alert();
@@ -269,7 +338,11 @@ where
             self.process_events();
         }));
         if let Err(payload) = result {
-            self.sequence_barrier.poison_producers();
+            self.sequence_barrier.poison_with_failure(&Self::failure(
+                FailurePhase::ConsumerPanic,
+                panic_payload_message(payload.as_ref()),
+                None,
+            ));
             self.running.store(false, Ordering::Release);
             std::panic::resume_unwind(payload);
         }
@@ -341,12 +414,13 @@ where
         // discarded on this cold path).
         let queue_depth = available_sequence - self.sequence.get();
         if let Err(e) = handler.on_batch_start(batch_span, queue_depth) {
-            crate::internal_error!(
-                "on_batch_start failed in try_run_once at sequence {next_sequence}: {e:?}"
-            );
             // Freeze before any event of this batch; poison producers and stop.
             self.sequence.set(next_sequence - 1);
-            self.sequence_barrier.poison_producers();
+            self.sequence_barrier.poison_with_failure(&Self::failure(
+                FailurePhase::BatchStart,
+                e.to_string(),
+                Some(next_sequence),
+            ));
             self.running.store(false, Ordering::Release);
             return Err(DisruptorError::Poisoned);
         }
@@ -363,12 +437,17 @@ where
                 let event = unsafe { &mut *self.data_provider.get_mut_unchecked(current_sequence) };
 
                 if let Err(e) = handler.on_event(event, current_sequence, end_of_batch) {
+                    let error_message = e.to_string();
                     let exception_handler = &*self.exception_handler;
                     let decision =
                         exception_handler.handle_event_exception(e, current_sequence, event);
                     if decision == crate::disruptor::ErrorDecision::Stop {
                         self.sequence.set(current_sequence - 1);
-                        self.sequence_barrier.poison_producers();
+                        self.sequence_barrier.poison_with_failure(&Self::failure(
+                            FailurePhase::EventProcessing,
+                            error_message,
+                            Some(current_sequence),
+                        ));
                         self.running.store(false, Ordering::Release);
                         return Err(DisruptorError::Poisoned);
                     }
@@ -385,7 +464,11 @@ where
         match process {
             Ok(result) => result,
             Err(payload) => {
-                self.sequence_barrier.poison_producers();
+                self.sequence_barrier.poison_with_failure(&Self::failure(
+                    FailurePhase::ConsumerPanic,
+                    panic_payload_message(payload.as_ref()),
+                    Some(next_sequence),
+                ));
                 self.running.store(false, Ordering::Release);
                 std::panic::resume_unwind(payload);
             }
@@ -401,31 +484,12 @@ where
     }
 
     fn on_start(&self) {
-        // Contended lock means the processor is already being driven by another
-        // thread; starting it twice concurrently is a misuse we degrade gracefully.
-        let Some(mut handler) = self.event_handler.try_lock() else {
-            return;
-        };
-        // Do NOT clear_alert() or store running=true here.
-        // `run()` already CAS-sets running and clears the alert before this
-        // callback. Re-asserting those flags races with `halt()`: start() returns
-        // as soon as is_running() is true (post-CAS), so a quick shutdown can
-        // alert and set running=false, only for this callback to undo both and
-        // leave the consumer parked forever on an empty ring (seen hanging
-        // doctests for hours on BlockingWaitStrategy).
-        if let Err(e) = handler.on_start() {
-            self.exception_handler.handle_on_start_exception(e);
-        }
+        // Pure lifecycle callback: do not touch `running` or barrier alerts.
+        let _ = self.invoke_on_start();
     }
 
     fn on_shutdown(&self) {
-        let Some(mut handler) = self.event_handler.try_lock() else {
-            return;
-        };
-        if let Err(e) = handler.on_shutdown() {
-            self.exception_handler.handle_on_shutdown_exception(e);
-        }
-        drop(handler);
+        self.invoke_on_shutdown();
         self.running.store(false, Ordering::Release);
     }
 }
@@ -440,6 +504,7 @@ where
         f.debug_struct("BatchEventProcessor")
             .field("sequence", &self.sequence)
             .field("running", &self.running)
+            .field("startup_complete", &self.startup_complete)
             .finish_non_exhaustive()
     }
 }
@@ -1140,6 +1205,8 @@ mod tests {
         assert_eq!(handler_state.shutdown_calls.load(Ordering::Relaxed), 1);
         assert_eq!(exception_state.start_errors.load(Ordering::Relaxed), 1);
         assert_eq!(exception_state.shutdown_errors.load(Ordering::Relaxed), 1);
+        let failure = processor.first_failure().expect("lifecycle failure record");
+        assert_eq!(failure.phase(), FailurePhase::HandlerStart);
     }
 
     #[test]
@@ -1190,6 +1257,9 @@ mod tests {
             "expected Poisoned, got {result:?}"
         );
         assert!(!processor.is_running());
+        let failure = processor.first_failure().expect("batch failure record");
+        assert_eq!(failure.phase(), FailurePhase::BatchStart);
+        assert_eq!(failure.sequence(), Some(0));
     }
 
     // Soundness regression (P0-3, audit 2026-07-18): lifecycle methods used to

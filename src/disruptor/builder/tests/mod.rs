@@ -12,6 +12,7 @@
 
 mod basic;
 mod common;
+mod failure_diagnostics;
 mod handle;
 mod integration_comprehensive;
 mod integration_e2e;
