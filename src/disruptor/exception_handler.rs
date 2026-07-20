@@ -5,7 +5,6 @@
 //! for custom error handling and recovery strategies.
 
 use crate::disruptor::DisruptorError;
-use std::fmt::Debug;
 
 /// What the consumer loop should do after a handler error.
 ///
@@ -70,11 +69,11 @@ pub trait ExceptionHandler<T>: Send + Sync {
     fn handle_on_shutdown_exception(&self, error: DisruptorError);
 }
 
-/// Default exception handler that logs errors
+/// Default exception policy: stop on event-processing errors.
 ///
-/// This is a simple exception handler that logs all exceptions.
-/// It's suitable for development and testing, but production systems
-/// may want to implement more sophisticated error handling.
+/// The managed consumer engine records and logs structured failure context
+/// after this policy returns [`ErrorDecision::Stop`]. Keeping policy separate
+/// from reporting avoids duplicate messages and never formats the event payload.
 ///
 /// # Type Parameters
 /// * `T` - The event type being processed
@@ -94,29 +93,22 @@ impl<T> DefaultExceptionHandler<T> {
 
 impl<T> ExceptionHandler<T> for DefaultExceptionHandler<T>
 where
-    T: Debug + Send + Sync,
+    T: Send + Sync,
 {
     fn handle_event_exception(
         &self,
-        error: DisruptorError,
-        sequence: i64,
-        event: &T,
+        _error: DisruptorError,
+        _sequence: i64,
+        _event: &T,
     ) -> ErrorDecision {
-        crate::internal_error!(
-            "Exception processing event at sequence {sequence}: {error:?}. Event: {event:?}"
-        );
         // LMAX default (FatalExceptionHandler): a handler error kills the
         // processor instead of silently skipping events (2026-07-18 audit).
         ErrorDecision::Stop
     }
 
-    fn handle_on_start_exception(&self, error: DisruptorError) {
-        crate::internal_error!("Exception during event processor startup: {error:?}");
-    }
+    fn handle_on_start_exception(&self, _error: DisruptorError) {}
 
-    fn handle_on_shutdown_exception(&self, error: DisruptorError) {
-        crate::internal_error!("Exception during event processor shutdown: {error:?}");
-    }
+    fn handle_on_shutdown_exception(&self, _error: DisruptorError) {}
 }
 
 /// Exception handler that ignores all exceptions
@@ -188,15 +180,15 @@ impl<T> PanicExceptionHandler<T> {
 
 impl<T> ExceptionHandler<T> for PanicExceptionHandler<T>
 where
-    T: Debug + Send + Sync,
+    T: Send + Sync,
 {
     fn handle_event_exception(
         &self,
         error: DisruptorError,
         sequence: i64,
-        event: &T,
+        _event: &T,
     ) -> ErrorDecision {
-        panic!("Exception processing event at sequence {sequence}: {error:?}. Event: {event:?}");
+        panic!("Exception processing event at sequence {sequence}: {error:?}");
     }
 
     fn handle_on_start_exception(&self, error: DisruptorError) {

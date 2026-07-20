@@ -413,7 +413,6 @@ fn test_builder_api_completeness() {
 
     // Test multi producer builder
     let multi_builder = build_multi_producer(32, test_event_factory, YieldingWaitStrategy)
-        .pin_at_core(2)
         .thread_name("multi-consumer-1")
         .handle_events_with(|event: &mut TestEvent, sequence: i64, _: bool| {
             event.value = sequence;
@@ -541,9 +540,21 @@ fn test_cpu_affinity_support() {
 
     wait_until(
         Duration::from_secs(1),
-        || processed_count.load(Ordering::SeqCst) == 5,
-        "CPU-affinity consumer to process all events",
+        || processed_count.load(Ordering::SeqCst) == 5 || disruptor_handle.is_poisoned(),
+        "CPU-affinity consumer to process events or report affinity failure",
     );
+
+    if disruptor_handle.is_poisoned() {
+        let failure = disruptor_handle
+            .first_failure()
+            .expect("affinity failure must retain context");
+        assert_eq!(
+            failure.phase(),
+            crate::disruptor::FailurePhase::ThreadAffinity
+        );
+        disruptor_handle.halt();
+        return;
+    }
 
     // Shutdown
     disruptor_handle.shutdown();
@@ -606,9 +617,24 @@ fn test_multiple_consumers_with_different_cpu_affinity() {
 
     wait_until(
         Duration::from_secs(1),
-        || consumer1_count.load(Ordering::SeqCst) + consumer2_count.load(Ordering::SeqCst) == 10,
-        "work-pool consumers to claim and process all events",
+        || {
+            consumer1_count.load(Ordering::SeqCst) + consumer2_count.load(Ordering::SeqCst) == 10
+                || disruptor_handle.is_poisoned()
+        },
+        "work-pool consumers to process events or report affinity failure",
     );
+
+    if disruptor_handle.is_poisoned() {
+        let failure = disruptor_handle
+            .first_failure()
+            .expect("affinity failure must retain context");
+        assert_eq!(
+            failure.phase(),
+            crate::disruptor::FailurePhase::ThreadAffinity
+        );
+        disruptor_handle.halt();
+        return;
+    }
 
     // Shutdown
     disruptor_handle.shutdown();

@@ -17,9 +17,10 @@
 //! [`crate::disruptor::WaitStrategy`] for Builder use without adapters.
 
 use crate::disruptor::{
+    failure::{current_thread_name, log_failure, FailureDecision},
     simple_wait_strategy::SimpleWaitStrategy,
     thread_management::{ManagedThread, ThreadBuilder},
-    RingBuffer,
+    FailurePhase, FailureRecord, RingBuffer,
 };
 use crossbeam_utils::CachePadded;
 use std::marker::PhantomData;
@@ -116,7 +117,16 @@ where
             ring_buffer,
             event_handler,
             wait_strategy,
-            Arc::new(move || sequencer.poison()),
+            Arc::new(move || {
+                let failure = FailureRecord::new(
+                    FailurePhase::ConsumerPanic,
+                    "elegant consumer handler panicked",
+                )
+                .with_thread_name(current_thread_name());
+                sequencer.record_failure(&failure);
+                log_failure(&failure, FailureDecision::Poison);
+                sequencer.poison();
+            }),
         )
     }
 

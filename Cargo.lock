@@ -86,6 +86,7 @@ dependencies = [
  "criterion",
  "crossbeam",
  "crossbeam-utils",
+ "log",
  "loom",
  "parking_lot",
  "proptest",

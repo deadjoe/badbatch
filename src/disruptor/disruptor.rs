@@ -12,9 +12,12 @@
 //! (draining shutdown with timeout, abrupt halt).
 
 use crate::disruptor::{
-    is_power_of_two, sequencer::SequencerEnum, BatchEventProcessor, BlockingWaitStrategy,
-    DisruptorError, EventFactory, EventHandler, EventProcessor, MultiProducerSequencer,
-    ProducerType, Result, RingBuffer, Sequence, Sequencer, SingleProducerSequencer, WaitStrategy,
+    failure::{log_failure, panic_payload_message, FailureDecision},
+    is_power_of_two,
+    sequencer::SequencerEnum,
+    BatchEventProcessor, BlockingWaitStrategy, DisruptorError, EventFactory, EventHandler,
+    EventProcessor, FailurePhase, FailureRecord, MultiProducerSequencer, ProducerType, Result,
+    RingBuffer, Sequence, Sequencer, SingleProducerSequencer, WaitStrategy,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -346,24 +349,42 @@ where
         for (index, processor) in self.event_processors.iter().enumerate() {
             // Clone the processor for the thread
             let processor_clone = Arc::clone(processor);
-            #[cfg(not(debug_assertions))]
-            let _ = index;
+            let thread_name = format!("badbatch-processor-{index}");
+            let handle = thread::Builder::new()
+                .name(thread_name)
+                .spawn(move || -> Result<()> {
+                    log::debug!(
+                        target: "badbatch::lifecycle",
+                        "phase=processor_start processor={index}"
+                    );
+                    processor_clone.run()?;
+                    log::debug!(
+                        target: "badbatch::lifecycle",
+                        "phase=processor_shutdown processor={index}"
+                    );
+                    Ok(())
+                })
+                .expect("Failed to spawn event processor thread");
 
-            let handle = thread::spawn(move || -> Result<()> {
-                crate::internal_debug!("Event processor {index} starting");
-                processor_clone.run()?;
-                crate::internal_debug!("Event processor {index} shutting down");
-                Ok(())
-            });
-
-            while !processor.is_running() {
+            while !processor.is_startup_complete() {
                 if handle.is_finished() {
                     break;
                 }
                 thread::yield_now();
             }
 
+            let exited_early = handle.is_finished();
             self.thread_handles.push(handle);
+
+            if self.sequencer.is_poisoned() {
+                let _ = self.halt_join();
+                return Err(DisruptorError::Poisoned);
+            }
+            if exited_early {
+                return self.halt_join().and(Err(DisruptorError::ShutdownError(
+                    "event processor exited during startup".to_string(),
+                )));
+            }
         }
 
         self.started = true;
@@ -464,16 +485,23 @@ where
 
         let mut join_errors = Vec::new();
         while let Some(handle) = self.thread_handles.pop() {
+            let thread_name = handle.thread().name().unwrap_or("unnamed").to_string();
             match handle.join() {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
-                    let err_msg = format!("Event processor thread returned error: {e:?}");
-                    crate::internal_error!("{err_msg}");
+                    let err_msg = format!("event processor thread returned error: {e}");
+                    let failure = FailureRecord::new(FailurePhase::ProcessorThread, &err_msg)
+                        .with_thread_name(&thread_name);
+                    self.sequencer.record_failure(&failure);
+                    log_failure(&failure, FailureDecision::Record);
                     join_errors.push(err_msg);
                 }
-                Err(_) => {
-                    let err_msg = "Event processor thread panicked".to_string();
-                    crate::internal_error!("{err_msg}");
+                Err(payload) => {
+                    let err_msg = panic_payload_message(payload.as_ref());
+                    let failure = FailureRecord::new(FailurePhase::ConsumerPanic, &err_msg)
+                        .with_thread_name(&thread_name);
+                    self.sequencer.record_failure(&failure);
+                    log_failure(&failure, FailureDecision::Record);
                     join_errors.push(err_msg);
                 }
             }
@@ -515,7 +543,8 @@ where
 
         // Use the translator to populate the event with data. Poison on panic:
         // an unpublished claim would expose a never-written slot later.
-        let poison_guard = crate::disruptor::producer::PoisonOnPanic(&self.sequencer);
+        let poison_guard =
+            crate::disruptor::producer::PoisonOnPanic::new(&self.sequencer, sequence, sequence);
         translator.translate_to(event, sequence);
         std::mem::forget(poison_guard); // disarm: Drop only runs while unwinding
 
@@ -578,7 +607,8 @@ where
 
         // Use the translator to populate the event with data. Poison on
         // panic: an unpublished claim would expose a never-written slot.
-        let poison_guard = crate::disruptor::producer::PoisonOnPanic(&self.sequencer);
+        let poison_guard =
+            crate::disruptor::producer::PoisonOnPanic::new(&self.sequencer, sequence, sequence);
         translator.translate_to(event, sequence);
         std::mem::forget(poison_guard); // disarm: Drop only runs while unwinding
 
@@ -588,10 +618,19 @@ where
         Ok(sequence)
     }
 
-    /// Whether the pipeline has been poisoned (consumer or claim-window panic).
+    /// Whether the pipeline has been poisoned by a fatal consumer/producer failure.
     #[must_use]
     pub fn is_poisoned(&self) -> bool {
         self.sequencer.is_poisoned()
+    }
+
+    /// Return the first structured failure retained by the pipeline.
+    ///
+    /// This preserves the root context behind a terminal `Poisoned` result
+    /// without depending on a configured logger.
+    #[must_use]
+    pub fn first_failure(&self) -> Option<crate::disruptor::FailureRecord> {
+        self.sequencer.first_failure()
     }
 
     /// Whether new claims are closed after halt/shutdown.
@@ -818,6 +857,42 @@ mod tests {
 
         // Test double shutdown is ok
         disruptor.shutdown().unwrap();
+    }
+
+    #[test]
+    fn test_disruptor_start_reports_handler_start_failure() {
+        struct FailingStart;
+
+        impl EventHandler<TestEvent> for FailingStart {
+            fn on_event(
+                &mut self,
+                _event: &mut TestEvent,
+                _sequence: i64,
+                _end_of_batch: bool,
+            ) -> Result<()> {
+                Ok(())
+            }
+
+            fn on_start(&mut self) -> Result<()> {
+                Err(DisruptorError::ShutdownError(
+                    "startup probe failed".to_string(),
+                ))
+            }
+        }
+
+        let factory = DefaultEventFactory::<TestEvent>::new();
+        let mut disruptor = Disruptor::with_defaults(factory, 32)
+            .unwrap()
+            .handle_events_with(FailingStart)
+            .build();
+
+        assert!(matches!(disruptor.start(), Err(DisruptorError::Poisoned)));
+        assert!(!disruptor.started);
+        assert!(disruptor.is_poisoned());
+        let failure = disruptor.first_failure().expect("startup failure record");
+        assert_eq!(failure.phase(), FailurePhase::HandlerStart);
+        assert_eq!(failure.thread_name(), Some("badbatch-processor-0"));
+        assert!(failure.message().contains("startup probe failed"));
     }
 
     /// Regression: start() returns as soon as `running` is set; an immediate

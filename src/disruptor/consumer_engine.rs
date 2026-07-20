@@ -9,8 +9,8 @@
 
 use crate::disruptor::{
     sequence_barrier::{ProcessingSequenceBarrier, SequenceBarrier},
-    DisruptorError, ErrorDecision, EventHandler, ExceptionHandler, Result, RingBuffer, Sequence,
-    WaitStrategy, INITIAL_CURSOR_VALUE,
+    DisruptorError, ErrorDecision, EventHandler, ExceptionHandler, FailurePhase, FailureRecord,
+    Result, RingBuffer, Sequence, WaitStrategy, INITIAL_CURSOR_VALUE,
 };
 use crossbeam_utils::CachePadded;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -63,6 +63,44 @@ impl StopFlag<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ConsumerContext<'a> {
+    thread_name: &'a str,
+    stage_index: Option<usize>,
+}
+
+impl<'a> ConsumerContext<'a> {
+    pub(crate) const fn for_stage(thread_name: &'a str, stage_index: usize) -> Self {
+        Self {
+            thread_name,
+            stage_index: Some(stage_index),
+        }
+    }
+
+    const fn without_stage(thread_name: &'a str) -> Self {
+        Self {
+            thread_name,
+            stage_index: None,
+        }
+    }
+}
+
+fn consumer_failure(
+    phase: FailurePhase,
+    message: impl Into<String>,
+    context: ConsumerContext<'_>,
+    sequence: Option<i64>,
+) -> FailureRecord {
+    let mut failure = FailureRecord::new(phase, message).with_thread_name(context.thread_name);
+    if let Some(stage_index) = context.stage_index {
+        failure = failure.with_stage_index(stage_index);
+    }
+    if let Some(sequence) = sequence {
+        failure = failure.with_sequence(sequence);
+    }
+    failure
+}
+
 /// Run the LMAX BatchEventProcessor-style sequential loop.
 ///
 /// Published events already visible when a batch is taken are fully drained before
@@ -79,18 +117,40 @@ pub fn run_sequential_batch_loop<E, H, W>(
     H: EventHandler<E>,
     W: WaitStrategy + 'static,
 {
-    run_sequential_batch_loop_with_exceptions(
+    run_sequential_batch_loop_impl(
         ring_buffer,
         sequence_barrier,
         event_handler,
         consumer_sequence,
         stop,
-        thread_name,
+        ConsumerContext::without_stage(thread_name),
         None,
     );
 }
 
-// `thread_name` is used only on the debug error path inside the with_exceptions variant.
+/// Builder-only variant that preserves the pipeline stage in failure records.
+pub(crate) fn run_sequential_batch_loop_for_stage<E, H, W>(
+    ring_buffer: &RingBuffer<E>,
+    sequence_barrier: &ProcessingSequenceBarrier<W>,
+    event_handler: &mut H,
+    consumer_sequence: &Sequence,
+    stop: StopFlag<'_>,
+    context: ConsumerContext<'_>,
+) where
+    E: Send + Sync,
+    H: EventHandler<E>,
+    W: WaitStrategy + 'static,
+{
+    run_sequential_batch_loop_impl(
+        ring_buffer,
+        sequence_barrier,
+        event_handler,
+        consumer_sequence,
+        stop,
+        context,
+        None,
+    );
+}
 
 /// Sequential loop with optional LMAX-style exception handler (BatchEventProcessor path).
 pub fn run_sequential_batch_loop_with_exceptions<E, H, W>(
@@ -100,6 +160,30 @@ pub fn run_sequential_batch_loop_with_exceptions<E, H, W>(
     consumer_sequence: &Sequence,
     stop: StopFlag<'_>,
     thread_name: &str,
+    exception_handler: Option<&dyn ExceptionHandler<E>>,
+) where
+    E: Send + Sync,
+    H: EventHandler<E>,
+    W: WaitStrategy + 'static,
+{
+    run_sequential_batch_loop_impl(
+        ring_buffer,
+        sequence_barrier,
+        event_handler,
+        consumer_sequence,
+        stop,
+        ConsumerContext::without_stage(thread_name),
+        exception_handler,
+    );
+}
+
+fn run_sequential_batch_loop_impl<E, H, W>(
+    ring_buffer: &RingBuffer<E>,
+    sequence_barrier: &ProcessingSequenceBarrier<W>,
+    event_handler: &mut H,
+    consumer_sequence: &Sequence,
+    stop: StopFlag<'_>,
+    context: ConsumerContext<'_>,
     exception_handler: Option<&dyn ExceptionHandler<E>>,
 ) where
     E: Send + Sync,
@@ -121,10 +205,12 @@ pub fn run_sequential_batch_loop_with_exceptions<E, H, W>(
                     // Fatal: nothing of this batch was processed; freeze the
                     // sequence and poison the producers (2026-07-18 audit —
                     // this Result used to be silently discarded).
-                    crate::internal_error!(
-                        "on_batch_start failed in '{thread_name}' at sequence {next_sequence}: {e:?}"
-                    );
-                    sequence_barrier.poison_producers();
+                    sequence_barrier.poison_with_failure(&consumer_failure(
+                        FailurePhase::BatchStart,
+                        e.to_string(),
+                        context,
+                        Some(next_sequence),
+                    ));
                     return;
                 }
 
@@ -135,14 +221,12 @@ pub fn run_sequential_batch_loop_with_exceptions<E, H, W>(
                     let event = unsafe { &mut *ring_buffer.get_mut_unchecked(next_sequence) };
 
                     if let Err(e) = event_handler.on_event(event, next_sequence, end_of_batch) {
+                        let error_message = e.to_string();
                         let decision = if let Some(eh) = exception_handler {
                             eh.handle_event_exception(e, next_sequence, event)
                         } else {
                             // No exception handler: LMAX-default fatal stop
                             // (used to silently skip; 2026-07-18 audit).
-                            crate::internal_error!(
-                                "Event processing error in '{thread_name}' at sequence {next_sequence}: {e:?}"
-                            );
                             ErrorDecision::Stop
                         };
 
@@ -150,7 +234,12 @@ pub fn run_sequential_batch_loop_with_exceptions<E, H, W>(
                             // Freeze at the last fully processed event and fail
                             // the producers fast instead of stalling them.
                             consumer_sequence.set(next_sequence - 1);
-                            sequence_barrier.poison_producers();
+                            sequence_barrier.poison_with_failure(&consumer_failure(
+                                FailurePhase::EventProcessing,
+                                error_message,
+                                context,
+                                Some(next_sequence),
+                            ));
                             return;
                         }
                     }
@@ -192,6 +281,55 @@ pub fn run_work_processor_loop<E, H, W>(
     H: EventHandler<E>,
     W: WaitStrategy + 'static,
 {
+    run_work_processor_loop_impl(
+        ring_buffer,
+        sequence_barrier,
+        event_handler,
+        consumer_sequence,
+        work_sequence,
+        stop,
+        ConsumerContext::without_stage(thread_name),
+    );
+}
+
+/// Builder-only WorkerPool variant that preserves the pipeline stage.
+pub(crate) fn run_work_processor_loop_for_stage<E, H, W>(
+    ring_buffer: &RingBuffer<E>,
+    sequence_barrier: &ProcessingSequenceBarrier<W>,
+    event_handler: &mut H,
+    consumer_sequence: &Sequence,
+    work_sequence: &CachePadded<AtomicI64>,
+    stop: StopFlag<'_>,
+    context: ConsumerContext<'_>,
+) where
+    E: Send + Sync,
+    H: EventHandler<E>,
+    W: WaitStrategy + 'static,
+{
+    run_work_processor_loop_impl(
+        ring_buffer,
+        sequence_barrier,
+        event_handler,
+        consumer_sequence,
+        work_sequence,
+        stop,
+        context,
+    );
+}
+
+fn run_work_processor_loop_impl<E, H, W>(
+    ring_buffer: &RingBuffer<E>,
+    sequence_barrier: &ProcessingSequenceBarrier<W>,
+    event_handler: &mut H,
+    consumer_sequence: &Sequence,
+    work_sequence: &CachePadded<AtomicI64>,
+    stop: StopFlag<'_>,
+    context: ConsumerContext<'_>,
+) where
+    E: Send + Sync,
+    H: EventHandler<E>,
+    W: WaitStrategy + 'static,
+{
     let mut cached_available = INITIAL_CURSOR_VALUE;
 
     'work: while stop.should_continue() {
@@ -228,10 +366,12 @@ pub fn run_work_processor_loop<E, H, W>(
         let end_of_batch = claimed == cached_available;
         if let Err(e) = event_handler.on_batch_start(1, cached_available - claimed + 1) {
             // Fatal (2026-07-18 audit): this Result used to be discarded.
-            crate::internal_error!(
-                "on_batch_start failed in '{thread_name}' at sequence {claimed}: {e:?}"
-            );
-            sequence_barrier.poison_producers();
+            sequence_barrier.poison_with_failure(&consumer_failure(
+                FailurePhase::BatchStart,
+                e.to_string(),
+                context,
+                Some(claimed),
+            ));
             break 'work;
         }
 
@@ -243,10 +383,12 @@ pub fn run_work_processor_loop<E, H, W>(
             // LMAX-default fatal policy (used to silently skip the event).
             // Note: `claimed` was already CAS-taken from the shared work
             // cursor, so this worker's sequence stays at its pre-claim value.
-            crate::internal_error!(
-                "Event processing error in '{thread_name}' at sequence {claimed}: {e:?}"
-            );
-            sequence_barrier.poison_producers();
+            sequence_barrier.poison_with_failure(&consumer_failure(
+                FailurePhase::EventProcessing,
+                e.to_string(),
+                context,
+                Some(claimed),
+            ));
             break 'work;
         }
 
@@ -276,6 +418,51 @@ pub fn run_sequential_readonly_loop<E, F, W>(
     F: FnMut(&E, i64, bool) -> crate::disruptor::Result<()>,
     W: WaitStrategy + 'static,
 {
+    run_sequential_readonly_loop_impl(
+        ring_buffer,
+        sequence_barrier,
+        on_event,
+        consumer_sequence,
+        stop,
+        ConsumerContext::without_stage(thread_name),
+    );
+}
+
+/// Builder-only readonly variant that preserves the pipeline stage.
+pub(crate) fn run_sequential_readonly_loop_for_stage<E, F, W>(
+    ring_buffer: &RingBuffer<E>,
+    sequence_barrier: &ProcessingSequenceBarrier<W>,
+    on_event: &mut F,
+    consumer_sequence: &Sequence,
+    stop: StopFlag<'_>,
+    context: ConsumerContext<'_>,
+) where
+    E: Send + Sync,
+    F: FnMut(&E, i64, bool) -> crate::disruptor::Result<()>,
+    W: WaitStrategy + 'static,
+{
+    run_sequential_readonly_loop_impl(
+        ring_buffer,
+        sequence_barrier,
+        on_event,
+        consumer_sequence,
+        stop,
+        context,
+    );
+}
+
+fn run_sequential_readonly_loop_impl<E, F, W>(
+    ring_buffer: &RingBuffer<E>,
+    sequence_barrier: &ProcessingSequenceBarrier<W>,
+    on_event: &mut F,
+    consumer_sequence: &Sequence,
+    stop: StopFlag<'_>,
+    context: ConsumerContext<'_>,
+) where
+    E: Send + Sync,
+    F: FnMut(&E, i64, bool) -> crate::disruptor::Result<()>,
+    W: WaitStrategy + 'static,
+{
     let mut next_sequence = consumer_sequence.get() + 1;
 
     while stop.should_continue() {
@@ -293,11 +480,13 @@ pub fn run_sequential_readonly_loop<E, F, W>(
                     let event = unsafe { ring_buffer.get(next_sequence) };
                     if let Err(e) = on_event(event, next_sequence, end_of_batch) {
                         // LMAX-default fatal policy (used to silently skip).
-                        crate::internal_error!(
-                            "Readonly fan-out error in '{thread_name}' at sequence {next_sequence}: {e:?}"
-                        );
                         consumer_sequence.set(next_sequence - 1);
-                        sequence_barrier.poison_producers();
+                        sequence_barrier.poison_with_failure(&consumer_failure(
+                            FailurePhase::EventProcessing,
+                            e.to_string(),
+                            context,
+                            Some(next_sequence),
+                        ));
                         return;
                     }
                     next_sequence += 1;

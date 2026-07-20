@@ -557,6 +557,12 @@ where
         self.producer.duplicate_for_multi()
     }
 
+    /// Return the first structured failure retained by the shared pipeline.
+    #[must_use]
+    pub fn first_failure(&self) -> Option<crate::disruptor::FailureRecord> {
+        self.producer.first_failure()
+    }
+
     /// Try to publish one event.
     ///
     /// # Errors

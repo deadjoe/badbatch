@@ -1,70 +1,74 @@
-//! Internal logging utilities for BadBatch Disruptor
+//! Compatibility wrappers for BadBatch's former private environment-variable logger.
 //!
-//! This module provides controlled logging that doesn't pollute user output
-//! by default. Logging can be enabled via the BADBATCH_LOG environment variable.
+//! New code should use the [`log`] facade directly. These exported macros are
+//! retained so downstream code that happened to use them keeps compiling; they
+//! no longer read `BADBATCH_LOG` or write directly to stderr.
 
-/// Internal debug logging macro
-/// Only outputs if BADBATCH_LOG environment variable is set to "debug" or "trace"
+use std::fmt;
+
+#[doc(hidden)]
+pub fn debug(args: fmt::Arguments<'_>) {
+    log::debug!(target: "badbatch", "{args}");
+}
+
+#[doc(hidden)]
+pub fn info(args: fmt::Arguments<'_>) {
+    log::info!(target: "badbatch", "{args}");
+}
+
+#[doc(hidden)]
+pub fn warn(args: fmt::Arguments<'_>) {
+    log::warn!(target: "badbatch", "{args}");
+}
+
+#[doc(hidden)]
+pub fn error(args: fmt::Arguments<'_>) {
+    log::error!(target: "badbatch", "{args}");
+}
+
+/// Compatibility macro; use the `log` facade in new code.
 #[macro_export]
 macro_rules! internal_debug {
     ($($arg:tt)*) => {
-        #[cfg(debug_assertions)]
-        {
-            if std::env::var("BADBATCH_LOG").map(|s| s == "debug" || s == "trace").unwrap_or(false) {
-                eprintln!("[BADBATCH DEBUG] {}", format!($($arg)*));
-            }
-        }
+        $crate::disruptor::internal_log::debug(format_args!($($arg)*))
     };
 }
 
-/// Internal info logging macro\
-/// Only outputs if BADBATCH_LOG environment variable is set to "info", "debug", or "trace"
+/// Compatibility macro; use the `log` facade in new code.
 #[macro_export]
 macro_rules! internal_info {
     ($($arg:tt)*) => {
-        if std::env::var("BADBATCH_LOG").map(|s| matches!(s.as_str(), "info" | "debug" | "trace")).unwrap_or(false) {
-            eprintln!("[BADBATCH INFO] {}", format!($($arg)*));
-        }
+        $crate::disruptor::internal_log::info(format_args!($($arg)*))
     };
 }
 
-/// Internal warn logging macro
-/// Only outputs if BADBATCH_LOG environment variable is set to "warn", "info", "debug", or "trace"
+/// Compatibility macro; use the `log` facade in new code.
 #[macro_export]
 macro_rules! internal_warn {
     ($($arg:tt)*) => {
-        if std::env::var("BADBATCH_LOG").map(|s| matches!(s.as_str(), "warn" | "info" | "debug" | "trace")).unwrap_or(false) {
-            eprintln!("[BADBATCH WARN] {}", format!($($arg)*));
-        }
+        $crate::disruptor::internal_log::warn(format_args!($($arg)*))
     };
 }
 
-/// Internal error logging macro
-/// Always outputs to stderr in debug builds, controlled by BADBATCH_LOG in release
+/// Compatibility macro; use the `log` facade in new code.
 #[macro_export]
 macro_rules! internal_error {
     ($($arg:tt)*) => {
-        #[cfg(debug_assertions)]
-        {
-            eprintln!("[BADBATCH ERROR] {}", format!($($arg)*));
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            if std::env::var("BADBATCH_LOG").map(|s| matches!(s.as_str(), "error" | "warn" | "info" | "debug" | "trace")).unwrap_or(false) {
-                eprintln!("[BADBATCH ERROR] {}", format!($($arg)*));
-            }
-        }
+        $crate::disruptor::internal_log::error(format_args!($($arg)*))
     };
 }
 
-/// Test logging macro - only enabled in test builds
+/// Test logging macro retained for the existing opt-in test diagnostics.
 #[macro_export]
 macro_rules! test_log {
     ($($arg:tt)*) => {
         #[cfg(test)]
         {
-            if std::env::var("BADBATCH_TEST_LOG").map(|s| s == "1" || s.to_lowercase() == "true").unwrap_or(false) {
-                ::std::println!("[BADBATCH TEST] {}", format!($($arg)*));
+            if std::env::var("BADBATCH_TEST_LOG")
+                .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+            {
+                ::std::println!("[BADBATCH TEST] {}", format_args!($($arg)*));
             }
         }
     };

@@ -7,7 +7,11 @@
 //! component, following the LMAX Disruptor design principles.
 
 use crate::disruptor::sequencer::SequencerEnum;
-use crate::disruptor::{ring_buffer::BatchIterMut, Result, RingBuffer, Sequencer, WaitStrategy};
+use crate::disruptor::{
+    failure::{current_thread_name, log_failure, FailureDecision},
+    ring_buffer::BatchIterMut,
+    FailurePhase, FailureRecord, Result, RingBuffer, Sequencer, WaitStrategy,
+};
 use std::convert::TryFrom;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -63,8 +67,9 @@ pub enum TryPublishError {
         /// Maximum batch size supported by this ring.
         capacity: usize,
     },
-    /// The pipeline was poisoned by a panic in an update closure or event
-    /// handler — terminal; retrying will never succeed.
+    /// The pipeline was poisoned by a fatal producer/consumer failure —
+    /// terminal; retrying will never succeed. Query `first_failure()` on a
+    /// shared runtime handle or producer for causal context.
     Poisoned,
     /// The sequencer was closed by shutdown/halt — terminal; retrying will
     /// never succeed.
@@ -381,11 +386,42 @@ where
 /// This deliberately avoids `std::thread::panicking()`, whose per-call TLS
 /// access cost ~59% of end-to-end unicast throughput when it sat on the
 /// per-event publish path (P3 baseline bisection, 2026-07-19).
-pub(crate) struct PoisonOnPanic<'a, W: WaitStrategy + 'static>(pub(crate) &'a SequencerEnum<W>);
+pub(crate) struct PoisonOnPanic<'a, W: WaitStrategy + 'static> {
+    sequencer: &'a SequencerEnum<W>,
+    first_sequence: i64,
+    last_sequence: i64,
+}
+
+impl<'a, W: WaitStrategy + 'static> PoisonOnPanic<'a, W> {
+    pub(crate) fn new(
+        sequencer: &'a SequencerEnum<W>,
+        first_sequence: i64,
+        last_sequence: i64,
+    ) -> Self {
+        Self {
+            sequencer,
+            first_sequence,
+            last_sequence,
+        }
+    }
+}
 
 impl<W: WaitStrategy + 'static> Drop for PoisonOnPanic<'_, W> {
     fn drop(&mut self) {
-        self.0.poison();
+        let message = if self.first_sequence == self.last_sequence {
+            "producer update panicked after claim and before publish".to_string()
+        } else {
+            format!(
+                "producer batch update panicked after claiming sequences {}..={}",
+                self.first_sequence, self.last_sequence
+            )
+        };
+        let failure = FailureRecord::new(FailurePhase::ProducerPanic, message)
+            .with_thread_name(current_thread_name())
+            .with_sequence(self.first_sequence);
+        self.sequencer.record_failure(&failure);
+        log_failure(&failure, FailureDecision::Poison);
+        self.sequencer.poison();
     }
 }
 
@@ -439,6 +475,12 @@ where
         self.sequencer.get_cursor().get()
     }
 
+    /// Return the first structured failure retained by the shared pipeline.
+    #[must_use]
+    pub fn first_failure(&self) -> Option<FailureRecord> {
+        self.sequencer.first_failure()
+    }
+
     /// Classify a rejected try-claim.
     ///
     /// Terminal pipeline states must not be reported as transient backpressure
@@ -485,7 +527,7 @@ where
         // Get the event at the claimed sequence and update it
         // SAFETY: We have exclusive access to this sequence from the sequencer
         let event = unsafe { &mut *self.ring_buffer.get_mut_unchecked(sequence) };
-        let poison_guard = PoisonOnPanic(&self.sequencer);
+        let poison_guard = PoisonOnPanic::new(&self.sequencer, sequence, sequence);
         update(event);
         std::mem::forget(poison_guard); // disarm: Drop only runs while unwinding
 
@@ -544,7 +586,7 @@ where
             self.ring_buffer
                 .batch_iter_mut(start_sequence, end_sequence)
         };
-        let poison_guard = PoisonOnPanic(&self.sequencer);
+        let poison_guard = PoisonOnPanic::new(&self.sequencer, start_sequence, end_sequence);
         update(iter);
         std::mem::forget(poison_guard); // disarm: Drop only runs while unwinding
 
@@ -564,7 +606,7 @@ where
         // Get the event at the claimed sequence and update it
         // SAFETY: We have exclusive access to this sequence from the sequencer
         let event = unsafe { &mut *self.ring_buffer.get_mut_unchecked(sequence) };
-        let poison_guard = PoisonOnPanic(&self.sequencer);
+        let poison_guard = PoisonOnPanic::new(&self.sequencer, sequence, sequence);
         update(event);
         std::mem::forget(poison_guard); // disarm: Drop only runs while unwinding
 
@@ -599,7 +641,7 @@ where
             self.ring_buffer
                 .batch_iter_mut(start_sequence, end_sequence)
         };
-        let poison_guard = PoisonOnPanic(&self.sequencer);
+        let poison_guard = PoisonOnPanic::new(&self.sequencer, start_sequence, end_sequence);
         update(iter);
         std::mem::forget(poison_guard); // disarm: Drop only runs while unwinding
 

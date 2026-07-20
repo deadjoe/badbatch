@@ -1,10 +1,12 @@
 //! Consumer thread handles, access kind, and unified spawn.
 
 use super::core::set_thread_affinity;
+use crate::disruptor::failure::panic_payload_message;
 use crate::disruptor::{
-    consumer_engine::{self, RunMode, StopFlag},
+    consumer_engine::{self, ConsumerContext, RunMode, StopFlag},
     sequence_barrier::ProcessingSequenceBarrier,
-    EventHandler, RingBuffer, Sequence, WaitStrategy, INITIAL_CURSOR_VALUE,
+    EventHandler, FailurePhase, FailureRecord, RingBuffer, Sequence, WaitStrategy,
+    INITIAL_CURSOR_VALUE,
 };
 use std::sync::{atomic::AtomicBool, Arc};
 use std::thread::{self, JoinHandle};
@@ -75,6 +77,7 @@ impl Drop for Consumer {
 pub(crate) struct ConsumerThreadConfig {
     pub(crate) thread_name: Option<String>,
     pub(crate) cpu_affinity: Option<usize>,
+    pub(crate) stage_index: usize,
     pub(crate) shutdown_flag: Arc<AtomicBool>,
     /// How this consumer runs (sequential / work-pool). Never optional magic.
     pub(crate) run_mode: RunMode,
@@ -102,38 +105,27 @@ where
     pub(crate) access: ConsumerAccess,
 }
 
-/// Unified spawn: affinity + name + body.
-fn spawn_named(
-    thread_name: String,
-    cpu_affinity: Option<usize>,
-    body: impl FnOnce() + Send + 'static,
-) -> JoinHandle<()> {
-    thread::Builder::new()
-        .name(thread_name.clone())
-        .spawn(move || {
-            if let Some(core_id) = cpu_affinity {
-                if let Err(e) = set_thread_affinity(core_id) {
-                    #[cfg(debug_assertions)]
-                    eprintln!(
-                        "Warning: Failed to set CPU affinity for '{thread_name}' to core {core_id}: {e}"
-                    );
-                    #[cfg(not(debug_assertions))]
-                    let _ = e;
-                }
-            }
-            body();
-        })
-        .expect("Failed to spawn consumer thread")
+fn lifecycle_failure(
+    phase: FailurePhase,
+    message: impl Into<String>,
+    thread_name: &str,
+    stage_index: usize,
+) -> FailureRecord {
+    FailureRecord::new(phase, message)
+        .with_thread_name(thread_name)
+        .with_stage_index(stage_index)
 }
 
 /// Allocate sequence and spawn named thread; body receives sequence + resolved name.
-fn start_consumer_thread<F>(
+fn start_consumer_thread<W, F>(
     config: ConsumerThreadConfig,
     default_name: &str,
+    failure_barrier: Arc<ProcessingSequenceBarrier<W>>,
     body: F,
 ) -> (Arc<Sequence>, Consumer)
 where
-    F: FnOnce(Arc<Sequence>, String, RunMode, Arc<AtomicBool>) + Send + 'static,
+    W: WaitStrategy + 'static,
+    F: FnOnce(Arc<Sequence>, String, usize, RunMode, Arc<AtomicBool>) + Send + 'static,
 {
     let consumer_sequence = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
     let sequence_for_thread = Arc::clone(&consumer_sequence);
@@ -142,12 +134,37 @@ where
         .unwrap_or_else(|| default_name.to_string());
     let thread_name_for_handle = thread_name.clone();
     let cpu_affinity = config.cpu_affinity;
+    let stage_index = config.stage_index;
     let shutdown_flag = config.shutdown_flag;
     let run_mode = config.run_mode;
 
-    let join_handle = spawn_named(thread_name.clone(), cpu_affinity, move || {
-        body(sequence_for_thread, thread_name, run_mode, shutdown_flag);
-    });
+    let join_handle = thread::Builder::new()
+        .name(thread_name.clone())
+        .spawn(move || {
+            if let Some(core_id) = cpu_affinity {
+                if let Err(error) = set_thread_affinity(core_id) {
+                    failure_barrier.poison_with_failure(&lifecycle_failure(
+                        FailurePhase::ThreadAffinity,
+                        format!("failed to pin to CPU core {core_id}: {error}"),
+                        &thread_name,
+                        stage_index,
+                    ));
+                    return;
+                }
+                log::debug!(
+                    target: "badbatch::lifecycle",
+                    "phase=thread_affinity thread={thread_name:?} stage={stage_index} core={core_id} decision=pinned"
+                );
+            }
+            body(
+                sequence_for_thread,
+                thread_name,
+                stage_index,
+                run_mode,
+                shutdown_flag,
+            );
+        })
+        .expect("Failed to spawn consumer thread");
 
     (
         consumer_sequence,
@@ -167,54 +184,68 @@ where
     H: EventHandler<E> + Send + 'static,
     W: WaitStrategy + 'static,
 {
+    let failure_barrier = Arc::clone(&sequence_barrier);
     start_consumer_thread(
         config,
         "disruptor-consumer",
-        move |seq, thread_name, run_mode, shutdown| {
+        failure_barrier,
+        move |seq, thread_name, stage_index, run_mode, shutdown| {
             // A panicking handler kills this consumer thread; poison the
             // producers so blocking publishes fail fast instead of spinning
             // forever on a gating sequence that never advances (2026-07-18 audit).
             let barrier_for_poison = Arc::clone(&sequence_barrier);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 if let Err(e) = event_handler.on_start() {
-                    crate::internal_error!(
-                        "EventHandler on_start failed in '{thread_name}': {e:?}"
-                    );
+                    sequence_barrier.poison_with_failure(&lifecycle_failure(
+                        FailurePhase::HandlerStart,
+                        e.to_string(),
+                        &thread_name,
+                        stage_index,
+                    ));
+                    return;
                 }
 
                 let stop = StopFlag::External(&shutdown);
                 match &run_mode {
                     RunMode::WorkPool(work_seq) => {
-                        consumer_engine::run_work_processor_loop(
+                        consumer_engine::run_work_processor_loop_for_stage(
                             &ring_buffer,
                             &sequence_barrier,
                             &mut event_handler,
                             &seq,
                             work_seq,
                             stop,
-                            &thread_name,
+                            ConsumerContext::for_stage(&thread_name, stage_index),
                         );
                     }
                     RunMode::Sequential => {
-                        consumer_engine::run_sequential_batch_loop(
+                        consumer_engine::run_sequential_batch_loop_for_stage(
                             &ring_buffer,
                             &sequence_barrier,
                             &mut event_handler,
                             &seq,
                             stop,
-                            &thread_name,
+                            ConsumerContext::for_stage(&thread_name, stage_index),
                         );
                     }
                 }
 
                 if let Err(e) = event_handler.on_shutdown() {
-                    crate::internal_error!(
-                        "EventHandler on_shutdown failed in '{thread_name}': {e:?}"
-                    );
+                    sequence_barrier.record_failure(&lifecycle_failure(
+                        FailurePhase::HandlerShutdown,
+                        e.to_string(),
+                        &thread_name,
+                        stage_index,
+                    ));
                 }
             }));
             if let Err(payload) = result {
-                barrier_for_poison.poison_producers();
+                barrier_for_poison.poison_with_failure(&lifecycle_failure(
+                    FailurePhase::ConsumerPanic,
+                    panic_payload_message(payload.as_ref()),
+                    &thread_name,
+                    stage_index,
+                ));
                 std::panic::resume_unwind(payload);
             }
         },
@@ -238,26 +269,33 @@ where
         "readonly fan-out must use RunMode::Sequential (got WorkPool — assembly bug)"
     );
 
+    let failure_barrier = Arc::clone(&sequence_barrier);
     start_consumer_thread(
         config,
         "disruptor-fanout",
-        move |seq, thread_name, _run_mode, shutdown| {
+        failure_barrier,
+        move |seq, thread_name, stage_index, _run_mode, shutdown| {
             // Same panic policy as mutable consumers: poison the producers so
             // they fail fast instead of spinning on a dead gating sequence.
             let barrier_for_poison = Arc::clone(&sequence_barrier);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let stop = StopFlag::External(&shutdown);
-                consumer_engine::run_sequential_readonly_loop(
+                consumer_engine::run_sequential_readonly_loop_for_stage(
                     &ring_buffer,
                     &sequence_barrier,
                     &mut on_event,
                     &seq,
                     stop,
-                    &thread_name,
+                    ConsumerContext::for_stage(&thread_name, stage_index),
                 );
             }));
             if let Err(payload) = result {
-                barrier_for_poison.poison_producers();
+                barrier_for_poison.poison_with_failure(&lifecycle_failure(
+                    FailurePhase::ConsumerPanic,
+                    panic_payload_message(payload.as_ref()),
+                    &thread_name,
+                    stage_index,
+                ));
                 std::panic::resume_unwind(payload);
             }
         },

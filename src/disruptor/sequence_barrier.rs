@@ -4,8 +4,9 @@
 //! event processors in the Disruptor pattern. Sequence barriers ensure that
 //! consumers don't process events until their dependencies have been satisfied.
 
+use crate::disruptor::failure::{log_failure, FailureDecision};
 use crate::disruptor::sequencer::{Sequencer, SequencerEnum};
-use crate::disruptor::{DisruptorError, Result, Sequence, WaitStrategy};
+use crate::disruptor::{DisruptorError, FailureRecord, Result, Sequence, WaitStrategy};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -175,6 +176,27 @@ where
     /// forever on a gating sequence that will never advance (2026-07-18 audit).
     pub fn poison_producers(&self) {
         self.sequencer.poison();
+    }
+
+    /// Retain and log a non-poisoning lifecycle failure (for example,
+    /// `on_shutdown` after the processing loop has already stopped).
+    pub(crate) fn record_failure(&self, failure: &FailureRecord) {
+        self.sequencer.record_failure(failure);
+        log_failure(failure, FailureDecision::Record);
+    }
+
+    /// Retain and log a causal failure, then poison producers.
+    ///
+    /// The record is stored before the release-store to the poison flag, so an
+    /// observer that sees `is_poisoned() == true` can immediately query it.
+    pub(crate) fn poison_with_failure(&self, failure: &FailureRecord) {
+        self.sequencer.record_failure(failure);
+        log_failure(failure, FailureDecision::Poison);
+        self.sequencer.poison();
+    }
+
+    pub(crate) fn first_failure(&self) -> Option<FailureRecord> {
+        self.sequencer.first_failure()
     }
 
     /// Resolve the highest contiguous published sequence after a wait.
