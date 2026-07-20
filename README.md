@@ -66,6 +66,38 @@ fn main() {
 }
 ```
 
+### Failure diagnostics and logging
+
+Fatal handler errors and panics poison the pipeline, so later publishes return
+`DisruptorError::Poisoned` (or `TryPublishError::Poisoned`). The shared pipeline
+also retains the first causal record independently of logging:
+
+```rust,ignore
+if let Some(failure) = handle.first_failure() {
+    eprintln!(
+        "phase={} thread={:?} stage={:?} sequence={:?}: {}",
+        failure.phase(),
+        failure.thread_name(),
+        failure.stage_index(),
+        failure.sequence(),
+        failure.message(),
+    );
+}
+```
+
+Builder `on_start()` failures and requested CPU-affinity failures stop that
+consumer before it enters the event loop and poison producers. `on_shutdown()`
+failures are retained by `first_failure()` but do not retroactively poison an
+already stopped pipeline. First-failure-wins preserves the causal record when a
+secondary shutdown or join failure follows.
+
+BadBatch emits cold-path records through the standard [`log`](https://docs.rs/log)
+facade with targets `badbatch::failure` and `badbatch::lifecycle`. It does not
+install a logger, read a private logging environment variable, or write directly
+to stderr; applications choose and initialize a `log`-compatible backend. Fatal
+records contain phase/thread/stage/sequence/error context, never the event payload.
+There are no logging calls in the successful per-event processing path.
+
 ### Same-stage consumers (do not mix modes on one stage)
 
 | API | Behavior |
@@ -127,7 +159,7 @@ drop(batch); // commits the consumed prefix; `ack_all()` would skip untaken even
 |---------|---------|----------|
 | (always on) | — | Builder, sequencers, `consumer_engine`, EventPoller, wait strategies |
 | `lmax-dsl` | yes | Classic `Disruptor` DSL / `BatchEventProcessor`-oriented API (Java-compat surface) |
-| `extras` | yes | `ElegantConsumer` and related helpers (legacy; no panic poisoning) |
+| `extras` | yes | `ElegantConsumer` and related helpers (legacy; producer poisoning requires explicit sequencer wiring) |
 | `deadlock-detection` | no | parking_lot lock diagnostics — never in production builds |
 | `bench-tools` | no | Diagnostic/benchmark binaries (`h2h_rust`, `baseline_metrics`, `*_breakdown`) |
 | `bench-round-diagnostics` | no | Probe-only per-round H2H batch/queue/backpressure counters; implies `bench-tools` |

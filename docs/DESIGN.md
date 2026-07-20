@@ -268,6 +268,7 @@ let consumer = ElegantConsumer::with_affinity(ring_buffer,
 - **parking_lot**: High-performance synchronization primitives
 - **core_affinity**: Cross-platform CPU affinity support
 - **thiserror**: Ergonomic error handling
+- **log**: Backend-neutral lifecycle and failure reporting (cold paths only)
 
 ### Development Dependencies
 - **criterion**: Performance benchmarking
@@ -379,11 +380,27 @@ pub enum DisruptorError {
     InsufficientCapacity,
     #[error("Alert exception")]
     Alert,
+    #[error("Pipeline poisoned by a fatal producer or consumer failure")]
+    Poisoned,
 }
 ```
 
 #### Exception Handling (`src/disruptor/exception_handler.rs`)
-Provides recovery mechanisms for event processing failures.
+`ExceptionHandler` selects `Stop` or `Continue`; reporting is centralized in
+the managed consumer engine so the default policy does not duplicate messages
+or format event payloads. Fatal managed failures are recorded before producers
+are poisoned.
+
+Built-in sequencers retain the first `FailureRecord` for programmatic diagnosis.
+The record identifies phase, managed thread, Builder stage and sequence when
+known, plus the root error string. `first_failure()` is available from the
+Builder handle/producer surfaces, `BatchEventProcessor`, and classic DSL.
+`on_start()` and requested affinity failures fail closed before consumption;
+`on_shutdown()` failures are retained without poisoning a completed stop.
+
+Logging uses the standard `log` facade on lifecycle and failure paths only.
+BadBatch does not install a backend or write directly to stderr. Applications
+own filtering and sinks; default records never contain the ring event payload.
 
 ### Main Disruptor DSL (`src/disruptor/disruptor.rs`)
 
