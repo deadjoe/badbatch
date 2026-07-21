@@ -18,6 +18,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 concurrency:
   group: tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -34,18 +37,22 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo registry and git dependencies
+        uses: actions/cache@v6
         with:
-          shared-key: test-stable
-          cache-on-failure: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install cargo-audit and cargo-deny
         run: |
@@ -74,18 +81,22 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo registry and git dependencies
+        uses: actions/cache@v6
         with:
-          shared-key: test-macos-stable
-          cache-on-failure: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Clippy (all targets, all features)
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
@@ -102,16 +113,20 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo registry and git dependencies
+        uses: actions/cache@v6
         with:
-          shared-key: loom-stable
-          cache-on-failure: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Loom — WorkerPool / multi-claim models
         # Keep models tiny; release mode recommended for loom.
@@ -127,7 +142,7 @@ jobs:
       MIRIFLAGS: -Zmiri-strict-provenance
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust (nightly + miri)
         uses: dtolnay/rust-toolchain@nightly
@@ -136,11 +151,15 @@ jobs:
           # Ensure the installed toolchain name matches RUSTUP_TOOLCHAIN.
           toolchain: nightly
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Cache Cargo registry and git dependencies
+        uses: actions/cache@v6
         with:
-          shared-key: miri-nightly
-          cache-on-failure: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Setup Miri
         run: cargo miri setup
