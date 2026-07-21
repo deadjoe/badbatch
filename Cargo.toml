@@ -107,36 +107,93 @@ name = "pipeline_breakdown"
 path = "src/bin/pipeline_breakdown.rs"
 required-features = ["bench-tools"]
 
-# Benchmark configurations
+# Benchmark configurations. These targets exercise the classic Disruptor DSL,
+# so Cargo must skip them when validating the core-only feature surface.
 [[bench]]
 name = "single_producer_single_consumer"
 harness = false
+required-features = ["lmax-dsl"]
 
 [[bench]]
 name = "multi_producer_single_consumer"
 harness = false
+required-features = ["lmax-dsl"]
 
 [[bench]]
 name = "pipeline_processing"
 harness = false
+required-features = ["lmax-dsl"]
 
 [[bench]]
 name = "latency_comparison"
 harness = false
+required-features = ["lmax-dsl"]
 
 [[bench]]
 name = "throughput_comparison"
 harness = false
+required-features = ["lmax-dsl"]
 
 [[bench]]
 name = "buffer_size_scaling"
 harness = false
+required-features = ["lmax-dsl"]
 
 [[bench]]
 name = "comprehensive_benchmarks"
 harness = false
+required-features = ["lmax-dsl"]
 
 # Compile-fail UI tests for soundness surface (clone / mode gates).
 [[test]]
 name = "ui_compile_fail"
 path = "tests/ui_compile_fail.rs"
+
+# Integration targets that exercise optional API surfaces. Declaring these
+# requirements lets `cargo check --all-targets --no-default-features` validate
+# the actual core-only target set instead of compiling feature-incompatible
+# fixtures and hiding the resulting errors.
+[[test]]
+name = "adversarial_residuals"
+path = "tests/adversarial_residuals.rs"
+required-features = ["lmax-dsl"]
+
+[[test]]
+name = "api_discrepancy_analysis"
+path = "tests/api_discrepancy_analysis.rs"
+required-features = ["lmax-dsl", "extras"]
+
+[[test]]
+name = "corrected_readme_examples"
+path = "tests/corrected_readme_examples.rs"
+required-features = ["lmax-dsl", "extras"]
+
+[[test]]
+name = "disruptor_integration_test"
+path = "tests/disruptor_integration_test.rs"
+required-features = ["lmax-dsl"]
+
+[[test]]
+name = "documentation_api_verification"
+path = "tests/documentation_api_verification.rs"
+required-features = ["lmax-dsl", "extras"]
+
+[[test]]
+name = "event_processing_integration_test"
+path = "tests/event_processing_integration_test.rs"
+required-features = ["lmax-dsl"]
+
+[[test]]
+name = "lifecycle_residuals"
+path = "tests/lifecycle_residuals.rs"
+required-features = ["lmax-dsl"]
+
+[[test]]
+name = "mpsc_debug"
+path = "tests/mpsc_debug.rs"
+required-features = ["lmax-dsl"]
+
+[[test]]
+name = "mpsc_exact_repro"
+path = "tests/mpsc_exact_repro.rs"
+required-features = ["lmax-dsl"]

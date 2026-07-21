@@ -7,17 +7,22 @@ use crate::disruptor::disruptor::Disruptor;
 use crate::disruptor::{
     build_single_producer,
     event_factory::DefaultEventFactory,
-    event_translator::ClosureEventTranslator,
     ring_buffer::RingBuffer,
     sequence::Sequence,
     sequence_barrier::ProcessingSequenceBarrier,
     sequencer::{MultiProducerSequencer, Sequencer, SequencerEnum, SingleProducerSequencer},
     wait_strategy::BusySpinWaitStrategy,
-    BlockingWaitStrategy, EventHandler, ProducerType, Result, SequenceBarrier,
+    SequenceBarrier,
+};
+#[cfg(feature = "lmax-dsl")]
+use crate::disruptor::{
+    event_translator::ClosureEventTranslator, BlockingWaitStrategy, EventHandler, ProducerType,
+    Result,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestCaseResult};
 use std::convert::TryFrom;
+#[cfg(feature = "lmax-dsl")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

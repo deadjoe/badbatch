@@ -88,8 +88,7 @@ format_check() {
 feature_matrix_check() {
     print_step "1b. 特性矩阵编译检查 (cargo check)"
     cargo check --all-targets --all-features --locked
-    cargo check --all-targets --no-default-features --locked || true
-    # 允许无默认特性失败作为提示（部分项目不支持完全关闭默认特性）
+    cargo check --all-targets --no-default-features --locked
 }
 
 # 2. 静态代码分析
