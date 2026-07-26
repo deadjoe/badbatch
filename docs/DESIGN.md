@@ -554,7 +554,7 @@ let mut producer = build_single_producer(1024, factory, BusySpinWaitStrategy)
 
 Current CI (`.github/workflows/test.yml`):
 
-- **Rust**: latest **stable** for build/test/clippy/fmt/coverage; **nightly** only for Miri
+- **Rust**: latest **stable** for build/test/clippy/fmt/coverage; pinned **1.97** for the declared MSRV compile gate; **nightly** only for Miri
 - **Platforms**: **Linux** (`ubuntu-latest`) and **macOS ARM64** (`macos-14`) stable jobs
 - **Architectures**: CI covers the hosted x86_64 Linux and Apple Silicon macOS environments; controlled bare-metal numbers remain separate performance evidence
 - **Windows**: **not supported / not tested**

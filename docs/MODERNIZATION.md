@@ -11,14 +11,14 @@ Changelog: root [`CHANGELOG.md`](../CHANGELOG.md).
 2. Keep LMAX Disruptor **protocol** correct (sequence claim/publish, contiguity, backpressure, barriers).
 3. Prefer lock-free designs only — no “documented lock-free / coded with Mutex” drift.
 4. Target platforms: **macOS + Linux**. Windows is out of scope.
-5. Toolchain: **latest stable Rust** for build/test; **nightly only** where required (Miri).
+5. Toolchain: **latest stable Rust** for the primary build/test matrix, pinned **1.97** for the declared MSRV gate, and **nightly only** where required (Miri).
 6. No crates.io / license / external-user compatibility constraints.
 
 ## Phase status
 
 | Phase | Scope | Status |
 |-------|--------|--------|
-| 0 | Trust: honest docs/CI, Miri job, latest stable MSRV | done (MSRV 1.97 / v0.2.0; honest CI + Miri job) |
+| 0 | Trust: honest docs/CI, Miri job, pinned MSRV | done (Rust 1.97 gate / v0.2.0; stable matrix + Miri job) |
 | 1 | API convergence, WaitStrategy merge, module split; remove SharedRingBuffer | done (`lmax-dsl` / `extras`; preferred Builder+Poller; **SharedRingBuffer removed**) |
 | 2 | Monomorphize hot path (`W`/`Barrier`/`Handler`), remove hot-path `dyn` | done |
 | 3 | LMAX WorkerPool / CAS work-sequence for same-stage parallel consumers (no slot Mutex) | done |
