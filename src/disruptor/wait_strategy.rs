@@ -1189,6 +1189,16 @@ mod tests {
     }
 
     #[test]
+    fn test_sleeping_wait_strategy_zero_timeout_returns_timeout_when_unavailable() {
+        let strategy = SleepingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(0));
+
+        let result = strategy.wait_for_with_timeout(1, &cursor, &[], Duration::ZERO);
+
+        assert!(matches!(result, Err(DisruptorError::Timeout)));
+    }
+
+    #[test]
     fn test_sleeping_wait_strategy_with_dependent_sequences() {
         let strategy = SleepingWaitStrategy::new();
         let cursor = Arc::new(Sequence::new(10));

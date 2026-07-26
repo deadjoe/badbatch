@@ -330,11 +330,99 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::disruptor::{producer::Producer, BusySpinWaitStrategy, DefaultEventFactory};
+    use crate::disruptor::{
+        producer::Producer,
+        simple_wait_strategy::{
+            BusySpin as SimpleBusySpin, BusySpinWithHint as SimpleBusySpinWithHint,
+            Sleeping as SimpleSleeping, Yielding as SimpleYielding,
+        },
+        BlockingWaitStrategy, BusySpinWaitStrategy, DefaultEventFactory, MultiProducerSequencer,
+        Sequencer, SequencerEnum, SleepingWaitStrategy, YieldingWaitStrategy,
+    };
 
     #[derive(Debug, Default, Clone, Copy)]
     struct Ev {
         v: i64,
+    }
+
+    fn assert_poller_reads_published_event<W>(wait_strategy: W)
+    where
+        W: WaitStrategy + 'static,
+    {
+        let factory = DefaultEventFactory::<Ev>::new();
+        let (mut producer, mut poller, _shutdown) =
+            open_single_producer_poller(8, factory, wait_strategy).unwrap();
+
+        assert_eq!(poller.poll().err(), Some(Polling::Idle));
+        producer.publish(|event| event.v = 7).unwrap();
+
+        let mut batch = poller.poll().expect("published event");
+        assert_eq!(batch.from_sequence(), 0);
+        assert_eq!(batch.to_sequence(), 0);
+        assert_eq!(batch.len(), 1);
+        let (sequence, event) = batch.next_mut().unwrap();
+        assert_eq!((sequence, event.v), (0, 7));
+    }
+
+    #[test]
+    fn poller_is_consistent_across_all_wait_strategies() {
+        assert_poller_reads_published_event(BlockingWaitStrategy::new());
+        assert_poller_reads_published_event(BusySpinWaitStrategy);
+        assert_poller_reads_published_event(YieldingWaitStrategy);
+        assert_poller_reads_published_event(SleepingWaitStrategy::new());
+        assert_poller_reads_published_event(SimpleBusySpin);
+        assert_poller_reads_published_event(SimpleBusySpinWithHint);
+        assert_poller_reads_published_event(SimpleYielding::default());
+        assert_poller_reads_published_event(SimpleSleeping::default());
+    }
+
+    #[test]
+    fn poller_does_not_expose_multi_producer_publication_holes() {
+        let ring_buffer =
+            Arc::new(RingBuffer::new(8, DefaultEventFactory::<Ev>::new()).expect("ring buffer"));
+        let wait_strategy = Arc::new(BusySpinWaitStrategy);
+        let sequencer = Arc::new(MultiProducerSequencer::new(8, Arc::clone(&wait_strategy)));
+        let sequencer_enum = SequencerEnum::Multi(Arc::clone(&sequencer));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(ProcessingSequenceBarrier::new(
+            sequencer.get_cursor(),
+            wait_strategy,
+            Vec::new(),
+            sequencer_enum,
+        ));
+        let mut poller =
+            unsafe { EventPoller::new(Arc::clone(&ring_buffer), barrier, Arc::clone(&shutdown)) };
+        sequencer.add_gating_sequences(&[poller.sequence()]);
+
+        let sequence_0 = sequencer.next().unwrap();
+        let sequence_1 = sequencer.next().unwrap();
+        let sequence_2 = sequencer.next().unwrap();
+        assert_eq!((sequence_0, sequence_1, sequence_2), (0, 1, 2));
+
+        sequencer.publish(sequence_1);
+        sequencer.publish(sequence_2);
+        assert_eq!(poller.poll().err(), Some(Polling::Idle));
+
+        sequencer.publish(sequence_0);
+        let batch = poller.poll().expect("contiguous published prefix");
+        assert_eq!(batch.from_sequence(), 0);
+        assert_eq!(batch.to_sequence(), 2);
+        batch.ack_all();
+    }
+
+    #[test]
+    fn poller_reports_barrier_alert_and_external_shutdown() {
+        let factory = DefaultEventFactory::<Ev>::new();
+        let (mut producer, mut poller, shutdown) =
+            open_single_producer_poller(8, factory, BusySpinWaitStrategy).unwrap();
+        producer.publish(|event| event.v = 7).unwrap();
+
+        poller.barrier.alert();
+        assert_eq!(poller.poll().err(), Some(Polling::Shutdown));
+
+        poller.barrier.clear_alert();
+        shutdown.store(true, Ordering::Release);
+        assert_eq!(poller.poll().err(), Some(Polling::Shutdown));
     }
 
     #[test]
