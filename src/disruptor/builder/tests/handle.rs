@@ -2,9 +2,10 @@ use super::super::*;
 use super::common::{test_event_factory, wait_until, TestEvent};
 use crate::disruptor::producer::Producer;
 use crate::disruptor::wait_strategy::{BusySpinWaitStrategy, YieldingWaitStrategy};
+use crate::disruptor::Sequencer;
 use std::sync::{
     atomic::{AtomicI64, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::time::Duration;
 
@@ -87,31 +88,99 @@ fn test_disruptor_handle_into_producer() {
 }
 
 #[test]
-fn test_disruptor_handle_into_producer_restores_capacity() {
-    let mut handle = build_multi_producer(4, test_event_factory, BusySpinWaitStrategy)
-        .handle_events_with(|_event: &mut TestEvent, _seq, _eob| {})
-        .build();
+fn test_into_producer_unblocks_backpressured_producer_after_gating_removal() {
+    use std::sync::mpsc::RecvTimeoutError;
 
-    // Publish a few events so the consumer advances the gating sequence
-    for i in 0..4 {
-        let _ = handle.publish(|event| {
-            event.value = i as i64;
-        });
+    let (handler_entered_tx, handler_entered_rx) = std::sync::mpsc::channel();
+    let (release_handler_tx, release_handler_rx) = std::sync::mpsc::channel();
+    let release_handler_rx = Arc::new(Mutex::new(release_handler_rx));
+    let release_in_handler = Arc::clone(&release_handler_rx);
+
+    let mut handle = build_multi_producer(4, test_event_factory, BusySpinWaitStrategy)
+        .handle_events_with(move |_event: &mut TestEvent, _seq, _eob| {
+            handler_entered_tx.send(()).unwrap();
+            release_in_handler.lock().unwrap().recv().unwrap();
+        })
+        .build();
+    let shutdown = Arc::clone(&handle.core.shutdown_flag);
+    let sequencer = handle.core.sequencer.clone();
+    let mut blocked_producer = handle.create_producer();
+
+    // Publish the first event alone so the consumer's current batch ends at
+    // sequence 0, then hold it inside that handler.
+    handle
+        .publish(|event| {
+            event.value = 0;
+        })
+        .unwrap();
+    handler_entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("consumer must enter the first handler");
+    // Fill the remaining slots while the consumer is held, leaving its gating
+    // sequence at -1 and the producer cursor at 3.
+    for value in 1..4 {
+        handle.publish(|event| event.value = value).unwrap();
     }
 
-    // Give the consumer a brief moment to process
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    // A second full-buffer batch needs the consumer to reach sequence 3 and
+    // therefore blocks on the registered gating snapshot.
+    let (claim_started_tx, claim_started_rx) = std::sync::mpsc::channel();
+    let (claim_result_tx, claim_result_rx) = std::sync::mpsc::channel();
+    let publisher = std::thread::spawn(move || {
+        claim_started_tx.send(()).unwrap();
+        let result = blocked_producer.batch_publish(4, |events| {
+            for event in events {
+                event.value = 99;
+            }
+        });
+        claim_result_tx.send(result).unwrap();
+    });
+    claim_started_rx.recv().unwrap();
+    match claim_result_rx.recv_timeout(Duration::from_millis(20)) {
+        Err(RecvTimeoutError::Timeout) => {}
+        unexpected => {
+            shutdown.store(true, Ordering::Release);
+            release_handler_tx.send(()).unwrap();
+            let _standalone = handle.into_producer();
+            publisher.join().unwrap();
+            panic!("producer was not backpressured: {unexpected:?}");
+        }
+    }
 
-    // Convert into a standalone producer. This should remove gating sequences so the
-    // ring buffer can wrap freely without consumer backpressure.
-    let mut producer = handle.into_producer();
+    // Move lifecycle ownership to another thread. Wait until into_producer has
+    // set the stop flag before releasing the first handler, so the consumer
+    // cannot drain the rest of the batch and unblock the claim by normal
+    // progress. The only sufficient release is gating removal after join.
+    let into_producer = std::thread::spawn(move || handle.into_producer());
+    wait_until(
+        Duration::from_secs(1),
+        || shutdown.load(Ordering::Acquire),
+        "into_producer shutdown flag",
+    );
+    release_handler_tx.send(()).unwrap();
+    let mut standalone = into_producer.join().unwrap();
 
-    for i in 0..8 {
-        producer
-            .try_publish(|event| {
-                event.value = 100 + i as i64;
-            })
-            .expect("publishing after into_producer should not block");
+    let claimed = match claim_result_rx.recv_timeout(Duration::from_secs(1)) {
+        Ok(result) => result.expect("gating removal must unblock the claim"),
+        Err(error) => {
+            // Keep a failing regression from stranding a spinning publisher.
+            sequencer.close();
+            publisher.join().unwrap();
+            panic!("backpressured producer did not observe gating removal: {error}");
+        }
+    };
+    assert_eq!(claimed, 7);
+    publisher.join().unwrap();
+
+    // The producer returned by into_producer remains open and can continue
+    // wrapping freely after all consumer gating has been removed.
+    for expected in 8..16 {
+        assert_eq!(
+            standalone
+                .try_publish(|event| event.value = expected)
+                .unwrap(),
+            expected
+        );
     }
 }
 
