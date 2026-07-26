@@ -15,6 +15,36 @@ jobs cannot silently raise this minimum.
 
 ## [0.2.0] — 2026-07
 
+### Wait correctness, safe SP claims, and API clarity (2026-07-26)
+
+- **Wait / poller correctness.** Availability is observed before timeout in
+  `SleepingWaitStrategy`; the simple-strategy adapter refreshes the producer
+  cursor after dependencies advance; and non-blocking poll/probe paths use a
+  dedicated availability read that preserves multi-producer contiguity and
+  fails closed on barrier errors.
+- **Safe unique single-producer claims.** Builder single-producer handles and
+  the public poller constructor receive a crate-private, non-cloneable
+  capability tied to the exact sequencer. It reserves the checked claim lock
+  for its lifetime and removes the per-claim lock operation only on those
+  proven-unique paths; raw, shared, multi-producer, and classic DSL paths remain
+  checked. This release makes **no performance claim** for the specialization;
+  platform measurements remain separate acceptance work.
+- **Backpressure and WorkerPool liveness.** Regressions lock in gating-snapshot
+  refresh after consumer removal, and WorkerPool workers skip only unchanged
+  gating-sequence stores while preserving the required update when the shared
+  work cursor advances.
+- **Breaking — explicit same-stage partitioning.** Adding another mutable
+  handler to an existing stage is now named
+  `also_partition_with` (previously the additional-handler overload of
+  `handle_events_with`) or `also_partition_with_handler` (previously the
+  additional-handler overload of `handle_events_with_handler`). The first
+  handler on a stage keeps `handle_events_with{,_handler}`; read-only broadcast
+  keeps `fan_out_events_with`.
+- **Relaxed public bounds.** `EventHandler` now requires `Send`, not `Sync`, and
+  the classic DSL no longer requires event types to implement `Debug`.
+- **Pinned MSRV verification.** CI now checks all targets and features with the
+  declared Rust 1.97 minimum in addition to the moving-stable matrix.
+
 ### Structured failure delivery and standard logging (2026-07-20)
 
 - **Startup failures fail closed.** Builder `EventHandler::on_start()` errors

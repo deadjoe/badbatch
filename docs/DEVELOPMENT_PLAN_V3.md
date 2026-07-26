@@ -112,6 +112,12 @@ A.3 使**两个 zero-timeout / try-read 调用不再创建 `Instant`**。
 
 `WaitStrategy`（LMAX 全接口）与 `SimpleWaitStrategy`（`simple_wait_strategy.rs:14`，自述 "inspired by disruptor-rs"）行为分叉，例如 `SimpleYielding::backoff` 与完整 `Yielding` 的 miss 处理不同。
 
+> ⚠️ **正确性硬前置**：实施 A.6 前，必须先新增真正调用 timeout
+> 路径、覆盖全部八个 wait strategy 实现的正 timeout 顺序矩阵，验证
+> 已发布 sequence 的 availability 必须先于 timeout。A.3 之后 poller 直接走
+> non-blocking availability 原语，现有 A.5 的 poller 矩阵不再调用 wait
+> strategy，只能证明构造兼容，不能充当这项语义重构的安全网。
+>
 > ⚠️ **受文末并行规则约束**：统一动作若触及 `YieldingWaitStrategy` / `BusySpinWaitStrategy` / `wait_for_with_alert`，必须等基线落盘。
 
 ---
