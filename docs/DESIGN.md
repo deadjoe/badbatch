@@ -564,7 +564,7 @@ See also [`MODERNIZATION.md`](MODERNIZATION.md) for active modernization phases 
 
 ### Benchmarking Strategy
 - **Comprehensive Suite**: 7 specialized benchmark categories covering all performance aspects
-- **Statistical Analysis**: Criterion.rs with latency histograms (P50, P95, P99, P99.9)
+- **Statistical Analysis**: latency harness reports mean, median, P95, P99, and max
 - **Comparative Testing**: channel-oriented Criterion comparisons plus the matched BadBatch-vs-LMAX Java fork harness
 - **Round diagnostics**: opt-in per-round batch-size, queue-depth and producer-backpressure capture for mechanism studies
 - **Scaling Analysis**: Buffer size scaling from 64 to 8192 slots
