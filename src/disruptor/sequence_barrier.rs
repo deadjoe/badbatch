@@ -199,6 +199,26 @@ where
         self.sequencer.first_failure()
     }
 
+    /// Read the currently available sequence without invoking the wait strategy.
+    ///
+    /// The returned value can be lower than `sequence` when no event is
+    /// available. Multi-producer barriers still resolve the highest contiguous
+    /// published prefix so an out-of-order claim is never exposed to consumers.
+    #[inline]
+    pub(crate) fn try_get_available_sequence(&self, sequence: i64) -> Result<i64> {
+        self.check_alert()?;
+
+        let available_sequence = if self.dependent_sequences.is_empty() {
+            self.cursor.get()
+        } else {
+            Sequence::get_minimum_sequence(&self.dependent_sequences)
+        };
+        let highest_published = self.resolve_highest_published(sequence, available_sequence);
+
+        self.check_alert()?;
+        Ok(highest_published)
+    }
+
     /// Resolve the highest contiguous published sequence after a wait.
     ///
     /// Single-producer sequencers publish in order, so the available sequence

@@ -380,26 +380,26 @@ where
 
         let next_sequence = self.sequence.get() + 1;
 
-        // Probe once without blocking. This is intended for tests and polling-style
-        // integrations, not the main high-performance run loop.
+        // Probe once without invoking the wait strategy. This is intended for
+        // tests and polling-style integrations, not the main run loop.
         let available_sequence = match self
             .sequence_barrier
-            .wait_for_with_timeout(next_sequence, std::time::Duration::ZERO)
+            .try_get_available_sequence(next_sequence)
         {
             Ok(seq) => seq,
             Err(DisruptorError::Alert) => {
                 // We've been alerted to stop
                 return Err(DisruptorError::Alert);
             }
-            Err(DisruptorError::Timeout) => {
-                // No events available right now
-                return Ok(false);
-            }
             Err(e) => {
                 // Other errors
                 return Err(e);
             }
         };
+
+        if !self.running.load(Ordering::Acquire) {
+            return Err(DisruptorError::Alert);
+        }
 
         // Check if we have any events to process
         if available_sequence < next_sequence {

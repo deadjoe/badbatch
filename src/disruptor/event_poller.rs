@@ -102,19 +102,17 @@ where
             return Err(Polling::Shutdown);
         }
 
-        // Non-blocking: use a zero-timeout wait path by checking cursor/deps via barrier.
-        // ProcessingSequenceBarrier::wait_for may block for BlockingWaitStrategy; for
-        // BusySpin/Yielding it spins. Prefer try path via available check first.
-        let available = match self
-            .barrier
-            .wait_for_with_timeout(self.next_sequence, std::time::Duration::ZERO)
-        {
+        let available = match self.barrier.try_get_available_sequence(self.next_sequence) {
             Ok(seq) => seq,
             Err(DisruptorError::Alert | DisruptorError::Shutdown) => {
                 return Err(Polling::Shutdown);
             }
-            Err(DisruptorError::Timeout | _) => return Err(Polling::Idle),
+            Err(_) => return Err(Polling::Idle),
         };
+
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(Polling::Shutdown);
+        }
 
         if available < self.next_sequence {
             return Err(Polling::Idle);
