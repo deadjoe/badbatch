@@ -347,6 +347,7 @@ mod tests {
         let (mut producer, mut poller, _shutdown) =
             open_single_producer_poller(8, factory, wait_strategy).unwrap();
 
+        assert!(producer.uses_unique_claim_path());
         assert_eq!(poller.poll().err(), Some(Polling::Idle));
         producer.publish(|event| event.v = 7).unwrap();
 
