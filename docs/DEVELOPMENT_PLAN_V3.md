@@ -182,7 +182,7 @@ claim 记账重构为单一 inner 实现，checked 与 specialized 共用，**�
 
 路径：`builder/handle.rs:101` → `builder/core.rs:86-111` `stop_consumers_keep_claims` drain gating 但**不 close 不 poison**；而 `halt()`（`core.rs:73-78`）先 `close()`，故只有 `into_producer` 这条路径裸奔。
 
-可达性：`create_producer(&self)`（`fluent.rs:556`）+ `SimpleProducer: Send`（`producer.rs:372`）⇒ **纯安全 API 即可触发**，非理论风险。
+可达性（实施期勘误）：`DisruptorHandle<_, _, MultiProducerMode>::create_producer(&self)`（`builder/handle.rs`）+ `SimpleProducer: Send` ⇒ **multi 模式的纯安全 API 即可触发**，非理论风险。single handle 没有 `create_producer`，且 `producer()` 的 `&mut` 借用不能与消费型 `into_producer(self)` 并存；因此 C.2 的 single specialized-inner 直测只证明内部活性不变量，不作为 single 安全 API 可达性证据。
 
 需覆盖：`into_producer` + 背压 + gating removal 的组合。
 
