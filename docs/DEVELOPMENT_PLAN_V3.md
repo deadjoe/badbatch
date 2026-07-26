@@ -264,7 +264,7 @@ claim 记账重构为单一 inner 实现，checked 与 specialized 共用，**�
 
 该行称 Criterion 输出 "P50, P95, P99, **P99.9**"，而 `benches/latency_comparison.rs:116-142` 只计算 mean / median / p95 / p99 / max，代码中无 p99.9 计算。
 
-**二选一**：实现 p99.9，或修改该行文档。
+**决策**：修改该行文档以匹配现有输出，本轮不实现 p99.9。
 
 ### E.2 MSRV 从未被验证 —— 采用 pinned `1.97` CI job
 
