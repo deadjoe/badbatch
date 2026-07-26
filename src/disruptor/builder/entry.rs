@@ -52,7 +52,7 @@ where
 ///     .handle_events_with(|_event, _sequence, _end_of_batch| {
 ///         // Process event in processor1
 ///     })
-///     .handle_events_with(|_event, _sequence, _end_of_batch| {
+///     .also_partition_with(|_event, _sequence, _end_of_batch| {
 ///         // Process event in processor2
 ///     })
 ///     .build();

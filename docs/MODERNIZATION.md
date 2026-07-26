@@ -61,7 +61,10 @@ Changelog: root [`CHANGELOG.md`](../CHANGELOG.md).
 
 Two **explicit** modes (never mixed on one stage):
 
-1. **WorkerPool (scheme A)** — `handle_events_with` × N (mutable): CAS claim on shared work cursor; one handler per sequence. No slot `Mutex`.
+1. **WorkerPool (scheme A)** — add the first mutable handler with `handle_events_with` /
+   `handle_events_with_handler`, then add further workers explicitly with
+   `also_partition_with` / `also_partition_with_handler`: CAS claim on the shared
+   work cursor; exactly one handler per sequence. No slot `Mutex`.
 2. **Read-only fan-out** — `fan_out_events_with` × N: each consumer runs a sequential loop observing `&E` for every sequence (broadcast).
 
 ### AD-4: SharedRingBuffer — **removed**
@@ -71,7 +74,8 @@ Two **explicit** modes (never mixed on one stage):
 - **Deleted** (including the `shared-ring-buffer` feature). Cross-thread sharing uses
   the protocol path only:
   - multi-producer: `CloneableProducer` / `create_producer`
-  - multi-consumer: Builder `handle_events_with` / `fan_out_events_with`
+  - multi-consumer: Builder `handle_events_with` / `also_partition_with` /
+    `fan_out_events_with`
   - user-owned threads: `EventPoller`
 - True IPC shared-memory Disruptor (if ever needed) is a separate design, not a mutex wrapper.
 

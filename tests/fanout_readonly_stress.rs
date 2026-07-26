@@ -78,7 +78,7 @@ fn fan_out_both_consumers_see_all_sequences() {
 fn cannot_mix_fanout_and_mutable_on_same_stage() {
     let _ = build_single_producer(8, Ev::default, BusySpinWaitStrategy)
         .fan_out_events_with(|_e: &Ev, _, _| {})
-        .handle_events_with(|_e: &mut Ev, _, _| {})
+        .also_partition_with(|_e: &mut Ev, _, _| {})
         .build();
 }
 
@@ -96,7 +96,7 @@ fn worker_pool_still_partitions_not_fanout() {
         .handle_events_with(move |_e: &mut Ev, _, _| {
             count_a_h.fetch_add(1, Ordering::Relaxed);
         })
-        .handle_events_with(move |_e: &mut Ev, _, _| {
+        .also_partition_with(move |_e: &mut Ev, _, _| {
             count_b_h.fetch_add(1, Ordering::Relaxed);
         })
         .build();

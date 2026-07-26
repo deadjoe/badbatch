@@ -259,12 +259,6 @@ fn test_mixed_handler_types() {
 
     // Create a disruptor with both stateful and closure handlers
     let mut disruptor_handle = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
-        .thread_name("stateful-handler")
-        .handle_events_with_handler(StatefulHandler {
-            id: "handler-1".to_string(),
-            counter: 0,
-            total: stateful_total_clone,
-        })
         .thread_name("closure-handler")
         .handle_events_with(
             move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
@@ -272,6 +266,12 @@ fn test_mixed_handler_types() {
                 closure_total_clone.fetch_add(1, Ordering::SeqCst);
             },
         )
+        .thread_name("stateful-handler")
+        .also_partition_with_handler(StatefulHandler {
+            id: "handler-1".to_string(),
+            counter: 0,
+            total: stateful_total_clone,
+        })
         .build();
 
     // Verify we have two consumers
