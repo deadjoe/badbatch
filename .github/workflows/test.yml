@@ -43,7 +43,7 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, rust-src
 
       - name: Cache Cargo registry and git dependencies
         uses: actions/cache@v6
@@ -118,7 +118,7 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, rust-src
 
       - name: Cache Cargo registry and git dependencies
         uses: actions/cache@v6
