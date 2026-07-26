@@ -317,6 +317,21 @@ pub(crate) fn run_work_processor_loop_for_stage<E, H, W>(
     );
 }
 
+#[inline]
+fn advertise_work_sequence_if_changed(
+    consumer_sequence: &Sequence,
+    last_advertised: &mut i64,
+    current: i64,
+) -> bool {
+    if current == *last_advertised {
+        return false;
+    }
+
+    consumer_sequence.set(current);
+    *last_advertised = current;
+    true
+}
+
 fn run_work_processor_loop_impl<E, H, W>(
     ring_buffer: &RingBuffer<E>,
     sequence_barrier: &ProcessingSequenceBarrier<W>,
@@ -331,6 +346,7 @@ fn run_work_processor_loop_impl<E, H, W>(
     W: WaitStrategy + 'static,
 {
     let mut cached_available = INITIAL_CURSOR_VALUE;
+    let mut last_advertised = consumer_sequence.get();
 
     'work: while stop.should_continue() {
         let claimed = loop {
@@ -339,7 +355,7 @@ fn run_work_processor_loop_impl<E, H, W>(
             }
             let current = work_sequence.load(Ordering::Acquire);
             let next = current + 1;
-            consumer_sequence.set(current);
+            advertise_work_sequence_if_changed(consumer_sequence, &mut last_advertised, current);
             match work_sequence.compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => break next,
@@ -393,6 +409,7 @@ fn run_work_processor_loop_impl<E, H, W>(
         }
 
         consumer_sequence.set(claimed);
+        last_advertised = claimed;
     }
 }
 
@@ -611,5 +628,39 @@ mod tests {
         }
         assert_eq!(claimed, (0..10).collect::<Vec<_>>());
         assert_eq!(work.load(Ordering::Acquire), 9);
+    }
+
+    #[test]
+    fn work_processor_gating_store_is_skipped_only_when_current_is_unchanged() {
+        let consumer_sequence = Sequence::new(INITIAL_CURSOR_VALUE);
+        let mut last_advertised = consumer_sequence.get();
+
+        assert!(!advertise_work_sequence_if_changed(
+            &consumer_sequence,
+            &mut last_advertised,
+            INITIAL_CURSOR_VALUE,
+        ));
+
+        // Model a lost CAS: the shared work cursor advanced, so the next
+        // attempt must rebuild this worker's gating watermark.
+        assert!(advertise_work_sequence_if_changed(
+            &consumer_sequence,
+            &mut last_advertised,
+            0,
+        ));
+        assert_eq!(consumer_sequence.get(), 0);
+
+        assert!(!advertise_work_sequence_if_changed(
+            &consumer_sequence,
+            &mut last_advertised,
+            0,
+        ));
+
+        assert!(advertise_work_sequence_if_changed(
+            &consumer_sequence,
+            &mut last_advertised,
+            1,
+        ));
+        assert_eq!(consumer_sequence.get(), 1);
     }
 }
