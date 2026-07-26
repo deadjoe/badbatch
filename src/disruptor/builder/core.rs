@@ -9,7 +9,9 @@ use crate::disruptor::{
     producer::SimpleProducer,
     ring_buffer::SlotPadding,
     sequence_barrier::ProcessingSequenceBarrier,
-    sequencer::{MultiProducerSequencer, SequencerEnum, SingleProducerSequencer},
+    sequencer::{
+        MultiProducerSequencer, SequencerEnum, SingleProducerSequencer, UniqueProducerCapability,
+    },
     FailurePhase, FailureRecord, RingBuffer, Sequence, Sequencer, WaitStrategy,
 };
 use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
@@ -30,6 +32,11 @@ where
     pub ring_buffer: Arc<RingBuffer<E>>,
     /// Sequencer coordinating producer access (enum dispatch, no vtable).
     pub sequencer: SequencerEnum<W>,
+    /// Sole authorization for the specialized single-producer claim path.
+    ///
+    /// Multi-producer cores and manually assembled checked cores leave this
+    /// empty. The handle consumes it exactly once when creating its producer.
+    unique_producer_capability: Option<UniqueProducerCapability<W>>,
     /// Managed consumer threads.
     pub consumers: Vec<Consumer>,
     /// Cooperative shutdown flag observed by builder-spawned consumers.
@@ -46,6 +53,7 @@ where
     pub fn new(
         ring_buffer: Arc<RingBuffer<E>>,
         sequencer: SequencerEnum<W>,
+        unique_producer_capability: Option<UniqueProducerCapability<W>>,
         consumers: Vec<Consumer>,
         shutdown_flag: Arc<AtomicBool>,
         gating_sequences: Vec<Arc<Sequence>>,
@@ -53,6 +61,7 @@ where
         Self {
             ring_buffer,
             sequencer,
+            unique_producer_capability,
             consumers,
             shutdown_flag,
             gating_sequences,
@@ -174,12 +183,21 @@ where
         }
     }
 
-    /// Create a producer bound to this core's ring buffer and sequencer.
+    /// Create a checked producer bound to this core's ring buffer and sequencer.
     ///
-    /// Crate-private: callers (handle construction, multi-mode create_producer)
-    /// are responsible for respecting the single-producer exclusivity invariant.
+    /// This never infers authorization from `SequencerEnum::Single`; only
+    /// [`Self::take_initial_producer`] can consume the unique capability.
     pub(crate) fn create_producer(&self) -> SimpleProducer<E, W> {
         SimpleProducer::new(self.ring_buffer.clone(), self.sequencer.clone())
+    }
+
+    /// Create the handle's initial producer, consuming any unique capability once.
+    pub(crate) fn take_initial_producer(&mut self) -> SimpleProducer<E, W> {
+        if let Some(capability) = self.unique_producer_capability.take() {
+            SimpleProducer::new_unique(Arc::clone(&self.ring_buffer), capability)
+        } else {
+            self.create_producer()
+        }
     }
 }
 
@@ -204,17 +222,21 @@ where
     );
 
     let wait_strategy_arc = Arc::new(wait_strategy);
-    let sequencer: SequencerEnum<W> = if is_multi_producer {
-        SequencerEnum::Multi(Arc::new(MultiProducerSequencer::new(
-            size,
-            Arc::clone(&wait_strategy_arc),
-        )))
+    let (sequencer, unique_producer_capability): (
+        SequencerEnum<W>,
+        Option<UniqueProducerCapability<W>>,
+    ) = if is_multi_producer {
+        (
+            SequencerEnum::Multi(Arc::new(MultiProducerSequencer::new(
+                size,
+                Arc::clone(&wait_strategy_arc),
+            ))),
+            None,
+        )
     } else {
-        // SAFETY: single-mode builds hand out exactly one producer handle
-        // (not Clone, no create_producer), so claim methods have one driver.
-        SequencerEnum::Single(Arc::new(unsafe {
-            SingleProducerSequencer::new(size, Arc::clone(&wait_strategy_arc))
-        }))
+        let (sequencer, capability) =
+            SingleProducerSequencer::new_unique(size, Arc::clone(&wait_strategy_arc));
+        (SequencerEnum::Single(sequencer), Some(capability))
     };
 
     let shutdown_flag = Arc::new(AtomicBool::new(false));
@@ -303,6 +325,7 @@ where
     DisruptorCore::new(
         ring_buffer,
         sequencer,
+        unique_producer_capability,
         consumer_threads,
         shutdown_flag,
         gating_sequences,

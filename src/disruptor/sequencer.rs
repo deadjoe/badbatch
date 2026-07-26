@@ -11,7 +11,7 @@ use crate::disruptor::{
 use arc_swap::ArcSwap;
 use crossbeam_utils::CachePadded;
 use parking_lot::Mutex;
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::convert::TryFrom;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -547,6 +547,30 @@ impl Drop for SingleClaimGuard<'_> {
     }
 }
 
+/// Unforgeable proof that one producer exclusively drives a fresh single sequencer.
+///
+/// The capability holds `claim_lock` reserved for its entire lifetime. Its
+/// specialized claim methods can therefore skip the per-claim atomic RMW,
+/// while every public/raw [`Sequencer`] claim against the same sequencer still
+/// fails closed. It is deliberately neither `Clone` nor `Sync`.
+#[derive(Debug)]
+pub(crate) struct UniqueProducerCapability<W>
+where
+    W: WaitStrategy + 'static,
+{
+    sequencer: Arc<SingleProducerSequencer<W>>,
+    _not_sync: std::marker::PhantomData<Cell<()>>,
+}
+
+impl<W> Drop for UniqueProducerCapability<W>
+where
+    W: WaitStrategy + 'static,
+{
+    fn drop(&mut self) {
+        self.sequencer.claim_lock.store(false, Ordering::Release);
+    }
+}
+
 impl<W> SingleProducerSequencer<W>
 where
     W: WaitStrategy + 'static,
@@ -594,6 +618,27 @@ where
             closed: AtomicBool::new(false),
             first_failure: Mutex::new(None),
         }
+    }
+
+    /// Create a fresh sequencer and the sole capability for its lock-free claim path.
+    ///
+    /// Unlike [`Self::new`], this does not expose a bare sequencer without first
+    /// reserving its checked claim lock. Only construction surfaces that retain
+    /// unique producer ownership may keep and use the returned capability.
+    pub(crate) fn new_unique(
+        buffer_size: usize,
+        wait_strategy: Arc<W>,
+    ) -> (Arc<Self>, UniqueProducerCapability<W>) {
+        // SAFETY: the sequencer is fresh and its only claim driver is the
+        // non-Clone capability returned alongside it.
+        let sequencer = Arc::new(unsafe { Self::new(buffer_size, wait_strategy) });
+        // Fresh and not yet shared: reserve the checked lock without an RMW.
+        sequencer.claim_lock.store(true, Ordering::Relaxed);
+        let capability = UniqueProducerCapability {
+            sequencer: Arc::clone(&sequencer),
+            _not_sync: std::marker::PhantomData,
+        };
+        (sequencer, capability)
     }
 
     /// Acquire exclusive access to claim-state cells, or return the concurrent-driver error.
@@ -703,15 +748,22 @@ where
         }
     }
 
-    /// Check if there's available capacity for the required number of sequences
-    /// This matches the LMAX Disruptor SingleProducerSequencer.hasAvailableCapacity method
-    fn has_available_capacity_internal(&self, required_capacity: usize, do_store: bool) -> bool {
-        // SAFETY: single-publisher exclusive access to next/cached.
-        let next_value = unsafe { self.next_value() };
+    /// Check capacity after the caller has established exclusive access to the
+    /// single-producer claim state.
+    ///
+    /// # Safety
+    /// The caller must hold the checked claim guard or possess the unique
+    /// producer capability for this exact sequencer.
+    unsafe fn has_available_capacity_internal(
+        &self,
+        required_capacity: usize,
+        do_store: bool,
+    ) -> bool {
+        let next_value = self.next_value();
         let required_capacity_i64 =
             i64::try_from(required_capacity).expect("required capacity must fit into i64");
         let wrap_point = (next_value + required_capacity_i64) - self.buffer_size_i64;
-        let cached_gating_sequence = unsafe { self.cached_value() };
+        let cached_gating_sequence = self.cached_value();
 
         if wrap_point > cached_gating_sequence || cached_gating_sequence > next_value {
             if do_store {
@@ -720,7 +772,7 @@ where
             }
 
             let min_sequence = self.gating_minimum(next_value);
-            unsafe { self.set_cached_value(min_sequence) };
+            self.set_cached_value(min_sequence);
 
             if wrap_point > min_sequence {
                 return false;
@@ -728,6 +780,19 @@ where
         }
 
         true
+    }
+
+    /// Report remaining capacity after the caller has established exclusive
+    /// access to the single-producer claim state.
+    ///
+    /// # Safety
+    /// The caller must hold the checked claim guard or possess the unique
+    /// producer capability for this exact sequencer.
+    unsafe fn remaining_capacity_inner(&self) -> i64 {
+        let next_value = self.next_value();
+        let consumed = self.gating_minimum(next_value);
+        let used_capacity = next_value.saturating_sub(consumed);
+        self.buffer_size_i64.saturating_sub(used_capacity)
     }
 
     /// Claim a blocking sequence range after the caller has established
@@ -796,7 +861,7 @@ where
         // This follows the exact LMAX Disruptor SingleProducerSequencer.tryNext(int n) logic.
         let required = usize::try_from(n).ok()?;
 
-        if !self.has_available_capacity_internal(required, true) {
+        if !unsafe { self.has_available_capacity_internal(required, true) } {
             return None;
         }
 
@@ -805,6 +870,61 @@ where
         self.set_next_value(next_sequence);
 
         Some(next_sequence)
+    }
+}
+
+impl<W> UniqueProducerCapability<W>
+where
+    W: WaitStrategy + 'static,
+{
+    /// Return the exact sequencer whose checked claim lock this capability reserves.
+    pub(crate) fn sequencer(&self) -> Arc<SingleProducerSequencer<W>> {
+        Arc::clone(&self.sequencer)
+    }
+
+    #[inline]
+    pub(crate) fn next(&mut self) -> Result<i64> {
+        self.next_n(1)
+    }
+
+    #[inline]
+    pub(crate) fn next_n(&mut self, n: i64) -> Result<i64> {
+        if n < 1 || n > self.sequencer.buffer_size_i64 {
+            return Err(DisruptorError::InvalidSequence(n));
+        }
+        if let Some(error) = self.sequencer.claim_state_error() {
+            return Err(error);
+        }
+
+        // SAFETY: this non-Clone capability reserves claim_lock for its
+        // lifetime, and `&mut self` permits only one specialized caller.
+        unsafe { self.sequencer.next_n_inner(n) }
+    }
+
+    #[inline]
+    pub(crate) fn try_next(&mut self) -> Option<i64> {
+        self.try_next_n(1)
+    }
+
+    #[inline]
+    pub(crate) fn try_next_n(&mut self, n: i64) -> Option<i64> {
+        if n < 1 || n > self.sequencer.buffer_size_i64 {
+            return None;
+        }
+        if self.sequencer.claim_state_error().is_some() {
+            return None;
+        }
+
+        // SAFETY: this non-Clone capability reserves claim_lock for its
+        // lifetime, and `&mut self` permits only one specialized caller.
+        unsafe { self.sequencer.try_next_n_inner(n) }
+    }
+
+    #[inline]
+    pub(crate) fn remaining_capacity(&mut self) -> i64 {
+        // SAFETY: this capability reserves claim_lock and `&mut self`
+        // establishes the sole specialized accessor.
+        unsafe { self.sequencer.remaining_capacity_inner() }
     }
 }
 
@@ -910,17 +1030,15 @@ where
             return 0;
         };
         // SAFETY: claim_lock held.
-        let next_value = unsafe { self.next_value() };
-        let consumed = self.gating_minimum(next_value);
-        let used_capacity = next_value.saturating_sub(consumed);
-        self.buffer_size_i64.saturating_sub(used_capacity)
+        unsafe { self.remaining_capacity_inner() }
     }
 
     fn has_available_capacity(&self, required_capacity: usize) -> bool {
         let Some(_claim) = self.try_acquire_claim() else {
             return false;
         };
-        self.has_available_capacity_internal(required_capacity, false)
+        // SAFETY: claim_lock held.
+        unsafe { self.has_available_capacity_internal(required_capacity, false) }
     }
 
     fn poison(&self) {

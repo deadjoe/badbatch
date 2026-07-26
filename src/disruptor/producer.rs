@@ -6,7 +6,7 @@
 //! This implementation has been corrected to properly integrate with the Sequencer
 //! component, following the LMAX Disruptor design principles.
 
-use crate::disruptor::sequencer::SequencerEnum;
+use crate::disruptor::sequencer::{SequencerEnum, UniqueProducerCapability};
 use crate::disruptor::{
     failure::{current_thread_name, log_failure, FailureDecision},
     ring_buffer::BatchIterMut,
@@ -362,13 +362,17 @@ where
 {
     ring_buffer: Arc<RingBuffer<T>>,
     sequencer: SequencerEnum<W>,
+    /// Present only when an authorized unique-producer constructor proved
+    /// exclusive ownership of this exact single-producer sequencer.
+    unique_claim: Option<UniqueProducerCapability<W>>,
     /// Marks this type `!Sync` so handles cannot be shared across threads by accident.
     _not_sync: PhantomData<*const ()>,
 }
 
-// SAFETY: SimpleProducer contains only Send fields (Arcs). The `*const ()` phantom
-// makes the type !Sync without affecting Send. Each handle is intended for a single
-// publishing thread; multi-producer clones are independent handles on the same sequencer.
+// SAFETY: SimpleProducer contains Send fields (Arcs and the movable unique
+// capability). The `*const ()` phantom makes the type !Sync without affecting
+// this explicit Send implementation. Each handle is intended for one publishing
+// thread; multi-producer duplicates are independent handles on one sequencer.
 unsafe impl<T, W> Send for SimpleProducer<T, W>
 where
     T: Send + Sync,
@@ -448,6 +452,25 @@ where
         Self {
             ring_buffer,
             sequencer,
+            unique_claim: None,
+            _not_sync: PhantomData,
+        }
+    }
+
+    /// Create the sole producer authorized to use a fresh single sequencer's
+    /// specialized claim path.
+    ///
+    /// The capability carries the exact sequencer identity, so callers cannot
+    /// authorize a producer merely by passing `SequencerEnum::Single`.
+    pub(crate) fn new_unique(
+        ring_buffer: Arc<RingBuffer<T>>,
+        capability: UniqueProducerCapability<W>,
+    ) -> Self {
+        let sequencer = SequencerEnum::Single(capability.sequencer());
+        Self {
+            ring_buffer,
+            sequencer,
+            unique_claim: Some(capability),
             _not_sync: PhantomData,
         }
     }
@@ -466,7 +489,53 @@ where
         Self {
             ring_buffer: Arc::clone(&self.ring_buffer),
             sequencer: self.sequencer.clone(),
+            unique_claim: None,
             _not_sync: PhantomData,
+        }
+    }
+
+    #[inline]
+    fn claim_next(&mut self) -> Result<i64> {
+        if let Some(capability) = self.unique_claim.as_mut() {
+            capability.next()
+        } else {
+            self.sequencer.next()
+        }
+    }
+
+    #[inline]
+    fn claim_next_n(&mut self, n: i64) -> Result<i64> {
+        if let Some(capability) = self.unique_claim.as_mut() {
+            capability.next_n(n)
+        } else {
+            self.sequencer.next_n(n)
+        }
+    }
+
+    #[inline]
+    fn try_claim_next(&mut self) -> Option<i64> {
+        if let Some(capability) = self.unique_claim.as_mut() {
+            capability.try_next()
+        } else {
+            self.sequencer.try_next()
+        }
+    }
+
+    #[inline]
+    fn try_claim_next_n(&mut self, n: i64) -> Option<i64> {
+        if let Some(capability) = self.unique_claim.as_mut() {
+            capability.try_next_n(n)
+        } else {
+            self.sequencer.try_next_n(n)
+        }
+    }
+
+    #[inline]
+    fn claim_remaining_capacity(&mut self) -> i64 {
+        if let Some(capability) = self.unique_claim.as_mut() {
+            capability.remaining_capacity()
+        } else {
+            self.sequencer.remaining_capacity()
         }
     }
 
@@ -512,8 +581,8 @@ where
         F: FnOnce(&mut T),
     {
         // Try to claim the next sequence from the sequencer
-        let Some(sequence) = self.sequencer.try_next() else {
-            let transient = if self.sequencer.remaining_capacity() > 0 {
+        let Some(sequence) = self.try_claim_next() else {
+            let transient = if self.claim_remaining_capacity() > 0 {
                 // MultiProducerSequencer intentionally makes one CAS attempt on
                 // the try path. A failed CAS with capacity still available is
                 // contention, not a full ring.
@@ -566,9 +635,9 @@ where
                 }),
             );
         };
-        let Some(end_sequence) = self.sequencer.try_next_n(batch_size) else {
+        let Some(end_sequence) = self.try_claim_next_n(batch_size) else {
             #[allow(clippy::cast_sign_loss)]
-            let remaining = self.sequencer.remaining_capacity().max(0) as u64;
+            let remaining = self.claim_remaining_capacity().max(0) as u64;
             let deficit = (n as u64).saturating_sub(remaining);
             let transient = if deficit == 0 {
                 // Capacity remains, so the single failed CAS was contention.
@@ -601,7 +670,7 @@ where
     {
         // Claim the next sequence from the sequencer (blocking). Claim errors
         // are delivered to the caller, never logged-and-dropped (2026-07-18 audit).
-        let sequence = self.sequencer.next()?;
+        let sequence = self.claim_next()?;
 
         // Get the event at the claimed sequence and update it
         // SAFETY: We have exclusive access to this sequence from the sequencer
@@ -633,7 +702,7 @@ where
 
         // Claim n sequences from the sequencer (blocking). Claim errors are
         // delivered to the caller, never logged-and-dropped (2026-07-18 audit).
-        let end_sequence = self.sequencer.next_n(batch_size)?;
+        let end_sequence = self.claim_next_n(batch_size)?;
         let start_sequence = end_sequence - (batch_size - 1);
 
         // SAFETY: We have exclusive access to this sequence range from the sequencer

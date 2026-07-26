@@ -298,10 +298,8 @@ where
 
     let ring_buffer = Arc::new(RingBuffer::new(buffer_size, event_factory)?);
     let wait = Arc::new(wait_strategy);
-    // SAFETY: this bundle hands out exactly one producer handle (not Clone),
-    // so the sequencer's claim methods have a single driving thread.
-    let sequencer =
-        Arc::new(unsafe { SingleProducerSequencer::new(buffer_size, Arc::clone(&wait)) });
+    let (sequencer, unique_producer_capability) =
+        SingleProducerSequencer::new_unique(buffer_size, Arc::clone(&wait));
     let seq_enum = SequencerEnum::Single(Arc::clone(&sequencer));
     let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -319,7 +317,7 @@ where
         unsafe { EventPoller::new(Arc::clone(&ring_buffer), barrier, Arc::clone(&shutdown)) };
     sequencer.add_gating_sequences(&[poller.sequence()]);
 
-    let producer = SimpleProducer::new(ring_buffer, seq_enum);
+    let producer = SimpleProducer::new_unique(ring_buffer, unique_producer_capability);
     Ok((producer, poller, shutdown))
 }
 
