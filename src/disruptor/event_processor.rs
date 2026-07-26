@@ -701,6 +701,31 @@ mod tests {
     }
 
     #[test]
+    fn test_try_run_once_reports_barrier_alert() {
+        let data_provider = create_test_ring_buffer(8);
+        let cursor = Arc::new(Sequence::new(INITIAL_CURSOR_VALUE));
+        let wait_strategy = Arc::new(BlockingWaitStrategy::new());
+        let sequence_barrier = create_test_sequence_barrier(cursor, wait_strategy);
+        let event_handler = NoOpEventHandler::<TestEvent>::new();
+        let exception_handler = Box::new(DefaultExceptionHandler::<TestEvent>::new());
+
+        let processor = unsafe {
+            BatchEventProcessor::new(
+                data_provider,
+                sequence_barrier,
+                event_handler,
+                exception_handler,
+            )
+        };
+        processor.sequence_barrier.alert();
+
+        let result = processor.try_run_once();
+
+        assert!(matches!(result, Err(DisruptorError::Alert)));
+        assert!(!processor.is_running());
+    }
+
+    #[test]
     fn test_try_run_once_is_non_blocking_without_events() {
         use std::time::{Duration, Instant};
 
