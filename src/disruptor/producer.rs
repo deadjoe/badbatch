@@ -494,7 +494,13 @@ where
         }
     }
 
-    #[inline]
+    // Keep the safe single-event claim out of the caller's hot loop. On
+    // Mac16,11 with rustc 1.97.1/LLVM 22.1.8, the 2026-07-26 safe/checked
+    // `publish` median changed from 0.402 (`#[inline]`, formal 40 pairs) to
+    // 1.638 (`#[inline(never)]`, two bidirectional diagnostic pairs).
+    // Only unicast on that configuration is verified; pipeline and other
+    // platforms remain unverified. Re-run F.3 before changing this attribute.
+    #[inline(never)]
     fn claim_next(&mut self) -> Result<i64> {
         if let Some(capability) = self.unique_claim.as_mut() {
             capability.next()
