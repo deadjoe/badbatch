@@ -177,7 +177,9 @@ where
             }
         }
 
-        // Return the visible availability upper bound (consistent with Blocking/Yielding).
+        // The cursor may have advanced while dependencies were catching up, so
+        // refresh it before calculating the visible availability upper bound.
+        let available = cursor.get();
         let dep_min = if dependent_sequences.is_empty() {
             available
         } else {
@@ -527,6 +529,19 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    #[derive(Copy, Clone, Debug)]
+    struct AdvanceCursorAndDependency<'a> {
+        cursor: &'a Sequence,
+        dependency: &'a Sequence,
+    }
+
+    impl SimpleWaitStrategy for AdvanceCursorAndDependency<'_> {
+        fn backoff(&self) {
+            self.cursor.set(100);
+            self.dependency.set(100);
+        }
+    }
+
     #[test]
     fn test_busy_spin_strategy() {
         let strategy = BusySpin;
@@ -634,5 +649,21 @@ mod tests {
 
         let result = adapter.wait_for(10, &cursor, &dependent_sequences).unwrap();
         assert_eq!(result, 12);
+    }
+
+    #[test]
+    fn test_adapter_refreshes_cursor_after_dependencies_advance() {
+        let cursor = Arc::new(Sequence::new(1));
+        let dependency = Arc::new(Sequence::new(0));
+        let adapter = SimpleWaitStrategyAdapter::new(AdvanceCursorAndDependency {
+            cursor: &cursor,
+            dependency: &dependency,
+        });
+
+        let result = adapter
+            .wait_for(1, &cursor, &[Arc::clone(&dependency)])
+            .unwrap();
+
+        assert_eq!(result, 100);
     }
 }
