@@ -10,6 +10,8 @@ for the crate version in `Cargo.toml`.
 Bumps happen when the project adopts language/stdlib features that require a newer
 compiler, or when CI stabilizes on a new stable series. Patch toolchain updates
 (e.g. 1.97.0 → 1.97.1) do not require a crate version bump.
+CI checks all targets and features with the pinned 1.97 toolchain so moving-stable
+jobs cannot silently raise this minimum.
 
 ## [0.2.0] — 2026-07
 

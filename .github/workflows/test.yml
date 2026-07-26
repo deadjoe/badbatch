@@ -2,12 +2,13 @@
 #
 # Jobs:
 #   test        — fmt, clippy, full suite via scripts/test-all.sh, core-only + stress (Linux)
+#   msrv        — all-target/all-feature compile check on the declared Rust 1.97 minimum
 #   test-macos  — full test suite on Apple Silicon (the primary perf target platform)
 #   loom        — small WorkerPool claim models (release)
 #   miri        — nightly Miri on ring_buffer + sequence + soundness regressions
 #
-# The repo pins `stable` via rust-toolchain.toml. The Miri job sets
-# RUSTUP_TOOLCHAIN=nightly so cargo/miri do not fall back to stable (which has no miri).
+# The repo pins `stable` via rust-toolchain.toml. The MSRV and Miri jobs set
+# RUSTUP_TOOLCHAIN explicitly so cargo does not fall back to that moving channel.
 # audit/deny run hard-fail under BB_CI (2026-07-18 audit hardening).
 
 name: Tests
@@ -74,6 +75,37 @@ jobs:
       - name: Concurrency stress (claim + MPSC exactly-once, release)
         run: |
           cargo test --test worker_pool_claim_stress --test mpsc_exactly_once_stress --release --locked
+
+  msrv:
+    name: MSRV (Rust 1.97)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Override rust-toolchain.toml's moving `stable` channel for this job.
+      RUSTUP_TOOLCHAIN: "1.97"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust 1.97
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97"
+
+      - name: Cache Cargo registry and git dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-msrv-1.97-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-msrv-1.97-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Verify compiler and check all targets/features
+        run: |
+          rustc --version --verbose
+          cargo check --all-targets --all-features --locked
 
   test-macos:
     name: Test (macOS ARM64 stable)

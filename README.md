@@ -28,7 +28,7 @@ Cross-thread use is **protocol-based** (claim / publish / barriers / consumer se
 
 **Platforms:** macOS and Linux. Windows is not a target.
 
-**MSRV:** Rust **1.97** (`rust-version` in `Cargo.toml`). Prefer current stable via `rust-toolchain.toml`.
+**MSRV:** Rust **1.97** (`rust-version` in `Cargo.toml`), verified by a pinned CI job. The primary matrix and `rust-toolchain.toml` use current stable.
 
 ---
 
