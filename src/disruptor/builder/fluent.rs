@@ -72,7 +72,7 @@ where
 
     fn add_mut_closure<H>(&mut self, mut handler: H)
     where
-        H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
+        H: FnMut(&mut E, i64, bool) + Send + 'static,
     {
         let (name, cpu) = self.take_thread_meta();
         let stage = self.current_stage_index;
@@ -90,7 +90,7 @@ where
 
     fn add_mut_handler<H>(&mut self, handler: H)
     where
-        H: EventHandler<E> + Send + Sync + 'static,
+        H: EventHandler<E> + 'static,
     {
         let (name, cpu) = self.take_thread_meta();
         let stage = self.current_stage_index;
@@ -184,7 +184,7 @@ macro_rules! impl_first_handlers {
                 handler: H,
             ) -> $builder<HasConsumers, E, F, W>
             where
-                H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
+                H: FnMut(&mut E, i64, bool) + Send + 'static,
             {
                 self.shared.add_mut_closure(handler);
                 $builder {
@@ -201,7 +201,7 @@ macro_rules! impl_first_handlers {
                 handler: H,
             ) -> $builder<HasConsumers, E, F, W>
             where
-                H: EventHandler<E> + Send + Sync + 'static,
+                H: EventHandler<E> + 'static,
             {
                 self.shared.add_mut_handler(handler);
                 $builder {
@@ -247,7 +247,7 @@ macro_rules! impl_more_handlers {
             #[must_use]
             pub fn also_partition_with<H>(mut self, handler: H) -> Self
             where
-                H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
+                H: FnMut(&mut E, i64, bool) + Send + 'static,
             {
                 self.shared.add_mut_closure(handler);
                 self
@@ -260,7 +260,7 @@ macro_rules! impl_more_handlers {
             #[must_use]
             pub fn also_partition_with_handler<H>(mut self, handler: H) -> Self
             where
-                H: EventHandler<E> + Send + Sync + 'static,
+                H: EventHandler<E> + 'static,
             {
                 self.shared.add_mut_handler(handler);
                 self
@@ -472,7 +472,7 @@ macro_rules! impl_dependent {
                 handler: H,
             ) -> $builder<HasConsumers, E, F, W>
             where
-                H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
+                H: FnMut(&mut E, i64, bool) + Send + 'static,
             {
                 self.inner.shared.add_mut_closure(handler);
                 self.inner
@@ -485,7 +485,7 @@ macro_rules! impl_dependent {
                 handler: H,
             ) -> $builder<HasConsumers, E, F, W>
             where
-                H: EventHandler<E> + Send + Sync + 'static,
+                H: EventHandler<E> + 'static,
             {
                 self.inner.shared.add_mut_handler(handler);
                 self.inner

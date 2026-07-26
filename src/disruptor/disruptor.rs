@@ -63,7 +63,7 @@ use std::thread::{self, JoinHandle};
 #[derive(Debug)]
 pub struct Disruptor<T, W>
 where
-    T: Send + Sync + std::fmt::Debug + 'static,
+    T: Send + Sync + 'static,
     W: WaitStrategy + 'static,
 {
     /// The ring buffer for storing events
@@ -104,7 +104,7 @@ impl Drop for DslClaimHoldFlag {
 
 impl<T, W> Disruptor<T, W>
 where
-    T: Send + Sync + std::fmt::Debug + 'static,
+    T: Send + Sync + 'static,
     W: WaitStrategy + 'static,
 {
     /// Create a new Disruptor
@@ -167,7 +167,7 @@ where
 
 impl<T> Disruptor<T, BlockingWaitStrategy>
 where
-    T: Send + Sync + std::fmt::Debug + 'static,
+    T: Send + Sync + 'static,
 {
     /// Create a new Disruptor with default settings
     ///
@@ -194,7 +194,7 @@ where
 
 impl<T, W> Disruptor<T, W>
 where
-    T: Send + Sync + std::fmt::Debug + 'static,
+    T: Send + Sync + 'static,
     W: WaitStrategy + 'static,
 {
     /// Get the cursor sequence
@@ -646,7 +646,7 @@ where
 /// topologies with dependencies between processors.
 pub struct DisruptorBuilder<T, W>
 where
-    T: Send + Sync + std::fmt::Debug + 'static,
+    T: Send + Sync + 'static,
     W: WaitStrategy + 'static,
 {
     disruptor: Disruptor<T, W>,
@@ -655,7 +655,7 @@ where
 
 impl<T, W> DisruptorBuilder<T, W>
 where
-    T: Send + Sync + std::fmt::Debug + 'static,
+    T: Send + Sync + 'static,
     W: WaitStrategy + 'static,
 {
     /// Add another event handler that depends on the previous handlers

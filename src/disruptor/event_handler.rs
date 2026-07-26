@@ -12,9 +12,13 @@ use std::sync::Arc;
 /// This trait must be implemented by consumers to process events.
 /// It follows the exact LMAX Disruptor EventHandler interface design.
 ///
+/// A handler is moved to its consumer thread, so it must be [`Send`]. It does
+/// not need to be [`Sync`]: managed paths either own it on one thread or place
+/// it behind a mutex when lifecycle methods can be called concurrently.
+///
 /// # Type Parameters
 /// * `T` - The event type that will be processed
-pub trait EventHandler<T>: Send + Sync {
+pub trait EventHandler<T>: Send {
     /// Process an event
     ///
     /// This method is called for each event that needs to be processed.
@@ -128,7 +132,7 @@ pub trait EventHandler<T>: Send + Sync {
 /// * `F` - The closure type
 pub struct ClosureEventHandler<T, F>
 where
-    F: FnMut(&mut T, i64, bool) -> Result<()> + Send + Sync,
+    F: FnMut(&mut T, i64, bool) -> Result<()> + Send,
 {
     handler: F,
     sequence_callback: Option<Arc<Sequence>>,
@@ -137,7 +141,7 @@ where
 
 impl<T, F> ClosureEventHandler<T, F>
 where
-    F: FnMut(&mut T, i64, bool) -> Result<()> + Send + Sync,
+    F: FnMut(&mut T, i64, bool) -> Result<()> + Send,
 {
     /// Create a new closure-based event handler
     ///
@@ -157,8 +161,8 @@ where
 
 impl<T, F> EventHandler<T> for ClosureEventHandler<T, F>
 where
-    T: Send + Sync,
-    F: FnMut(&mut T, i64, bool) -> Result<()> + Send + Sync,
+    T: Send,
+    F: FnMut(&mut T, i64, bool) -> Result<()> + Send,
 {
     fn on_event(&mut self, event: &mut T, sequence: i64, end_of_batch: bool) -> Result<()> {
         (self.handler)(event, sequence, end_of_batch)
@@ -197,7 +201,7 @@ impl<T> Default for NoOpEventHandler<T> {
 
 impl<T> EventHandler<T> for NoOpEventHandler<T>
 where
-    T: Send + Sync,
+    T: Send,
 {
     fn on_event(&mut self, _event: &mut T, _sequence: i64, _end_of_batch: bool) -> Result<()> {
         // Do nothing - this is a no-op handler
@@ -244,7 +248,7 @@ where
 
 impl<T, H> EventHandler<T> for ClearingEventHandler<T, H>
 where
-    T: Default + Send + Sync,
+    T: Default + Send,
     H: EventHandler<T>,
 {
     fn on_event(&mut self, event: &mut T, sequence: i64, end_of_batch: bool) -> Result<()> {
