@@ -5,5 +5,5 @@
 # (see .github/workflows/test.yml). Do not put miri here — it is nightly-only.
 [toolchain]
 channel = "stable"
-components = ["rustfmt", "clippy"]
+components = ["rustfmt", "clippy", "rust-src"]
 profile = "minimal"
