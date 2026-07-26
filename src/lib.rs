@@ -18,6 +18,8 @@
 //! ## Quick Start
 //!
 //! ```rust
+//! # #[cfg(feature = "lmax-dsl")]
+//! # mod lmax_dsl_example {
 //! use badbatch::disruptor::{
 //!     Disruptor, ProducerType, BlockingWaitStrategy, DefaultEventFactory,
 //!     EventHandler, Result,
@@ -40,6 +42,7 @@
 //! }
 //!
 //! // Create and configure the Disruptor
+//! # pub fn run() {
 //! let factory = DefaultEventFactory::<MyEvent>::new();
 //! let mut disruptor = Disruptor::new(
 //!     factory,
@@ -57,6 +60,12 @@
 //!
 //! // Shutdown when done
 //! disruptor.shutdown().unwrap();
+//! # }
+//! # }
+//! # fn main() {
+//! #     #[cfg(feature = "lmax-dsl")]
+//! #     lmax_dsl_example::run();
+//! # }
 //! ```
 //!
 //! ## Architecture

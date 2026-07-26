@@ -177,6 +177,8 @@ Performance evidence and interpretation boundaries: [`docs/PERFORMANCE.md`](docs
 Requires a monomorphized wait strategy (not `Box<dyn WaitStrategy>`):
 
 ```rust
+# #[cfg(feature = "lmax-dsl")]
+# mod lmax_dsl_example {
 use badbatch::disruptor::{
     BlockingWaitStrategy, DefaultEventFactory, Disruptor, EventHandler, EventTranslator,
     ProducerType,
@@ -233,6 +235,14 @@ fn main() {
         .unwrap();
     disruptor.shutdown().unwrap();
 }
+# pub fn run() {
+#     main();
+# }
+# }
+# fn main() {
+#     #[cfg(feature = "lmax-dsl")]
+#     lmax_dsl_example::run();
+# }
 ```
 
 ---
