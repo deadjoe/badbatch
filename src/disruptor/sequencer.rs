@@ -2828,4 +2828,53 @@ mod tests {
         assert!(!sequencer.claim_lock_is_reserved());
         assert_eq!(sequencer.next().unwrap(), 1);
     }
+
+    #[test]
+    fn specialized_backpressure_observes_gating_snapshot_removal() {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::Duration;
+
+        // This directly exercises the specialized inner's liveness invariant;
+        // it is not evidence that this concurrency shape is reachable through
+        // the public safe single-producer API.
+        let (sequencer, mut capability) =
+            SingleProducerSequencer::new_unique(8, Arc::new(BusySpinWaitStrategy));
+        let stopped_consumer = Arc::new(Sequence::new(-1));
+        sequencer.add_gating_sequences(std::slice::from_ref(&stopped_consumer));
+        assert_eq!(capability.try_next_n(8), Some(7));
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let publisher = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            result_tx.send(capability.next_n(8)).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        match result_rx.recv_timeout(Duration::from_millis(20)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            unexpected => {
+                sequencer.close();
+                publisher.join().unwrap();
+                panic!("specialized claim was not backpressured: {unexpected:?}");
+            }
+        }
+
+        // The consumer never advances. Removing its gating entry is the only
+        // event that can release this claim, which requires reloading the
+        // ArcSwap snapshot on every backpressure iteration.
+        assert!(sequencer.remove_gating_sequence(stopped_consumer));
+        let result = match result_rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(result) => result,
+            Err(error) => {
+                // Keep a failing counterfactual (for example, a hoisted stale
+                // ArcSwap guard) from stranding the publisher thread.
+                sequencer.close();
+                publisher.join().unwrap();
+                panic!("specialized claim did not observe gating removal: {error}");
+            }
+        };
+        publisher.join().unwrap();
+        assert_eq!(result.unwrap(), 15);
+    }
 }
