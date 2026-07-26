@@ -743,14 +743,17 @@ impl WaitStrategy for SleepingWaitStrategy {
                 return Err(DisruptorError::Alert);
             }
 
-            // Check timeout first
-            if start_time.elapsed() >= timeout {
-                return Err(DisruptorError::Timeout);
-            }
-
             let available = wait_available_sequence(cursor, dependent_sequences);
             if available >= sequence {
                 return Ok(available);
+            }
+
+            if alerted.load(Ordering::Acquire) {
+                return Err(DisruptorError::Alert);
+            }
+
+            if start_time.elapsed() >= timeout {
+                return Err(DisruptorError::Timeout);
             }
             thread::sleep(self.sleep_duration);
         }
@@ -1173,6 +1176,16 @@ mod tests {
         let custom_strategy = SleepingWaitStrategy::new_with_duration(Duration::from_micros(100));
         let result = custom_strategy.wait_for(5, &cursor, &dependent_sequences);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_sleeping_wait_strategy_zero_timeout_returns_available_sequence() {
+        let strategy = SleepingWaitStrategy::new();
+        let cursor = Arc::new(Sequence::new(10));
+
+        let result = strategy.wait_for_with_timeout(5, &cursor, &[], Duration::ZERO);
+
+        assert_eq!(result.unwrap(), 10);
     }
 
     #[test]
