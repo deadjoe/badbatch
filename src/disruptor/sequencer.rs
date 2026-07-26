@@ -641,6 +641,11 @@ where
         (sequencer, capability)
     }
 
+    #[cfg(test)]
+    pub(crate) fn claim_lock_is_reserved(&self) -> bool {
+        self.claim_lock.load(Ordering::Relaxed)
+    }
+
     /// Acquire exclusive access to claim-state cells, or return the concurrent-driver error.
     #[inline]
     fn acquire_claim(&self) -> Result<SingleClaimGuard<'_>> {
@@ -1774,6 +1779,10 @@ mod tests {
         let sequencer = unsafe { SingleProducerSequencer::new(1024, wait_strategy) };
 
         assert_eq!(sequencer.buffer_size, 1024);
+        assert!(
+            !sequencer.claim_lock_is_reserved(),
+            "raw construction must retain per-claim locking"
+        );
     }
 
     #[test]
@@ -2587,5 +2596,236 @@ mod tests {
         consumer.set(7);
         let claimed = joiner.join().expect("blocked claimer must not panic");
         assert_eq!(claimed.unwrap(), 8);
+    }
+
+    enum ClaimTestDriver {
+        Checked(Arc<SingleProducerSequencer<BusySpinWaitStrategy>>),
+        Specialized(UniqueProducerCapability<BusySpinWaitStrategy>),
+    }
+
+    impl ClaimTestDriver {
+        fn next(&mut self) -> Result<i64> {
+            match self {
+                Self::Checked(sequencer) => sequencer.next(),
+                Self::Specialized(capability) => capability.next(),
+            }
+        }
+
+        fn next_n(&mut self, n: i64) -> Result<i64> {
+            match self {
+                Self::Checked(sequencer) => sequencer.next_n(n),
+                Self::Specialized(capability) => capability.next_n(n),
+            }
+        }
+
+        fn try_next(&mut self) -> Option<i64> {
+            match self {
+                Self::Checked(sequencer) => sequencer.try_next(),
+                Self::Specialized(capability) => capability.try_next(),
+            }
+        }
+
+        fn try_next_n(&mut self, n: i64) -> Option<i64> {
+            match self {
+                Self::Checked(sequencer) => sequencer.try_next_n(n),
+                Self::Specialized(capability) => capability.try_next_n(n),
+            }
+        }
+
+        fn remaining_capacity(&mut self) -> i64 {
+            match self {
+                Self::Checked(sequencer) => sequencer.remaining_capacity(),
+                Self::Specialized(capability) => capability.remaining_capacity(),
+            }
+        }
+    }
+
+    fn claim_test_driver(
+        specialized: bool,
+    ) -> (
+        Arc<SingleProducerSequencer<BusySpinWaitStrategy>>,
+        ClaimTestDriver,
+    ) {
+        if specialized {
+            let (sequencer, capability) =
+                SingleProducerSequencer::new_unique(8, Arc::new(BusySpinWaitStrategy));
+            (sequencer, ClaimTestDriver::Specialized(capability))
+        } else {
+            let sequencer = Arc::new(unsafe {
+                SingleProducerSequencer::new(8, Arc::new(BusySpinWaitStrategy))
+            });
+            (Arc::clone(&sequencer), ClaimTestDriver::Checked(sequencer))
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ClaimEquivalenceTrace {
+        initial_next: i64,
+        initial_next_n: i64,
+        initial_try_next: i64,
+        initial_try_next_n: i64,
+        remaining_when_full: i64,
+        full_try_next: Option<i64>,
+        full_try_next_n: Option<i64>,
+        wrapped_try_next: i64,
+        wrapped_try_next_n: i64,
+        wrapped_next: i64,
+        wrapped_next_n: i64,
+        poisoned_next: bool,
+        poisoned_next_n: bool,
+        poisoned_try_next: Option<i64>,
+        poisoned_try_next_n: Option<i64>,
+    }
+
+    fn claim_equivalence_trace(specialized: bool) -> ClaimEquivalenceTrace {
+        let (sequencer, mut driver) = claim_test_driver(specialized);
+        let consumer = Arc::new(Sequence::new(-1));
+        sequencer.add_gating_sequences(std::slice::from_ref(&consumer));
+
+        let initial_next = driver.next().unwrap();
+        sequencer.publish(initial_next);
+        let initial_next_n = driver.next_n(2).unwrap();
+        sequencer.publish_range(initial_next + 1, initial_next_n);
+        let initial_try_next = driver.try_next().unwrap();
+        sequencer.publish(initial_try_next);
+        let initial_try_next_n = driver.try_next_n(4).unwrap();
+        sequencer.publish_range(initial_try_next + 1, initial_try_next_n);
+
+        let remaining_when_full = driver.remaining_capacity();
+        let full_try_next = driver.try_next();
+        let full_try_next_n = driver.try_next_n(2);
+
+        // Free four slots and cross the ring boundary with both try APIs.
+        consumer.set(3);
+        let wrapped_try_next = driver.try_next().unwrap();
+        sequencer.publish(wrapped_try_next);
+        let wrapped_try_next_n = driver.try_next_n(3).unwrap();
+        sequencer.publish_range(wrapped_try_next + 1, wrapped_try_next_n);
+
+        // Free four more and exercise both blocking APIs after wrap.
+        consumer.set(7);
+        let wrapped_next = driver.next().unwrap();
+        sequencer.publish(wrapped_next);
+        let wrapped_next_n = driver.next_n(3).unwrap();
+        sequencer.publish_range(wrapped_next + 1, wrapped_next_n);
+
+        sequencer.poison();
+        let poisoned_next = matches!(driver.next(), Err(DisruptorError::Poisoned));
+        let poisoned_next_n = matches!(driver.next_n(2), Err(DisruptorError::Poisoned));
+        let poisoned_try_next = driver.try_next();
+        let poisoned_try_next_n = driver.try_next_n(2);
+
+        ClaimEquivalenceTrace {
+            initial_next,
+            initial_next_n,
+            initial_try_next,
+            initial_try_next_n,
+            remaining_when_full,
+            full_try_next,
+            full_try_next_n,
+            wrapped_try_next,
+            wrapped_try_next_n,
+            wrapped_next,
+            wrapped_next_n,
+            poisoned_next,
+            poisoned_next_n,
+            poisoned_try_next,
+            poisoned_try_next_n,
+        }
+    }
+
+    #[test]
+    fn checked_and_specialized_claims_match_for_wrap_capacity_and_poison() {
+        let checked = claim_equivalence_trace(false);
+        let specialized = claim_equivalence_trace(true);
+
+        assert_eq!(checked, specialized);
+        assert_eq!(
+            checked,
+            ClaimEquivalenceTrace {
+                initial_next: 0,
+                initial_next_n: 2,
+                initial_try_next: 3,
+                initial_try_next_n: 7,
+                remaining_when_full: 0,
+                full_try_next: None,
+                full_try_next_n: None,
+                wrapped_try_next: 8,
+                wrapped_try_next_n: 11,
+                wrapped_next: 12,
+                wrapped_next_n: 15,
+                poisoned_next: true,
+                poisoned_next_n: true,
+                poisoned_try_next: None,
+                poisoned_try_next_n: None,
+            }
+        );
+    }
+
+    fn assert_blocking_backpressure(specialized: bool, batch_size: i64, expected: i64) {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::Duration;
+
+        let (sequencer, mut driver) = claim_test_driver(specialized);
+        let consumer = Arc::new(Sequence::new(-1));
+        sequencer.add_gating_sequences(std::slice::from_ref(&consumer));
+        assert_eq!(driver.try_next_n(8), Some(7));
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let joiner = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = if batch_size == 1 {
+                driver.next()
+            } else {
+                driver.next_n(batch_size)
+            };
+            result_tx.send(result).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(20)),
+            Err(RecvTimeoutError::Timeout)
+        ));
+
+        consumer.set(batch_size - 1);
+        assert_eq!(
+            result_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .unwrap(),
+            expected
+        );
+        joiner.join().unwrap();
+    }
+
+    #[test]
+    fn checked_and_specialized_blocking_claims_match_under_backpressure() {
+        for specialized in [false, true] {
+            assert_blocking_backpressure(specialized, 1, 8);
+            assert_blocking_backpressure(specialized, 2, 9);
+        }
+    }
+
+    #[test]
+    fn unique_capability_reservation_keeps_raw_claims_fail_closed() {
+        let (sequencer, mut capability) =
+            SingleProducerSequencer::new_unique(8, Arc::new(BusySpinWaitStrategy));
+
+        assert!(sequencer.claim_lock_is_reserved());
+        assert!(matches!(
+            sequencer.next(),
+            Err(DisruptorError::ConcurrentClaimDriver)
+        ));
+        assert_eq!(sequencer.try_next(), None);
+        assert_eq!(sequencer.remaining_capacity(), 0);
+        assert!(!sequencer.has_available_capacity(1));
+
+        assert_eq!(capability.next().unwrap(), 0);
+        drop(capability);
+
+        assert!(!sequencer.claim_lock_is_reserved());
+        assert_eq!(sequencer.next().unwrap(), 1);
     }
 }

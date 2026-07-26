@@ -539,6 +539,11 @@ where
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn uses_unique_claim_path(&self) -> bool {
+        self.unique_claim.is_some()
+    }
+
     /// Get the current cursor from the sequencer
     pub fn current_sequence(&self) -> i64 {
         self.sequencer.get_cursor().get()
@@ -772,6 +777,30 @@ mod tests {
 
         // Should start with sequence -1 (no events published yet)
         assert_eq!(producer.current_sequence(), -1);
+        assert!(!producer.uses_unique_claim_path());
+    }
+
+    #[test]
+    fn sequencer_enum_single_does_not_authorize_the_specialized_claim_path() {
+        let ring_buffer = Arc::new(
+            RingBuffer::new(8, DefaultEventFactory::<TestEvent>::new())
+                .expect("ring buffer construction"),
+        );
+        let (sequencer, capability) =
+            SingleProducerSequencer::new_unique(8, Arc::new(BusySpinWaitStrategy));
+        let mut unauthorized =
+            SimpleProducer::new(ring_buffer, SequencerEnum::Single(Arc::clone(&sequencer)));
+
+        assert!(!unauthorized.uses_unique_claim_path());
+        assert!(matches!(
+            unauthorized.publish(|event| event.value = 1),
+            Err(crate::disruptor::DisruptorError::ConcurrentClaimDriver)
+        ));
+
+        // Releasing the capability reservation makes the same ordinary
+        // SequencerEnum producer usable through its checked wrapper.
+        drop(capability);
+        assert_eq!(unauthorized.publish(|event| event.value = 2).unwrap(), 0);
     }
 
     #[test]

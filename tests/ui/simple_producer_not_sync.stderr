@@ -1,0 +1,56 @@
+error[E0277]: `*const ()` cannot be shared between threads safely
+ --> tests/ui/simple_producer_not_sync.rs:6:19
+  |
+6 |     assert_sync::<SimpleProducer<i64, BusySpinWaitStrategy>>();
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `*const ()` cannot be shared between threads safely
+  |
+  = help: within `SimpleProducer<i64, BusySpinWaitStrategy>`, the trait `Sync` is not implemented for `*const ()`
+note: required because it appears within the type `PhantomData<*const ()>`
+ --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
+note: required because it appears within the type `SimpleProducer<i64, BusySpinWaitStrategy>`
+ --> src/disruptor/producer.rs
+  |
+  | pub struct SimpleProducer<T, W>
+  |            ^^^^^^^^^^^^^^
+note: required by a bound in `assert_sync`
+ --> tests/ui/simple_producer_not_sync.rs:3:19
+  |
+3 | fn assert_sync<T: Sync>() {}
+  |                   ^^^^ required by this bound in `assert_sync`
+
+error[E0277]: `Cell<()>` cannot be shared between threads safely
+ --> tests/ui/simple_producer_not_sync.rs:6:19
+  |
+6 |     assert_sync::<SimpleProducer<i64, BusySpinWaitStrategy>>();
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Cell<()>` cannot be shared between threads safely
+  |
+  = help: within `SimpleProducer<i64, BusySpinWaitStrategy>`, the trait `Sync` is not implemented for `Cell<()>`
+  = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock`
+note: required because it appears within the type `PhantomData<Cell<()>>`
+ --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
+note: required because it appears within the type `sequencer::UniqueProducerCapability<BusySpinWaitStrategy>`
+ --> src/disruptor/sequencer.rs
+  |
+  | pub(crate) struct UniqueProducerCapability<W>
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+note: required because it appears within the type `Option<sequencer::UniqueProducerCapability<BusySpinWaitStrategy>>`
+ --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
+note: required because it appears within the type `SimpleProducer<i64, BusySpinWaitStrategy>`
+ --> src/disruptor/producer.rs
+  |
+  | pub struct SimpleProducer<T, W>
+  |            ^^^^^^^^^^^^^^
+note: required by a bound in `assert_sync`
+ --> tests/ui/simple_producer_not_sync.rs:3:19
+  |
+3 | fn assert_sync<T: Sync>() {}
+  |                   ^^^^ required by this bound in `assert_sync`

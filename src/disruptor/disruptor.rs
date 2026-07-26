@@ -740,6 +740,15 @@ mod tests {
 
         assert_eq!(disruptor.get_buffer_size(), 1024);
         assert!(!disruptor.started);
+        match &disruptor.sequencer {
+            SequencerEnum::Single(sequencer) => {
+                assert!(
+                    !sequencer.claim_lock_is_reserved(),
+                    "classic DSL must retain the checked claim path"
+                );
+            }
+            SequencerEnum::Multi(_) => panic!("single DSL constructed a multi sequencer"),
+        }
     }
 
     #[test]

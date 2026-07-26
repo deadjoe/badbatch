@@ -171,12 +171,13 @@ fn test_single_producer_build() {
         let _ = tx.send(sequence);
     };
 
-    let disruptor_handle = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
+    let mut disruptor_handle = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
         .handle_events_with(handler)
         .build();
 
     // Should successfully build and return a DisruptorHandle
-    // The handle should be usable for publishing
+    // with the sole authorized single-producer capability.
+    assert!(disruptor_handle.producer().uses_unique_claim_path());
     drop(disruptor_handle);
     drop(rx); // Ensure we can drop the receiver
 }
@@ -194,7 +195,9 @@ fn test_multi_producer_build() {
         .build();
 
     // Should successfully build and return a handle that can create producers
-    let _producer2 = producer.create_producer();
+    let producer2 = producer.create_producer();
+    assert!(!producer2.uses_unique_claim_path());
+    drop(producer2);
     drop(producer);
     drop(rx); // Ensure we can drop the receiver
 }

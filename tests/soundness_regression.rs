@@ -52,6 +52,40 @@ fn try_batch_publish_rejects_over_capacity() {
     assert_eq!(yielded, 8);
 }
 
+/// B.4 Miri target: the authorized poller constructor uses the new specialized
+/// claim path, and repeated full-buffer batches must keep every wrapped slot
+/// uniquely borrowed and preserve the exact sequence/value mapping.
+#[test]
+fn specialized_unique_claim_path_preserves_wrapped_slot_exclusivity() {
+    let (mut producer, mut poller, _shutdown) =
+        open_single_producer_poller(4, DefaultEventFactory::<Event>::new(), BusySpinWaitStrategy)
+            .unwrap();
+
+    for round in 0_i64..6 {
+        let first = round * 4;
+        assert_eq!(
+            producer
+                .batch_publish(4, |iter| {
+                    for (offset, event) in iter.enumerate() {
+                        event.value = first + i64::try_from(offset).unwrap();
+                    }
+                })
+                .unwrap(),
+            first + 3
+        );
+
+        let mut batch = poller.poll().expect("full published batch");
+        assert_eq!(batch.from_sequence(), first);
+        assert_eq!(batch.to_sequence(), first + 3);
+        for expected in first..=first + 3 {
+            let (sequence, event) = batch.next_mut().expect("all four slots");
+            assert_eq!(sequence, expected);
+            assert_eq!(event.value, expected);
+        }
+        assert!(batch.next_mut().is_none());
+    }
+}
+
 /// P0-1 capability smoke: the single-mode handle still publishes normally
 /// through its one owned producer handle.
 #[test]

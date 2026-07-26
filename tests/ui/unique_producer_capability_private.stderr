@@ -1,0 +1,11 @@
+error[E0603]: struct `UniqueProducerCapability` is private
+ --> tests/ui/unique_producer_capability_private.rs:1:37
+  |
+1 | use badbatch::disruptor::sequencer::UniqueProducerCapability;
+  |                                     ^^^^^^^^^^^^^^^^^^^^^^^^ private struct
+  |
+note: the struct `UniqueProducerCapability` is defined here
+ --> src/disruptor/sequencer.rs
+  |
+  | pub(crate) struct UniqueProducerCapability<W>
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
