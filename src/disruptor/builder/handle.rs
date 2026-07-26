@@ -63,8 +63,8 @@ where
     E: Send + Sync + 'static,
     W: WaitStrategy + 'static,
 {
-    pub(crate) fn new(core: DisruptorCore<E, W>) -> Self {
-        let producer = core.create_producer();
+    pub(crate) fn new(mut core: DisruptorCore<E, W>) -> Self {
+        let producer = core.take_initial_producer();
         Self {
             core,
             producer,
