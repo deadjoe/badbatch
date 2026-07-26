@@ -6,7 +6,7 @@
 
 use crate::disruptor::{
     sequence_barrier::{ProcessingSequenceBarrier, SequenceBarrier},
-    DisruptorError, Result, RingBuffer, Sequence, WaitStrategy, INITIAL_CURSOR_VALUE,
+    Result, RingBuffer, Sequence, WaitStrategy, INITIAL_CURSOR_VALUE,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -102,12 +102,8 @@ where
             return Err(Polling::Shutdown);
         }
 
-        let available = match self.barrier.try_get_available_sequence(self.next_sequence) {
-            Ok(seq) => seq,
-            Err(DisruptorError::Alert | DisruptorError::Shutdown) => {
-                return Err(Polling::Shutdown);
-            }
-            Err(_) => return Err(Polling::Idle),
+        let Ok(available) = self.barrier.try_get_available_sequence(self.next_sequence) else {
+            return Err(Polling::Shutdown);
         };
 
         if self.shutdown.load(Ordering::Acquire) {
