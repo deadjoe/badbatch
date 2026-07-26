@@ -636,6 +636,22 @@ where
         *self.cached_value.get() = v;
     }
 
+    #[inline]
+    fn claim_state_error(&self) -> Option<DisruptorError> {
+        // Relaxed: closed/poisoned are terminal monotonic flags; coherence
+        // guarantees eventual visibility. An Acquire load here pairs a
+        // per-publish STLR (cursor Release store) with an LDAR, creating a
+        // StoreLoad barrier per event on ARM that cost ~5x single-event
+        // throughput (P3 bisection, 2026-07-19).
+        if self.closed.load(Ordering::Relaxed) {
+            Some(DisruptorError::Shutdown)
+        } else if self.poisoned.load(Ordering::Relaxed) {
+            Some(DisruptorError::Poisoned)
+        } else {
+            None
+        }
+    }
+
     /// Create a barrier that holds a `SequencerEnum::Single` reference back to this sequencer.
     ///
     /// This avoids the unsafe `SequencerWrapper` by passing the concrete `Arc` directly.
@@ -713,6 +729,83 @@ where
 
         true
     }
+
+    /// Claim a blocking sequence range after the caller has established
+    /// exclusive access to `next_value` and `cached_value`.
+    ///
+    /// # Safety
+    /// The caller must hold the checked claim guard or possess the unique
+    /// producer capability for this exact sequencer.
+    #[inline]
+    unsafe fn next_n_inner(&self, n: i64) -> Result<i64> {
+        // This follows the exact LMAX Disruptor SingleProducerSequencer.next(int n) logic.
+        let next_value = self.next_value();
+        let next_sequence = next_value + n;
+        let wrap_point = next_sequence - self.buffer_size_i64;
+        let cached_gating_sequence = self.cached_value();
+
+        if wrap_point > cached_gating_sequence || cached_gating_sequence > next_value {
+            // Set cursor with volatile semantics (equivalent to cursor.setVolatile in LMAX)
+            self.cursor.set_volatile(next_value);
+
+            // Wait for consumers to catch up.
+            // Use spin_loop() instead of yield_now() to avoid syscall overhead
+            // (~1-5μs per sched_yield). PAUSE (x86) / YIELD (ARM) stays on-core.
+            let mut min_sequence;
+            #[cfg(feature = "bench-round-diagnostics")]
+            let diagnostics_enabled = BENCH_ROUND_DIAGNOSTICS_ENABLED.load(Ordering::Relaxed);
+            #[cfg(feature = "bench-round-diagnostics")]
+            let mut backpressure_iterations = 0_u64;
+            while {
+                min_sequence = self.gating_minimum(next_value);
+                wrap_point > min_sequence
+            } {
+                // A dead consumer never advances its gating sequence; fail fast
+                // instead of spinning forever.
+                if let Some(error) = self.claim_state_error() {
+                    return Err(error);
+                }
+                #[cfg(feature = "bench-round-diagnostics")]
+                if diagnostics_enabled {
+                    backpressure_iterations = backpressure_iterations.saturating_add(1);
+                }
+                std::hint::spin_loop();
+            }
+            #[cfg(feature = "bench-round-diagnostics")]
+            if diagnostics_enabled {
+                self.record_bench_backpressure(backpressure_iterations);
+            }
+
+            self.set_cached_value(min_sequence);
+        }
+
+        // Update next_value (equivalent to this.nextValue = nextSequence in LMAX)
+        self.set_next_value(next_sequence);
+
+        Ok(next_sequence)
+    }
+
+    /// Try to claim a sequence range after the caller has established
+    /// exclusive access to `next_value` and `cached_value`.
+    ///
+    /// # Safety
+    /// The caller must hold the checked claim guard or possess the unique
+    /// producer capability for this exact sequencer.
+    #[inline]
+    unsafe fn try_next_n_inner(&self, n: i64) -> Option<i64> {
+        // This follows the exact LMAX Disruptor SingleProducerSequencer.tryNext(int n) logic.
+        let required = usize::try_from(n).ok()?;
+
+        if !self.has_available_capacity_internal(required, true) {
+            return None;
+        }
+
+        // Update next_value and return the sequence (equivalent to this.nextValue += n)
+        let next_sequence = self.next_value() + n;
+        self.set_next_value(next_sequence);
+
+        Some(next_sequence)
+    }
 }
 
 impl<W> Sequencer for SingleProducerSequencer<W>
@@ -739,71 +832,16 @@ where
         if n < 1 || n > self.buffer_size_i64 {
             return Err(DisruptorError::InvalidSequence(n));
         }
-        // Relaxed: closed/poisoned are terminal monotonic flags; coherence
-        // guarantees eventual visibility. An Acquire load here pairs a
-        // per-publish STLR (cursor Release store) with an LDAR, creating a
-        // StoreLoad barrier per event on ARM that cost ~5x single-event
-        // throughput (P3 bisection, 2026-07-19).
-        if self.closed.load(Ordering::Relaxed) {
-            return Err(DisruptorError::Shutdown);
-        }
-        if self.poisoned.load(Ordering::Relaxed) {
-            return Err(DisruptorError::Poisoned);
+        if let Some(error) = self.claim_state_error() {
+            return Err(error);
         }
 
         // Serializes claim-state access so concurrent Arc drivers fail closed
         // instead of racing on next_value/cached_value (residual 2026-07-19).
         let _claim = self.acquire_claim()?;
 
-        // This follows the exact LMAX Disruptor SingleProducerSequencer.next(int n) logic.
         // SAFETY: claim_lock held — exclusive access to next/cached cells.
-        let next_value = unsafe { self.next_value() };
-        let next_sequence = next_value + n;
-        let wrap_point = next_sequence - self.buffer_size_i64;
-        let cached_gating_sequence = unsafe { self.cached_value() };
-
-        if wrap_point > cached_gating_sequence || cached_gating_sequence > next_value {
-            // Set cursor with volatile semantics (equivalent to cursor.setVolatile in LMAX)
-            self.cursor.set_volatile(next_value);
-
-            // Wait for consumers to catch up.
-            // Use spin_loop() instead of yield_now() to avoid syscall overhead
-            // (~1-5μs per sched_yield). PAUSE (x86) / YIELD (ARM) stays on-core.
-            let mut min_sequence;
-            #[cfg(feature = "bench-round-diagnostics")]
-            let diagnostics_enabled = BENCH_ROUND_DIAGNOSTICS_ENABLED.load(Ordering::Relaxed);
-            #[cfg(feature = "bench-round-diagnostics")]
-            let mut backpressure_iterations = 0_u64;
-            while {
-                min_sequence = self.gating_minimum(next_value);
-                wrap_point > min_sequence
-            } {
-                // A dead consumer never advances its gating sequence; fail fast
-                // instead of spinning forever. Relaxed: see entry check above.
-                if self.closed.load(Ordering::Relaxed) {
-                    return Err(DisruptorError::Shutdown);
-                }
-                if self.poisoned.load(Ordering::Relaxed) {
-                    return Err(DisruptorError::Poisoned);
-                }
-                #[cfg(feature = "bench-round-diagnostics")]
-                if diagnostics_enabled {
-                    backpressure_iterations = backpressure_iterations.saturating_add(1);
-                }
-                std::hint::spin_loop();
-            }
-            #[cfg(feature = "bench-round-diagnostics")]
-            if diagnostics_enabled {
-                self.record_bench_backpressure(backpressure_iterations);
-            }
-
-            unsafe { self.set_cached_value(min_sequence) };
-        }
-
-        // Update next_value (equivalent to this.nextValue = nextSequence in LMAX)
-        unsafe { self.set_next_value(next_sequence) };
-
-        Ok(next_sequence)
+        unsafe { self.next_n_inner(n) }
     }
 
     fn try_next(&self) -> Option<i64> {
@@ -817,28 +855,14 @@ where
         if n < 1 || n > self.buffer_size_i64 {
             return None;
         }
-        // Relaxed: terminal monotonic flags (see next_n).
-        if self.closed.load(Ordering::Relaxed) || self.poisoned.load(Ordering::Relaxed) {
+        if self.claim_state_error().is_some() {
             return None;
         }
 
         let _claim = self.try_acquire_claim()?;
 
-        // This follows the exact LMAX Disruptor SingleProducerSequencer.tryNext(int n) logic
-        let Ok(required) = usize::try_from(n) else {
-            return None;
-        };
-
-        if !self.has_available_capacity_internal(required, true) {
-            return None; // Insufficient capacity
-        }
-
-        // Update next_value and return the sequence (equivalent to this.nextValue += n)
         // SAFETY: claim_lock held — exclusive access to next/cached cells.
-        let next_sequence = unsafe { self.next_value() + n };
-        unsafe { self.set_next_value(next_sequence) };
-
-        Some(next_sequence)
+        unsafe { self.try_next_n_inner(n) }
     }
 
     #[inline]
