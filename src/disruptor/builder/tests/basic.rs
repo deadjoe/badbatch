@@ -134,7 +134,7 @@ fn test_single_producer_multiple_handlers() {
 
     let builder = build_single_producer(8, test_event_factory, BusySpinWaitStrategy)
         .handle_events_with(handler1)
-        .handle_events_with(handler2);
+        .also_partition_with(handler2);
 
     // Should have two handlers
     assert_eq!(builder.shared.consumers.len(), 2);
@@ -157,7 +157,7 @@ fn test_multi_producer_multiple_handlers() {
 
     let builder = build_multi_producer(16, test_event_factory, BusySpinWaitStrategy)
         .handle_events_with(handler1)
-        .handle_events_with(handler2);
+        .also_partition_with(handler2);
 
     // Should have two handlers
     assert_eq!(builder.shared.consumers.len(), 2);
@@ -387,7 +387,7 @@ fn test_builder_multiple_handlers_with_different_settings() {
         .handle_events_with(|_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {})
         .pin_at_core(2)
         .thread_name("processor-2")
-        .handle_events_with(|_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {});
+        .also_partition_with(|_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {});
 
     // Should have two consumers with different thread settings
     assert_eq!(builder.shared.consumers.len(), 2);
@@ -406,7 +406,7 @@ fn test_builder_api_completeness() {
         })
         .pin_at_core(1)
         .thread_name("consumer-2")
-        .handle_events_with(|event: &mut TestEvent, sequence: i64, _: bool| {
+        .also_partition_with(|event: &mut TestEvent, sequence: i64, _: bool| {
             event.value = sequence * 2;
         });
 
@@ -601,7 +601,7 @@ fn test_multiple_consumers_with_different_cpu_affinity() {
         )
         .thread_name("consumer-core-1")
         .pin_at_core(1)
-        .handle_events_with(
+        .also_partition_with(
             move |_event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
                 consumer2_count_clone.fetch_add(1, Ordering::SeqCst);
             },

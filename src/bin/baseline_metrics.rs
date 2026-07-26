@@ -189,7 +189,7 @@ fn worker_pool(events: u64, buffer: usize, workers: usize) -> Row {
         });
     for _ in 1..workers {
         let c = Arc::clone(&counter);
-        builder = builder.handle_events_with(move |e: &mut Ev, _, _| {
+        builder = builder.also_partition_with(move |e: &mut Ev, _, _| {
             std::hint::black_box(e.value);
             c.fetch_add(1, Ordering::Relaxed);
         });

@@ -240,9 +240,12 @@ macro_rules! impl_more_handlers {
             F: Fn() -> E + Send + Sync + 'static,
             W: WaitStrategy $($wait_bound)* + 'static,
         {
-            /// Register a mutable closure handler (`&mut E`) on the current stage.
+            /// Partition the current stage across another mutable closure handler (`&mut E`).
+            ///
+            /// Adding a second mutable handler converts the stage to WorkerPool
+            /// semantics: each sequence is processed by exactly one handler.
             #[must_use]
-            pub fn handle_events_with<H>(mut self, handler: H) -> Self
+            pub fn also_partition_with<H>(mut self, handler: H) -> Self
             where
                 H: FnMut(&mut E, i64, bool) + Send + Sync + 'static,
             {
@@ -250,9 +253,12 @@ macro_rules! impl_more_handlers {
                 self
             }
 
-            /// Register a mutable [`EventHandler`] on the current stage.
+            /// Partition the current stage across another mutable [`EventHandler`].
+            ///
+            /// Adding a second mutable handler converts the stage to WorkerPool
+            /// semantics: each sequence is processed by exactly one handler.
             #[must_use]
-            pub fn handle_events_with_handler<H>(mut self, handler: H) -> Self
+            pub fn also_partition_with_handler<H>(mut self, handler: H) -> Self
             where
                 H: EventHandler<E> + Send + Sync + 'static,
             {

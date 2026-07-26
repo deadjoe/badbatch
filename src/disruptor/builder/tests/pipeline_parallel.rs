@@ -33,7 +33,7 @@ fn test_parallel_stage_then_waits_for_all_upstream_handlers() {
             },
         )
         .thread_name("parallel-fast")
-        .handle_events_with(
+        .also_partition_with(
             move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
                 event.data.push_str("|worker");
                 upstream_claims_clone2.fetch_add(1, Ordering::SeqCst);
@@ -105,7 +105,7 @@ fn test_parallel_consumers_in_dependent_stage_share_upstream_barrier() {
             },
         )
         .thread_name("right")
-        .handle_events_with(
+        .also_partition_with(
             move |event: &mut TestEvent, _sequence: i64, _end_of_batch: bool| {
                 assert!(
                     event.data.contains("|root"),

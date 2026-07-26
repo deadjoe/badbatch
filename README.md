@@ -102,8 +102,9 @@ There are no logging calls in the successful per-event processing path.
 
 | API | Behavior |
 |-----|----------|
-| `handle_events_with` (2+ handlers) | **WorkerPool** — CAS claim; each sequence handled by one mutable consumer |
-| `fan_out_events_with` | **Fan-out** — every consumer observes every sequence via `&E` |
+| `handle_events_with` / `handle_events_with_handler` | Add the stage's first mutable handler; processing is sequential |
+| `also_partition_with` / `also_partition_with_handler` | Add another mutable handler and make the stage a **WorkerPool** — CAS claim; each sequence is handled by exactly one handler |
+| `fan_out_events_with` | **Fan-out** — every read-only handler observes every sequence via `&E` |
 
 Pipeline stages: `.and_then()` starts a dependent stage that waits on the previous stage’s sequences.
 

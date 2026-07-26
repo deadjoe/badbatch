@@ -464,7 +464,7 @@ mod builder_dependency_properties {
                     event.value = event.value.wrapping_add(1);
                     stage1_a_clone.lock().unwrap().push(sequence);
                 })
-                .handle_events_with(move |event: &mut PipelineEvent, sequence, _end_of_batch| {
+                .also_partition_with(move |event: &mut PipelineEvent, sequence, _end_of_batch| {
                     event.value = event.value.wrapping_add(1);
                     stage1_b_clone.lock().unwrap().push(sequence);
                 })
