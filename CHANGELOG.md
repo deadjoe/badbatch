@@ -15,6 +15,29 @@ jobs cannot silently raise this minimum.
 
 ## [0.2.0] — 2026-07
 
+### Simple and full WaitStrategy semantic convergence (A.6)
+
+- **Alert has terminal priority.** `SimpleWaitStrategyAdapter::wait_for_with_alert`
+  now checks the barrier alert flag before observing availability, matching the
+  full LMAX `WaitStrategy` implementations. Previously an already-available
+  sequence returned `Ok` even when the barrier was alerted.
+- **Timeout ordering aligned.** The adapter's timeout loop now re-samples the
+  alert flag after a miss and before the timeout check, matching the full
+  non-blocking strategies. The timeout path already checked alert first; the
+  extra sample closes the post-availability alert window.
+- **Per-wait miss counter.** `SimpleWaitStrategy` gains
+  `backoff_with_miss(&self, miss: &mut u32)`, the new canonical idle hook.
+  `Yielding::backoff_with_miss` now follows the same spin-then-yield schedule as
+  `YieldingWaitStrategy` (100 spin-loop hints, then `thread::yield_now`).
+- **Deprecated `SimpleWaitStrategy::backoff`.** The old `backoff(&self)` method is
+  deprecated in favor of `backoff_with_miss`. It retains a default implementation
+  so existing external implementations keep compiling; internal callers and
+  tests migrate to the miss-aware hook.
+- **Coverage.** `tests/wait_strategy_semantic_equivalence.rs` asserts identical
+  terminal outcomes (Ok/Alert/Timeout) between each full strategy and its simple
+  counterpart; `tests/wait_strategy_timeout_ordering.rs` (A.6 hard prerequisite)
+  pins availability-before-timeout for all eight built-in wait paths.
+
 ### Wait correctness, safe SP claims, and API clarity (2026-07-26)
 
 - **Wait / poller correctness.** Availability is observed before timeout in

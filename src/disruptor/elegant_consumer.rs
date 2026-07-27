@@ -516,8 +516,10 @@ where
         if sequence < buffer_size && !shutdown.load(Ordering::Acquire) {
             Some(sequence)
         } else {
-            // Wait using the strategy
-            wait_strategy.backoff();
+            // Wait using the strategy. `wait_for_events` performs a single
+            // backoff step per call, so the miss counter starts fresh here.
+            let mut miss = 0u32;
+            wait_strategy.backoff_with_miss(&mut miss);
 
             // Check shutdown again
             if shutdown.load(Ordering::Acquire) {
