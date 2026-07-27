@@ -37,11 +37,14 @@ pub trait SimpleWaitStrategy: Copy + Send + Sync + std::fmt::Debug {
     /// Use [`Self::backoff_with_miss`] instead. `backoff` does not receive the
     /// per-wait miss counter, so stateful strategies (e.g. [`Yielding`]) cannot
     /// align their spin-then-yield schedule with the full LMAX implementations.
+    ///
+    /// This stays a *required* method on purpose. [`Self::backoff_with_miss`]
+    /// defaults to delegating here, so giving `backoff` a default as well would
+    /// let an empty `impl` block compile and then mutually recurse into a stack
+    /// overflow at runtime. Keeping it required preserves the pre-A.6
+    /// compile-time guarantee: an implementation must supply at least this.
     #[deprecated(note = "use backoff_with_miss; removed at 1.0")]
-    fn backoff(&self) {
-        let mut miss = 0u32;
-        self.backoff_with_miss(&mut miss);
-    }
+    fn backoff(&self);
 
     /// Idle / backoff for one miss, with a per-wait miss counter.
     ///
@@ -123,6 +126,19 @@ impl Yielding {
     pub fn new(spin_tries: u32) -> Self {
         Self { spin_tries }
     }
+
+    /// Whether the `miss`-th consecutive miss is still in the spin phase.
+    ///
+    /// Extracted as a pure predicate because the two actions it selects between
+    /// (`hint::spin_loop` and `thread::yield_now`) are not observable from a
+    /// test. The branch *condition* is observable, so that is what the boundary
+    /// test pins. Mirrors full [`crate::disruptor::YieldingWaitStrategy`]:
+    /// misses `0..spin_tries` spin, `spin_tries` onward yield — exactly
+    /// `spin_tries` spins, matching its countdown from `SPIN_TRIES` to `0`.
+    #[inline]
+    fn is_spin_phase(miss: u32, spin_tries: u32) -> bool {
+        miss < spin_tries
+    }
 }
 
 impl Default for Yielding {
@@ -146,7 +162,7 @@ impl SimpleWaitStrategy for Yielding {
     fn backoff_with_miss(&self, miss: &mut u32) {
         // Align with full YieldingWaitStrategy: the first `spin_tries` misses
         // each perform one spin-loop hint; subsequent misses yield the thread.
-        if *miss < self.spin_tries {
+        if Self::is_spin_phase(*miss, self.spin_tries) {
             hint::spin_loop();
         } else {
             std::thread::yield_now();
@@ -583,6 +599,15 @@ mod tests {
     }
 
     impl SimpleWaitStrategy for AdvanceCursorAndDependency<'_> {
+        // `backoff` is required, so a double must still supply it. Delegating is
+        // safe here precisely because `backoff_with_miss` is overridden below;
+        // the mutual-recursion hazard only exists when neither is provided.
+        #[allow(deprecated)]
+        fn backoff(&self) {
+            let mut miss = 0u32;
+            self.backoff_with_miss(&mut miss);
+        }
+
         fn backoff_with_miss(&self, _miss: &mut u32) {
             self.cursor.set(100);
             self.dependency.set(100);
@@ -719,34 +744,61 @@ mod tests {
     }
 
     #[test]
-    fn test_yielding_miss_state_machine_boundary() {
-        // `Yielding::backoff_with_miss` must match the full
-        // `YieldingWaitStrategy` schedule: the first `spin_tries` misses each
-        // perform one spin-loop hint, and every subsequent miss yields.
-        //
-        // We cannot directly observe `hint::spin_loop` vs `yield_now`, so this
-        // test pins the observable counter boundary and relies on the semantic
-        // equivalence tests in `wait_strategy_semantic_equivalence.rs` to catch
-        // any action-selection divergence.
+    fn test_yielding_spin_phase_boundary_is_pinned() {
+        // The spin-vs-yield *actions* (`hint::spin_loop` / `thread::yield_now`)
+        // are not observable from a test, so asserting on them is impossible;
+        // asserting only that the miss counter advances is vacuous, because it
+        // advances in both branches. The branch *condition* is the observable
+        // form of this decision, so that is what gets pinned here.
+        let spin_tries = 100u32;
+
+        assert!(Yielding::is_spin_phase(0, spin_tries), "first miss spins");
+        assert!(
+            Yielding::is_spin_phase(spin_tries - 1, spin_tries),
+            "miss {} is the last spin",
+            spin_tries - 1
+        );
+        assert!(
+            !Yielding::is_spin_phase(spin_tries, spin_tries),
+            "miss {spin_tries} must switch to yielding"
+        );
+        assert!(
+            !Yielding::is_spin_phase(spin_tries + 1, spin_tries),
+            "yield phase is absorbing"
+        );
+
+        // Exactly `spin_tries` misses take the spin branch — the same total as
+        // full `YieldingWaitStrategy`, whose counter decrements from
+        // `SPIN_TRIES` to `0` before it starts yielding.
+        let spins = (0..spin_tries * 2)
+            .filter(|miss| Yielding::is_spin_phase(*miss, spin_tries))
+            .count();
+        assert_eq!(spins, spin_tries as usize);
+    }
+
+    #[test]
+    fn test_yielding_default_window_matches_full_lmax_spin_tries() {
+        // Cross-family anchor. Both sides currently hardcode `100`
+        // independently; if either drifts, A.6's convergence breaks silently
+        // and no behavioural test can see it (backoff cadence is not exposed
+        // through the `WaitStrategy` contract).
+        assert_eq!(
+            Yielding::default().spin_tries,
+            u32::try_from(crate::disruptor::YieldingWaitStrategy::SPIN_TRIES).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_yielding_miss_counter_advances_in_both_phases() {
+        // Weaker companion to the boundary test: the adapter relies on the
+        // counter advancing on every call, in either phase.
         let spin_tries = 3u32;
         let strategy = Yielding::new(spin_tries);
 
         let mut miss = 0u32;
-        for expected in 1..=spin_tries {
+        for expected in 1..=spin_tries + 2 {
             strategy.backoff_with_miss(&mut miss);
-            assert_eq!(
-                miss, expected,
-                "miss counter should advance by one on each spin-phase call"
-            );
+            assert_eq!(miss, expected);
         }
-
-        // First call at the boundary (miss == spin_tries) must take the yield
-        // branch and still advance the counter.
-        strategy.backoff_with_miss(&mut miss);
-        assert_eq!(miss, spin_tries + 1);
-
-        // Subsequent calls stay in the yield branch and keep advancing.
-        strategy.backoff_with_miss(&mut miss);
-        assert_eq!(miss, spin_tries + 2);
     }
 }

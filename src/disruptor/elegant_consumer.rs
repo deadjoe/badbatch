@@ -516,10 +516,14 @@ where
         if sequence < buffer_size && !shutdown.load(Ordering::Acquire) {
             Some(sequence)
         } else {
-            // Wait using the strategy. `wait_for_events` performs a single
-            // backoff step per call, so the miss counter starts fresh here.
-            let mut miss = 0u32;
-            wait_strategy.backoff_with_miss(&mut miss);
+            // A.6: this function has no miss loop of its own, so a fresh miss
+            // counter per call would pin every strategy to its first-miss
+            // action — for `Yielding` that means spinning forever and never
+            // yielding, which is a behavioral change, not a mechanical port.
+            // Keep the legacy stateless idle; converging this surface needs a
+            // real wait loop here and is out of A.6 scope.
+            #[allow(deprecated)]
+            wait_strategy.backoff();
 
             // Check shutdown again
             if shutdown.load(Ordering::Acquire) {

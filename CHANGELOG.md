@@ -30,13 +30,29 @@ jobs cannot silently raise this minimum.
   `Yielding::backoff_with_miss` now follows the same spin-then-yield schedule as
   `YieldingWaitStrategy` (100 spin-loop hints, then `thread::yield_now`).
 - **Deprecated `SimpleWaitStrategy::backoff`.** The old `backoff(&self)` method is
-  deprecated in favor of `backoff_with_miss`. It retains a default implementation
-  so existing external implementations keep compiling; internal callers and
-  tests migrate to the miss-aware hook.
+  deprecated in favor of `backoff_with_miss`, but **remains a required method**.
+  Existing external implementations keep compiling unchanged — only `backoff` was
+  ever required, and it still is. It deliberately has no default: since
+  `backoff_with_miss` defaults to delegating to `backoff`, defaulting both would
+  let an empty `impl` block compile and then mutually recurse into a stack
+  overflow at runtime. Internal callers and tests use the miss-aware hook.
+- **`ElegantConsumer` idle behavior is unchanged.** `wait_for_events` has no miss
+  loop of its own, so it keeps the legacy stateless `backoff()`. Handing it a
+  fresh miss counter per call would pin every strategy to its first-miss action —
+  for `Yielding`, spinning forever and never yielding. Converging that surface
+  needs a real wait loop there and is out of A.6 scope.
 - **Coverage.** `tests/wait_strategy_semantic_equivalence.rs` asserts identical
   terminal outcomes (Ok/Alert/Timeout) between each full strategy and its simple
   counterpart; `tests/wait_strategy_timeout_ordering.rs` (A.6 hard prerequisite)
-  pins availability-before-timeout for all eight built-in wait paths.
+  pins availability-before-timeout for all eight built-in wait paths. The
+  `Yielding` spin/yield boundary is pinned through the `is_spin_phase` predicate
+  and anchored to `YieldingWaitStrategy::SPIN_TRIES`, because the backoff cadence
+  itself is not observable through the `WaitStrategy` contract and therefore
+  cannot be covered by a behavioral test.
+- **Known untested window.** The adapter's second alert sample (between the
+  availability read and the timeout check) is only observable if the alert flag
+  is set inside that window. No deterministic single-threaded test can pin it, so
+  it is knowingly left uncovered rather than covered by a timing-dependent test.
 
 ### Wait correctness, safe SP claims, and API clarity (2026-07-26)
 
