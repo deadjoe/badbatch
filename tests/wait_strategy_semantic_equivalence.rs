@@ -6,14 +6,17 @@
 //! [`SimpleWaitStrategyAdapter`] is a failure. They should all pass once A.6
 //! converges the two families.
 //!
-//! Expected state *before* A.6 body lands:
-//! - Alert-priority tests RED: the simple adapter returns `Ok` when data is
-//!   already available and the barrier is alerted, whereas the full strategies
-//!   return `Err(Alert)`.
-//! - Timeout-path alert-priority test GREEN: the simple adapter's timeout loop
-//!   already checks alert before availability, so it matches the full strategy.
-//! - Trait-default test GREEN: the default `WaitStrategy::wait_for_with_timeout_and_alert`
-//!   implementation is already availability-first.
+//! Historical record — the state when this file was introduced, one commit
+//! *before* the A.6 body landed. Kept so each test's purpose stays legible.
+//! All of them pass now; a failure here is a regression, not an expectation.
+//! - Alert-priority tests were RED: the simple adapter returned `Ok` when data
+//!   was already available and the barrier was alerted, whereas the full
+//!   strategies returned `Err(Alert)`.
+//! - Timeout-path alert-priority test was GREEN: the simple adapter's timeout
+//!   loop already checked alert before availability.
+//! - Trait-default test was GREEN: the default
+//!   `WaitStrategy::wait_for_with_timeout_and_alert` was already
+//!   availability-first.
 
 use badbatch::disruptor::simple_wait_strategy::{
     busy_spin, busy_spin_with_hint, sleeping, yielding as simple_yielding,
@@ -28,8 +31,8 @@ use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // Terminal-flag priority: alert must win over availability on every strategy.
-// Currently RED: the simple adapter does not check alert before the first
-// availability observation, so it returns Ok when full returns Alert.
+// Was RED before the A.6 body: the adapter did not check alert before its
+// first availability observation, so it returned Ok where full returned Alert.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -130,7 +133,8 @@ fn assert_unalerted_available_returns_ok(full: &dyn WaitStrategy, simple: &dyn W
 
 // ---------------------------------------------------------------------------
 // Timeout-path terminal priority: alert must also win on the timeout API.
-// Already GREEN: the simple adapter's timeout loop checks alert first.
+// Was already GREEN: the adapter's timeout loop checked alert first even
+// before A.6, so this pins existing behaviour rather than fixing it.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -182,7 +186,8 @@ fn positive_timeout_returns_available_sequence_for_yielding() {
 // ---------------------------------------------------------------------------
 // Trait default implementation coverage.
 // No built-in strategy uses the default `wait_for_with_timeout_and_alert`, so
-// we provide a minimal implementation that relies on it. Currently GREEN.
+// we provide a minimal implementation that relies on it. Was already GREEN:
+// this closes a coverage gap rather than fixing a defect.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
