@@ -9,6 +9,8 @@
 > 1. **倍率不跨实验相乘**——不同实验、不同时间窗的比值中位数不得相乘用于预告收益。
 > 2. **证据不跨场景兑换**——多场景验收时各场景独立达标，不允许"两个场景大赢补一个场景回退"。
 
+> **行号约定**：正文中所有 `file.rs:N` 形式的行号均**相对基线 `f396fa2`**（已逐条复核，在该基线上准确）。批次落地后代码会移动，这些引用作为**历史锚点保留、不随 HEAD 更新**——追着 HEAD 改只会在下一批再失效一次。已知因 A.2 / A.6 落地而不再对应的引用，在 A.6 段落末尾列明。
+
 ---
 
 ## 批次 0｜证据保全
@@ -119,6 +121,15 @@ A.3 使**两个 zero-timeout / try-read 调用不再创建 `Instant`**。
 > strategy，只能证明构造兼容，不能充当这项语义重构的安全网。
 >
 > ⚠️ **受文末并行规则约束**：统一动作若触及 `YieldingWaitStrategy` / `BusySpinWaitStrategy` / `wait_for_with_alert`，必须等基线落盘。
+
+> **落地后订正**（A.6 已完成并推送，`19632e9..7b37c6b`）。本节开头点名的那处分叉是本计划对 A.6 的唯一具体指认，落地后发现它在两个方向上都需要修正：
+>
+> 1. **被点名的 `SimpleYielding::backoff` miss 分叉，不经 `WaitStrategy` 契约暴露。** backoff 只决定"怎么空转"，不影响返回值——两个 `Yielding` 在同样输入下的终局（`Ok` / `Err(Timeout)` / `Err(Alert)`）本来就一致。因此它**在原理上无法被任何行为测试或等价性测试钉住**，最终是靠 `Yielding::is_spin_phase` 纯谓词 + 锚定 `YieldingWaitStrategy::SPIN_TRIES` 常量固定的（自旋总数两边都恰好 100）。
+> 2. **真正更硬、且可观测的那处分叉，本计划一字未提**：adapter 在数据已可用时**根本不检查 alert**——barrier 已 alert 时 full 返回 `Err(Alert)`、simple 返回 `Ok`。这是经契约可观察的行为差，也是 A.6 实际修掉的最重要一条。
+>
+> **已知未测窗口**：adapter 的第二次 alert 采样（读完可用性之后、判超时之前）只在 alert 恰好落入该窗口时可观测，单线程确定性测试钉不住，知情留空而非用时序依赖用例假装覆盖。
+>
+> **失效行号**：本节的 `simple_wait_strategy.rs:14` 与 A.2 节的 `simple_wait_strategy.rs:158-186` 在基线 `f396fa2` 上准确，A.2 / A.6 落地后已不再对应（trait 现位于 `:29`，所述旧 adapter 循环已被整段删除）。按前文「行号约定」保留不改。同节的 `wait_strategy.rs:118` / `:739` 仍然有效——该文件全程未被改动，正是下述「收敛方向」决策的效果。
 
 ---
 
@@ -379,3 +390,6 @@ handoff §12 记载早期 macOS 观察为**删锁反而吞吐塌陷**，与 Linu
 | B.3 capability 覆盖范围 | **方案 (a)**：同时覆盖 Builder 与 `open_single_producer_poller` |
 | D.1 命名方案 | **同意**：仅重命名 `fluent.rs:245/255` 的同 stage 追加重载为 `also_partition_with` / `also_partition_with_handler`；首个 `handle_events_with` / `handle_events_with_handler` 与 `fan_out_events_with` 均保留 |
 | D.3 本轮处置 | **同意**：本轮**维持现有 DSL 阻塞排队语义不改**，`single_publish_lock` 不删；D.3 仅作风险约束、不列为开发项 |
+| A.6 `SimpleWaitStrategy::backoff` 签名 | **方案 C**：新增带默认实现的 `backoff_with_miss(&self, &mut u32)`，旧 `backoff` 标 `#[deprecated]`，**不破坏公开 API**。`backoff` **保持必需方法**——给它也加默认会与 `backoff_with_miss` 的默认互相委托，使空 `impl` 块编译通过并在运行时爆栈，等于把编译期错误降级成运行时崩溃 |
+| A.6 收敛方向 | **单向 simple → full**：**不得改动 full `BusySpinWaitStrategy` / `YieldingWaitStrategy` 的实现体**。依据：`src/bin/h2h_rust.rs:908/1019/1146` 实例化的正是这两个策略并走 `wait_for_with_alert`，而 F.3 已证明 inlining 与 code layout 不可分割（一个 `#[inline(never)]` 即令中位数 0.402→1.638）。抽共享 helper 属同一风险类，DRY 收益留待 F 批完成后作独立 diff 单独测量 |
+| A.6 dependent-sequence 口径 | **非 must-fix**：full 在 deps 非空时只取 `min(deps)`，adapter 取 `min(cursor, min(deps))`；正常拓扑下 deps 不超过 cursor，二者等价，adapter 只是更保守。收敛时顺手对齐即可，**不为它单独设计抽象** |
