@@ -33,7 +33,7 @@
 
 **决策：这两份材料不纳入公开仓库跟踪。** 理由：
 
-1. 目录名 `../badbatch_evidence/linux_vultr_20260719_b1/results/linux_vultr_<ip>/` 含 VPS IP，纳入跟踪会把它写进公开仓库的文件树与全部历史，与 handoff §17"VPS identity、cost、IP、SSH label remain only in this ignored handoff"的既定决定相冲突（已核实 `environment.txt` 内部**无** IP / SSH / root@ 泄漏，问题仅在路径名）；
+1. 目录名 `head_to_head_results/linux_vultr_<ip>/` 含 VPS IP，纳入跟踪会把它写进公开仓库的文件树与全部历史，与 handoff §17"VPS identity、cost、IP、SSH label remain only in this ignored handoff"的既定决定相冲突（已核实 `environment.txt` 内部**无** IP / SSH / root@ 泄漏，问题仅在路径名）；整理后该目录已迁至 `../badbatch_evidence/linux_vultr_20260719_b1/results/linux_vultr_<ip>/`。
 2. 内容含 1142 个 `.class` 编译产物、924 个 JSON、`perf.data` 二进制（1.2–2.1 MB/个）与 3.8–4.6 MB 的 c2c report。纳入跟踪会把**约 42 MB 原始 payload 永久写入历史**，显著增大对象库与完整 checkout 体积；实际 pack 大小取决于 zlib/delta 压缩效果，但**撤销仍需改写历史**。
 
 ### 0.2 游离实验提交的抢救 —— ✅ 已完成
