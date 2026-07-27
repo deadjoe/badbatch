@@ -67,6 +67,7 @@ cargo bench --bench pipeline_processing
 cargo bench --bench latency_comparison
 cargo bench --bench throughput_comparison
 cargo bench --bench buffer_size_scaling
+cargo bench --bench worker_pool
 ```
 
 ### Other runner modes
@@ -203,6 +204,14 @@ Fixed 10_000 events per iteration; buffers 256/1024/4096; batch publish with chu
 **Role:** buffer size vs processing cost / payload probes (not a full factorial matrix).
 
 Includes Fast/Medium/Slow processing points, MemoryUsage (payload/allocation probe, not a precise profiler), BufferUtil (try_publish + artificial backpressure). Use for sizing intuition, not max-throughput bragging rights.
+
+### `worker_pool.rs`
+
+**Role:** same-stage parallel consumers (WorkerPool scheme A) throughput.
+
+Single producer, `BusySpinWaitStrategy`, 1/2/4/8 workers. Each worker owns its own `CachePadded<AtomicI64>` counter; the producer waits for the per-iteration target. The 1-worker case is a negative control; ≥2 workers exercise the CAS-claim path in `consumer_engine.rs`.
+
+Use this suite to validate changes that touch the work-processor loop (e.g. `4460db6` C.3). The benchmark should show no measurable difference for 1 worker and a measurable difference when the `advertise_work_sequence_if_changed` optimization is reverted.
 
 ## Interpreting output
 

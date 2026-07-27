@@ -219,6 +219,14 @@ run_scaling() {
     run_benchmark_safe "buffer_size_scaling" "Buffer size scaling analysis" "$SCALING_TIMEOUT"
 }
 
+# Function to run WorkerPool benchmarks
+run_worker_pool() {
+    print_status "Running WorkerPool benchmarks..."
+    print_status "This tests same-stage parallel consumer (WorkerPool scheme A) throughput."
+    
+    run_benchmark_safe "worker_pool" "WorkerPool scheme A throughput"
+}
+
 
 # Function to run all benchmarks
 run_all() {
@@ -248,11 +256,12 @@ run_all() {
             "latency") echo "latency_comparison" ;;
             "throughput") echo "throughput_comparison" ;;
             "scaling") echo "buffer_size_scaling" ;;
+            "worker_pool") echo "worker_pool" ;;
             *) echo "$1" ;;
         esac
     }
     
-    for benchmark in quick spsc mpsc pipeline latency throughput scaling; do
+    for benchmark in quick spsc mpsc pipeline latency throughput scaling worker_pool; do
         echo ""
         print_status "=== Running $benchmark benchmark ==="
         if run_$benchmark; then
@@ -392,6 +401,7 @@ show_help() {
     echo "  latency    Run Latency Comparison benchmarks"
     echo "  throughput Run Throughput Comparison benchmarks"
     echo "  scaling    Run Buffer Size Scaling benchmarks"
+    echo "  worker_pool Run WorkerPool (same-stage parallel consumers) benchmarks"
     echo "  all        Run ALL benchmark suites (30-60 minutes)"
     echo "  report     Generate HTML benchmark reports"
     echo "  regression Run performance regression test"
@@ -459,6 +469,10 @@ main() {
         scaling)
             check_dependencies
             run_scaling
+            ;;
+        worker_pool)
+            check_dependencies
+            run_worker_pool
             ;;
         all)
             check_dependencies
