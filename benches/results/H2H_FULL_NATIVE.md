@@ -8,7 +8,7 @@ Captured at commit **`bd85582`** (includes LMAX-aligned spin-then-yield
 `YieldingWaitStrategy`).
 
 Raw artifacts (typically gitignored):  
-`head_to_head_results/full_native_20260719_180958/`.
+`../badbatch_evidence/linux_vultr_20260719_b1/results/full_native_20260719_180958/`.
 
 ## Environment
 
@@ -73,7 +73,7 @@ bash scripts/run_head_to_head.sh --mode full --order rust-first --event-padding 
 
 ## Pipeline follow-ups (same session, full event counts)
 
-Artifacts under `head_to_head_results/full_native_20260719_180958/pipeline_followups/`.
+Artifacts under `../badbatch_evidence/linux_vultr_20260719_b1/results/full_native_20260719_180958/pipeline_followups/`.
 
 ### Rust-only matrix (100M events, 3+7 rounds)
 
@@ -124,7 +124,7 @@ deficit (~0.55×) to **roughly parity / slight lead** on this machine. Absolute
 medians and CVs remain noisy under yielding; do not quote a single ratio.
 Unicast smoke after the change stayed ~141 Melem/s (no regression).
 
-Artifacts: `head_to_head_results/pipeline_fix_20260719_190407/`.
+Artifacts: `../badbatch_evidence/linux_vultr_20260719_b1/results/pipeline_fix_20260719_190407/`.
 
 ## Follow-ups remaining
 

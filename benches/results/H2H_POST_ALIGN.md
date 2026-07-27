@@ -7,7 +7,7 @@
 Commit **`3b6d5b1`** (LMAX wait availability + terminal-stage gating), Apple M1 Max,
 `RUSTFLAGS=-C target-cpu=native`.
 
-Raw: `head_to_head_results/post_align_20260719_191520/`.
+Raw: `../badbatch_evidence/linux_vultr_20260719_b1/results/post_align_20260719_191520/`.
 
 ## 1. Full all-scenario H2H (default wait strategies)
 

@@ -3,7 +3,7 @@
 - **基线**：`f396fa2`
 - **状态**：**已冻结**。经 @Codex 多轮审查，全部修正采纳；@Codex / @Grok / @Kimi 一致同意。
 - **决策**：@bearbone 已就全部六项执行分支拍板，均已并入正文（见文末「决策记录」）。
-- **依据**：第三方两层审查报告 + 四人两轮只读复核 + 完整仓库的 Vultr Linux 证据 + `docs/private/LINUX_VPS_PERFORMANCE_HANDOFF_20260720.md` 的作者自述结论。
+- **依据**：第三方两层审查报告 + 四人两轮只读复核 + 完整仓库的 Vultr Linux 证据 + `../badbatch_evidence/linux_vultr_20260719_b1/handoff/LINUX_VPS_PERFORMANCE_HANDOFF_20260720.md` 的作者自述结论。
 
 > **贯穿全篇的两条纪律**
 > 1. **倍率不跨实验相乘**——不同实验、不同时间窗的比值中位数不得相乘用于预告收益。
@@ -15,23 +15,25 @@
 
 ## 批次 0｜证据保全
 
-### 0.1 结果与手册的外部备份 —— ⚠️ owner 报告已完成，**尚未经我方验证**
+### 0.1 结果与手册的外部备份 —— ✅ 已闭合
 
-@bearbone 报告已将 `head_to_head_results/`（工作树约 42 MB）与 `docs/private/LINUX_VPS_PERFORMANCE_HANDOFF_20260720.md` 手工复制至仓库外目录。
+`head_to_head_results/`（工作树约 42 MB，3111 个文件）与 `docs/private/LINUX_VPS_PERFORMANCE_HANDOFF_20260720.md` 已统一迁移至仓库外：
 
-> **状态诚实声明**：以上为 **owner reported complete**。我方**没有**外部副本路径，也**没有**执行任何校验。在补做下述验证之前，本项不得按"已审计完成"对待。
+```
+~/github/deadjoe/badbatch_evidence/linux_vultr_20260719_b1/
+  results/   <- 原 head_to_head_results/ 全部内容
+  handoff/   <- LINUX_VPS_PERFORMANCE_HANDOFF_20260720.md
+```
+
+> **验证状态**：已由 @Claude 完成逐文件 SHA-256 比对（源端 vs `badbatch_backup/`），聚合指纹一致；后续由 @Kimi 将证据迁入统一外部树时再次对 3111 个文件做迁移前后哈希比对，全部一一对应。`handoff/` 单文件哈希也一致。
 >
-> **补验口径（完成门禁 = 逐文件密码学哈希清单比对）**：
+> 详细路径映射与审计说明见 `docs/evidence_index.md`。
 >
-> 文件数与总字节数、文件名 manifest 都**只能作辅助 sanity check**——两个内容错误的文件可以保持相同的数量与总量，因此**不足以证明内容完整**。
->
-> 必须执行：对源端全部 **3111** 个文件生成**排序后的 SHA-256 清单**，对外部副本生成同样的清单，**逐行比对一致**。`docs/private/LINUX_VPS_PERFORMANCE_HANDOFF_20260720.md` 单文件同样需哈希与字节数一致。
->
-> 在取得外部副本路径并完成上述比对之前，本项状态保持 **owner reported / 未验证**，且**不得清理、移动或删除任何 ignored evidence**。
+> 本次整理后，仓库内不再保留任何原始证据目录；`.gitignore` 仍保留 `head_to_head_results/` 与 `docs/private/` 条目，防止未来新产生的临时结果误提交。
 
 **决策：这两份材料不纳入公开仓库跟踪。** 理由：
 
-1. 目录名 `head_to_head_results/linux_vultr_<ip>/` 含 VPS IP，纳入跟踪会把它写进公开仓库的文件树与全部历史，与 handoff §17"VPS identity、cost、IP、SSH label remain only in this ignored handoff"的既定决定相冲突（已核实 `environment.txt` 内部**无** IP / SSH / root@ 泄漏，问题仅在路径名）；
+1. 目录名 `../badbatch_evidence/linux_vultr_20260719_b1/results/linux_vultr_<ip>/` 含 VPS IP，纳入跟踪会把它写进公开仓库的文件树与全部历史，与 handoff §17"VPS identity、cost、IP、SSH label remain only in this ignored handoff"的既定决定相冲突（已核实 `environment.txt` 内部**无** IP / SSH / root@ 泄漏，问题仅在路径名）；
 2. 内容含 1142 个 `.class` 编译产物、924 个 JSON、`perf.data` 二进制（1.2–2.1 MB/个）与 3.8–4.6 MB 的 c2c report。纳入跟踪会把**约 42 MB 原始 payload 永久写入历史**，显著增大对象库与完整 checkout 体积；实际 pack 大小取决于 zlib/delta 压缩效果，但**撤销仍需改写历史**。
 
 ### 0.2 游离实验提交的抢救 —— ✅ 已完成
@@ -62,7 +64,7 @@
 
 **仍然长期有效的保护**（与批次先后无关）：
 
-- 在 0.1 的副本完整性**验证通过之前**，不得清理、移动或删除任何 ignored evidence（`head_to_head_results/`、`docs/private/`）；
+- 原始证据已统一迁移至 `~/github/deadjoe/badbatch_evidence/`；`badbatch_backup/` 是整理前的仓库镜像快照，含旧 `head_to_head_results/` 与 `docs/private/`，可作为历史参照；
 - 任何时候**不得删除或改写** `archive/claim-lock-bypass` / `archive/causal-matrix` / `archive/pmu-harness` 三个 tag（本地与远端）；
 - 对外发布性能声明时须标注对应 commit 与实验窗口。
 
@@ -175,18 +177,18 @@ claim 记账重构为单一 inner 实现，checked 与 specialized 共用，**�
 
 ### 证据边界
 
-> **路径约定**：以下 `<ip>` 为 VPS IP 占位符。真实目录名含 IP，而本文件位于**公开**仓库，故按 0.1 的既定决定以占位符书写；查阅时用本地实际目录名替换。全部路径相对仓库根，且位于 **ignored** 的 `head_to_head_results/`（不在 fresh clone 中，依赖外部副本）。
+> **路径约定**：以下 `<ip>` 为 VPS IP 占位符。真实目录名含 IP，本文件位于**公开**仓库，故仍以占位符书写；查阅时用本地实际目录名替换。原始证据已统一迁出仓库，路径均相对仓库根指向外部证据树 `../badbatch_evidence/linux_vultr_20260719_b1/results/`（fresh clone 中不存在，需从外部证据树获取）。
 
 | 项 | 数值 | 出处（canonical 相对路径） |
 |---|---|---|
-| bypass / lock（unicast） | 2.6038x，p10–p90 1.9145–3.3421，bootstrap 95% CI 2.3793–3.0655，20/20，sign-test p≈1.91e-6 | `head_to_head_results/linux_vultr_<ip>/claim_lock_ab_887ef84_vs_5cef79a_20260720/REPORT.md` |
+| bypass / lock（unicast） | 2.6038x，p10–p90 1.9145–3.3421，bootstrap 95% CI 2.3793–3.0655，20/20，sign-test p≈1.91e-6 | `../badbatch_evidence/linux_vultr_20260719_b1/results/linux_vultr_<ip>/claim_lock_ab_887ef84_vs_5cef79a_20260720/REPORT.md` |
 | bypass / lock（unicast_batch） | **1.4354x**，CI 1.3712–1.5768，20/20（batch size = 10，即每 10 事件仍付一次 RMW） | 同上 `REPORT.md`；原始样本见同目录 `SUMMARY.json` 与 `bypass_unicast_batch_fork*.json` |
 | bypass / lock（pipeline） | 1.5880x，CI 1.4970–1.6929，20/20 | 同上 `REPORT.md` |
-| Rust vs LMAX 基线（4 场景 × 20 对） | 0.6833 / 2.5917 / 0.8582 / 0.2094 | `head_to_head_results/linux_vultr_<ip>/linux_baremetal_baseline_887ef84_20260720/REPORT.md`；逐对样本见同目录 `fork_samples.csv` |
-| producer-private padded atomic | 0.9634x（复现 checked）⇒ 瓶颈是 **RMW 本身**，非锁的缓存行 | `head_to_head_results/linux_vultr_<ip>/linux_causal_3b8361e_20260720/CONCLUSIONS.md` §1；明细见同目录 `lock_matrix/REPORT.md` |
+| Rust vs LMAX 基线（4 场景 × 20 对） | 0.6833 / 2.5917 / 0.8582 / 0.2094 | `../badbatch_evidence/linux_vultr_20260719_b1/results/linux_vultr_<ip>/linux_baremetal_baseline_887ef84_20260720/REPORT.md`；逐对样本见同目录 `fork_samples.csv` |
+| producer-private padded atomic | 0.9634x（复现 checked）⇒ 瓶颈是 **RMW 本身**，非锁的缓存行 | `../badbatch_evidence/linux_vultr_20260719_b1/results/linux_vultr_<ip>/linux_causal_3b8361e_20260720/CONCLUSIONS.md` §1；明细见同目录 `lock_matrix/REPORT.md` |
 | backoff 臂 | `bypass-spin1` 0.7596x、`bypass-spin4` 0.2218x、`locked-adaptive` 1.0159x（10/20） | 同上 `CONCLUSIONS.md` §1 / `lock_matrix/REPORT.md` |
-| handler 写回梯度 | W1/R ≈ 0.84–0.94、W3/R ≈ 0.86–0.89、SB/R ≈ 1.01–1.09 | 同上 `CONCLUSIONS.md` §2；明细见 `linux_causal_3b8361e_20260720/handler_gradient/REPORT.md` |
-| PMU | locked-r 294.8 cycles/event、IPC 0.475；bypass-r 166.5、IPC 0.750；locked-w3 RFO-HITM 0.411447/event | 同上 `CONCLUSIONS.md` §3；明细见 `linux_causal_3b8361e_20260720/pmu_c2c/REPORT.md` 与该目录 `c2c_*.stats.txt` / `c2c_*.report.txt` |
+| handler 写回梯度 | W1/R ≈ 0.84–0.94、W3/R ≈ 0.86–0.89、SB/R ≈ 1.01–1.09 | 同上 `CONCLUSIONS.md` §2；明细见 `../badbatch_evidence/linux_vultr_20260719_b1/results/linux_vultr_<ip>/linux_causal_3b8361e_20260720/handler_gradient/REPORT.md` |
+| PMU | locked-r 294.8 cycles/event、IPC 0.475；bypass-r 166.5、IPC 0.750；locked-w3 RFO-HITM 0.411447/event | 同上 `CONCLUSIONS.md` §3；明细见 `../badbatch_evidence/linux_vultr_20260719_b1/results/linux_vultr_<ip>/linux_causal_3b8361e_20260720/pmu_c2c/REPORT.md` 与该目录 `c2c_*.stats.txt` / `c2c_*.report.txt` |
 
 > handoff 自述实验上界约 **1.7–2.0x**（1P/1C 臂），**"not a promised product gain"**。
 > **不得**用 2.5917 × 1.4354 之类跨实验相乘预告"约 3.7x"。
@@ -337,7 +339,7 @@ handoff §12 记载早期 macOS 观察为**删锁反而吞吐塌陷**，与 Linu
 
 ### F.4 ring-slot 写回：先跑 padding × handler-write 交叉对照
 
-`head_to_head_results/linux_vultr_<ip>/linux_causal_3b8361e_20260720/CONCLUSIONS.md` §2 断言机制是 ownership transfer（依据：SB 侧缓冲无该损失、locked-w3 的 RFO-HITM 约为 locked-r 的 617 倍）；但 `docs/private/LINUX_VPS_PERFORMANCE_HANDOFF_20260720.md` §1.5 指出同一梯度**可能包含相邻槽 false sharing**，且 padding 对照**符号未知、尚未跑**。事件 32 B、两槽共享 64 B。
+`../badbatch_evidence/linux_vultr_20260719_b1/results/linux_vultr_<ip>/linux_causal_3b8361e_20260720/CONCLUSIONS.md` §2 断言机制是 ownership transfer（依据：SB 侧缓冲无该损失、locked-w3 的 RFO-HITM 约为 locked-r 的 617 倍）；但 `../badbatch_evidence/linux_vultr_20260719_b1/handoff/LINUX_VPS_PERFORMANCE_HANDOFF_20260720.md` §1.5 指出同一梯度**可能包含相邻槽 false sharing**，且 padding 对照**符号未知、尚未跑**。事件 32 B、两槽共享 64 B。
 
 > **该对照完成前，不得据此改动 pipeline 语义。** 采信 handoff 的谨慎版本。
 
@@ -365,7 +367,7 @@ handoff §12 记载早期 macOS 观察为**删锁反而吞吐塌陷**，与 Linu
 
 ## 依赖与并行规则
 
-- **批次 0**：**0.2 已闭合**（三个 archive tag 本地 + 远端）。**0.1 的副本完整性补验尚未完成**，它只阻塞两件事——**清理 ignored evidence**、以及 **F 批的结论性测量**；**不**阻塞 A–E 的任何工作。补验通过后，0 批无剩余阻塞。
+- **批次 0**：**0.1 / 0.2 均已闭合**。0.2 三个 `archive/*` tag 本地 + 远端验证完毕；0.1 原始证据已统一迁移至 `~/github/deadjoe/badbatch_evidence/` 并完成 SHA-256 校验。批次 0 不再阻塞任何后续工作。
 - **批次 A、C、D、E 相互独立**，可并行推进。
 - **批次 B 的代码工作**不依赖任何测量；其**验收**依赖 F.2。
 - **F.1 必须先于任何 pipeline pacing 产品改动。**
@@ -384,7 +386,7 @@ handoff §12 记载早期 macOS 观察为**删锁反而吞吐塌陷**，与 Linu
 
 | 项 | 决策 |
 |---|---|
-| 批次 0 备份方式 | **0.2 tag 归档：已完成并验证**（本地 refs + 远端 peeled refs + `fsck`）。**0.1 外部副本：owner reported，完整性待验证**——`head_to_head_results/` 与 `docs/private/` 维持 ignored、不纳入公开仓库 |
+| 批次 0 备份方式 | **0.1 / 0.2 均已完成并验证**。0.2 三个 `archive/*` tag 本地 + 远端 `fsck` 验证；0.1 原始证据已统一迁移至 `~/github/deadjoe/badbatch_evidence/`（`linux_vultr_20260719_b1/`、`linux_vultr_20260727_f2/`、`macos_mac16-1_20260726_f3/`），迁移前后 SHA-256 一致。仓库内仅保留 `docs/evidence_index.md` 索引，`.gitignore` 仍防止误提交 |
 | F.3 macOS A/B | **纳入** |
 | D 批变更策略 | **直接修改**，不设 deprecation / 迁移期（无外部使用者） |
 | B.3 capability 覆盖范围 | **方案 (a)**：同时覆盖 Builder 与 `open_single_producer_poller` |

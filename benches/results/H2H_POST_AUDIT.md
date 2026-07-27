@@ -6,7 +6,7 @@
 
 Captured at commit `fa04ba6` after the P0–P2 audit rounds and the P3 hot-path
 poison fix. Full raw artifacts (gitignored):  
-`head_to_head_results/20260719_010308_51891/`.
+`../badbatch_evidence/linux_vultr_20260719_b1/results/20260719_010308_51891/`.
 
 This file is the **checked-in** summary so the run survives without the local
 results directory.

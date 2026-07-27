@@ -61,7 +61,7 @@ bash scripts/run_head_to_head.sh --scenario pipeline --mode full --forks 20 \
   --seed 20260719 --cpu-list 2,3,4,5 --round-diagnostics
 ```
 
-Outputs go to `head_to_head_results/<timestamp>/`:
+Outputs go to `head_to_head_results/<timestamp>/` as a transient workspace. Historical evidence is archived in `../badbatch_evidence/`; after a run is accepted, move it there and update `docs/evidence_index.md`.
 
 | File | Content |
 |------|---------|
