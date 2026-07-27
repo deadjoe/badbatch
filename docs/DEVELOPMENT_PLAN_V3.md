@@ -386,7 +386,7 @@ handoff §12 记载早期 macOS 观察为**删锁反而吞吐塌陷**，与 Linu
 
 | 项 | 决策 |
 |---|---|
-| 批次 0 备份方式 | **0.1 / 0.2 均已完成并验证**。0.2 三个 `archive/*` tag 本地 + 远端 `fsck` 验证；0.1 原始证据已统一迁移至 `~/github/deadjoe/badbatch_evidence/`（`linux_vultr_20260719_b1/`、`linux_vultr_20260727_f2/`、`macos_mac16-1_20260726_f3/`），迁移前后 SHA-256 一致。仓库内仅保留 `docs/evidence_index.md` 索引，`.gitignore` 仍防止误提交 |
+| 批次 0 备份方式 | **0.1 / 0.2 均已完成并验证**。0.2 三个 `archive/*` tag 本地 + 远端 `fsck` 验证；0.1 原始证据已统一迁移至 `~/github/deadjoe/badbatch_evidence/`（`linux_vultr_20260719_b1/`、`linux_vultr_20260727_f2/`、`macos_mac16-11_20260726_f3/`），迁移前后 SHA-256 一致。仓库内仅保留 `docs/evidence_index.md` 索引，`.gitignore` 仍防止误提交 |
 | F.3 macOS A/B | **纳入** |
 | D 批变更策略 | **直接修改**，不设 deprecation / 迁移期（无外部使用者） |
 | B.3 capability 覆盖范围 | **方案 (a)**：同时覆盖 Builder 与 `open_single_producer_poller` |

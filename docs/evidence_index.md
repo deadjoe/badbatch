@@ -16,7 +16,7 @@
 ├── linux_vultr_20260727_f2/          # F.2 三臂（Linux VPS）
 │   ├── results/
 │   └── binaries/
-└── macos_mac16-1_20260726_f3/        # F.3（Mac mini M4 Pro）
+└── macos_mac16-11_20260726_f3/        # F.3（Mac mini M4 Pro）
     ├── results/
     ├── arms/
     └── build/
@@ -35,7 +35,7 @@
 | `badbatch/head_to_head_results/post_align_20260719_191520/...` | `../badbatch_evidence/linux_vultr_20260719_b1/results/post_align_20260719_191520/...` |
 | `badbatch/docs/private/LINUX_VPS_PERFORMANCE_HANDOFF_20260720.md` | `../badbatch_evidence/linux_vultr_20260719_b1/handoff/LINUX_VPS_PERFORMANCE_HANDOFF_20260720.md` |
 | 原 `badbatch_f2_results/` / `badbatch_f2_binaries/` | `../badbatch_evidence/linux_vultr_20260727_f2/results/` / `binaries/` |
-| 原 `badbatch_f3_results/` 等 | `../badbatch_evidence/macos_mac16-1_20260726_f3/results/` 等 |
+| 原 `badbatch_f3_results/` 等 | `../badbatch_evidence/macos_mac16-11_20260726_f3/results/` 等 |
 
 ## 审计与复现
 
@@ -43,7 +43,7 @@
 2. **代码复现**：
    - 历史 Linux 基线实验使用 `scripts/run_head_to_head.sh`，对应源码见 `archive/*` tag（`archive/claim-lock-bypass`、`archive/causal-matrix`、`archive/linux-baseline`）。
    - F.2 三臂复现依赖 `linux_vultr_20260727_f2/binaries/` 中的精确二进制。
-   - F.3 复现依赖 `macos_mac16-1_20260726_f3/build/` 与 `arms/` 中的精确二进制/源码副本。
+   - F.3 复现依赖 `macos_mac16-11_20260726_f3/build/` 与 `arms/` 中的精确二进制/源码副本。
 3. **新鲜 clone 不包含证据**：`head_to_head_results/` 与 `docs/private/` 仍在 `.gitignore` 中；如需审计，请从外部证据树获取。
 
 ## 注意事项
