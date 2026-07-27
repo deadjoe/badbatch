@@ -107,8 +107,10 @@ name = "pipeline_breakdown"
 path = "src/bin/pipeline_breakdown.rs"
 required-features = ["bench-tools"]
 
-# Benchmark configurations. These targets exercise the classic Disruptor DSL,
+# Benchmark configurations. Most targets exercise the classic Disruptor DSL,
 # so Cargo must skip them when validating the core-only feature surface.
+# `worker_pool` uses the core Builder path (`also_partition_with`) and is
+# therefore built even with `--no-default-features`.
 [[bench]]
 name = "single_producer_single_consumer"
 harness = false
@@ -143,6 +145,10 @@ required-features = ["lmax-dsl"]
 name = "comprehensive_benchmarks"
 harness = false
 required-features = ["lmax-dsl"]
+
+[[bench]]
+name = "worker_pool"
+harness = false
 
 # Compile-fail UI tests for soundness surface (clone / mode gates).
 [[test]]
