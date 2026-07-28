@@ -27,6 +27,7 @@ Prefer same-machine, same-environment, same-revision-family comparisons.
 | Path | Role |
 |------|------|
 | `benches/*.rs` | Criterion benchmarks and custom latency stats |
+| `src/bin/h2h_tail_latency.rs` | Standalone open-loop tail-latency driver |
 | `scripts/run_benchmarks.sh` | Suite runner (timeouts, logs, summaries) |
 | `scripts/result_formatter.sh` | Parses Criterion / latency logs into summaries |
 | `benchmark_logs/` | Per-suite stdout/stderr from the runner |
@@ -69,6 +70,33 @@ cargo bench --bench throughput_comparison
 cargo bench --bench buffer_size_scaling
 cargo bench --bench worker_pool
 ```
+
+### Open-loop tail latency (non-Criterion)
+
+`h2h_tail_latency` drives a fixed producer schedule and measures each event from
+its planned send time through handler completion. Raw samples are mandatory so
+tail claims remain independently auditable. The producer never waits for
+consumer completion between publications; if bounded-ring backpressure delays a
+publish, the original planned timestamp remains in force:
+
+```bash
+cargo run --release --features bench-tools --bin h2h_tail_latency -- \
+  --rate 100000 \
+  --events-total 1000000 \
+  --warmup-events 100000 \
+  --samples-output target/tail-samples.csv \
+  --output target/tail-summary.json
+```
+
+Without `--rate` or `--max-rate`, the driver first calibrates throughput and then
+runs the configured load percentages (defaults: 50%, 70%, 90%). With multiple
+loads, the percentage is appended to each raw-sample filename.
+
+Use `--inject-sleep-ms 50` as the coordinated-omission counterfactual: the run is
+invalid unless the injected pause is visible in both p99.9 and max. A run also
+exits non-zero when achieved producer rate is below 95% of target. These are
+harness-validity checks, not portable performance conclusions; formal results
+still require controlled hosts, CPU placement, and repeated runs.
 
 ### Other runner modes
 
