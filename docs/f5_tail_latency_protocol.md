@@ -285,6 +285,13 @@ and reclamation regimes. It is not, by itself, a measurement of GC: it also
 contains Java allocation barriers/TLAB/JIT effects and Rust allocator/free
 costs.
 
+The allocation-free and allocating handlers are distinct monomorphized code
+paths. Their B-minus-A difference may therefore also contain machine-code
+layout and inlining effects. That component is not separately identifiable and
+does not cancel merely because the report uses a cross-language
+difference-in-differences. Allocation or reclamation attribution remains
+subject to the boundaries below.
+
 The following are prohibited:
 
 - extrapolation beyond measured rates;
