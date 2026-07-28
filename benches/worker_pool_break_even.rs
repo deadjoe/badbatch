@@ -172,18 +172,117 @@ fn wait_for_counters(
     }
 }
 
+/// Measures the single-worker per-event total time for a tier.
+///
+/// This is used as a sanity check on the isolated self-calibration: the
+/// in-situ cost (handler + Disruptor overhead) must be at least the handler
+/// cost. Low-cost tiers can fail this invariant because short loops behave
+/// differently in isolation than inside the Disruptor path.
+fn measure_one_worker_total_ns(workload_iterations: u64, events_per_iter: i64) -> f64 {
+    let counter = Arc::new(CachePadded::new(AtomicI64::new(0)));
+    let factory = || WorkEvent::default();
+    let wait_strategy = BusySpinWaitStrategy::new();
+
+    let builder = build_single_producer(BUFFER_SIZE, factory, wait_strategy)
+        .handle_events_with(make_worker_handler(workload_iterations, &counter));
+
+    let mut disruptor = builder.build();
+
+    let mut samples = Vec::with_capacity(3);
+    for _ in 0..3 {
+        let start_sum = counter.load(Ordering::Relaxed);
+        let target = start_sum + events_per_iter;
+
+        let start = Instant::now();
+        for i in 0..events_per_iter {
+            disruptor
+                .publish(|event| {
+                    event.value = i;
+                })
+                .unwrap_or_else(|e| panic!("Failed to publish event {i}: {e:?}"));
+        }
+
+        let deadline = Instant::now() + ITERATION_TIMEOUT;
+        if !wait_for_counters(&[counter.clone()], target, deadline) {
+            let actual = counter.load(Ordering::Relaxed);
+            panic!("Timeout waiting for {events_per_iter} events (target {target}, got {actual})");
+        }
+        samples.push(start.elapsed().as_nanos() as f64 / events_per_iter as f64);
+    }
+
+    let _ = disruptor.shutdown();
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    samples[samples.len() / 2]
+}
+
 fn worker_pool_benchmark(c: &mut Criterion) {
+    // First pass: calibrate each tier in isolation and measure its single-worker
+    // in-situ total time. From the high-cost tiers (where isolation and in-situ
+    // agree) we estimate the fixed Disruptor overhead, then derive an in-situ
+    // handler cost for every tier. This catches low-cost tiers where isolated
+    // calibration does not transfer.
+    let mut validated = Vec::with_capacity(TIERS.len());
     for &(tier_label, workload_iterations, events_per_iter) in TIERS {
         let (cal_median, cal_min, cal_max) = self_calibrate(workload_iterations);
+        let total_ns = measure_one_worker_total_ns(workload_iterations, events_per_iter);
+        validated.push((
+            tier_label,
+            workload_iterations,
+            events_per_iter,
+            cal_median,
+            cal_min,
+            cal_max,
+            total_ns,
+        ));
+    }
+
+    let mut overheads: Vec<f64> = validated
+        .iter()
+        .filter(|(_, _, _, cal, _, _, total)| *cal >= 180.0 && *total > *cal)
+        .map(|(_, _, _, cal, _, _, total)| total - cal)
+        .collect();
+    overheads.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let overhead = if overheads.is_empty() {
+        0.0
+    } else {
+        overheads[overheads.len() / 2]
+    };
+
+    for (
+        tier_label,
+        workload_iterations,
+        events_per_iter,
+        cal_median,
+        cal_min,
+        cal_max,
+        total_ns,
+    ) in validated
+    {
+        let derived_ns = total_ns - overhead;
         eprintln!(
-            "[worker_pool_break_even] self-calibration: tier={} iter={} median={:.2}ns min={:.2}ns max={:.2}ns range={:.2}ns",
+            "[worker_pool_break_even] self-calibration: tier={} iter={} median={:.2}ns min={:.2}ns max={:.2}ns range={:.2}ns total_1w={:.2}ns derived={:.2}ns",
             tier_label,
             workload_iterations,
             cal_median,
             cal_min,
             cal_max,
-            cal_max - cal_min
+            cal_max - cal_min,
+            total_ns,
+            derived_ns
         );
+
+        if derived_ns < 0.0 {
+            panic!(
+                "Tier {} has a negative derived handler cost ({:.2} ns); measurement is inconsistent",
+                tier_label, derived_ns
+            );
+        }
+        if derived_ns < cal_median * 0.7 {
+            eprintln!(
+                "[worker_pool_break_even] WARNING: tier={} self-calibration ({:.2} ns) exceeds derived in-situ cost ({:.2} ns); the reported handler cost is unreliable",
+                tier_label, cal_median, derived_ns
+            );
+        }
 
         let mut group = c.benchmark_group(format!("wp_break_even/{tier_label}"));
         group.throughput(Throughput::Elements(events_per_iter as u64));

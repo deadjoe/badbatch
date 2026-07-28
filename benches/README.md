@@ -229,28 +229,32 @@ Use this suite to decide whether `also_partition_with` is appropriate for a give
 
 All numbers come from one `cargo bench --bench worker_pool_break_even` run; the different worker counts and handler costs are runtime parameters, so the comparison stays inside the same binary and avoids the cross-build layout confounds that affect A/B tests on this crate.
 
-| handler cost (ns/event) | wp 1 (Melem/s) | wp 2 speedup | wp 4 speedup | wp 8 speedup |
-|---:|---:|---:|---:|---:|
-| 1.90 (trivial) | 59.69 | 0.17 | 0.11 | 0.05 |
-| 30.22 | 46.16 | 0.21 | 0.13 | 0.07 |
-| 63.65 | 23.21 | 0.39 | 0.27 | 0.14 |
-| 196.75 | 4.86 | 1.32 | 1.57 | 0.80 |
-| 420.91 | 2.33 | 1.66 | 2.93 | 1.64 |
-| 851.42 | 1.16 | 1.83 | 3.56 | 5.87 |
-| 11,150.07 | 0.09 | 1.96 | 3.87 | 7.60 |
+The handler-cost column uses **derived in-situ cost**: the single-worker (1w) per-event total time minus an ~8.5 ns overhead estimated from the high-cost tiers, where isolated self-calibration and in-situ measurement agree. The low-cost tiers (trivial / 050ns / 100ns) fall in a short-loop region where isolated self-calibration does not transfer reliably to the Disruptor path, so their derived costs are the authoritative values for this table.
+
+| derived handler cost (ns/event) | wp 1 (Melem/s) | wp 2 speedup | wp 4 speedup | wp 8 speedup | fan-out 2 (M inv/s) | fan-out 4 (M inv/s) | fan-out 8 (M inv/s) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 8.2 (trivial) | 59.69 | 0.17 | 0.11 | 0.05 | 78.1 | 106.1 | 133.6 |
+| 13.2 (050ns) | 46.16 | 0.21 | 0.13 | 0.07 | 98.5 | 161.8 | 273.7 |
+| 34.6 (100ns) | 23.21 | 0.39 | 0.27 | 0.14 | 49.0 | 94.5 | 178.8 |
+| 197.2 (200ns) | 4.86 | 1.32 | 1.57 | 0.80 | 9.5 | 18.7 | 36.5 |
+| 420.7 (400ns) | 2.33 | 1.66 | 2.93 | 1.64 | 4.7 | 9.2 | 17.9 |
+| 851.1 (800ns) | 1.16 | 1.83 | 3.56 | 5.87 | 2.3 | 4.6 | 8.9 |
+| 11,054.5 (010us) | 0.09 | 1.96 | 3.87 | 7.60 | 0.18 | 0.35 | 0.68 |
 
 Interpolated crossing where WorkerPool N becomes faster than a single worker:
 
-- **2 workers:** ~151 ns/event
-- **4 workers:** ~139 ns/event
+- **2 workers:** ~140 ns/event
+- **4 workers:** ~125 ns/event
+
+Given the wide spacing between low-cost tiers and the approximate nature of the overhead subtraction, both points are best summarized as **"on the order of 100–150 ns/event"** on this host.
 
 Practical guidance:
 
 - If your isolated handler cost is **below ~150 ns/event**, `also_partition_with` is a net loss on this machine. Prefer a single consumer or `fan_out_events_with`.
 - If your handler cost is **above ~150 ns/event**, WorkerPool starts to win; at ~200 ns/event 2 workers already deliver a 1.3× speedup and 4 workers deliver ~1.6×.
-- The 8-worker speedup only becomes clean at high handler costs (~800 ns+). On this host it is **not** a reliable expansion point because 8 busy-spin workers + 1 producer approach the 10 P-core limit and may be scheduled onto E-cores.
+- The 8-worker speedup is a strong function of handler cost: it is near zero below ~200 ns/event and only approaches linear scaling at high costs (~800 ns+). On this host it is **not** a reliable expansion point because 8 busy-spin workers + 1 producer approach the 10 P-core limit and may be scheduled onto E-cores.
 
-The fan-out control shows that the collapse at low handler costs is not a general multi-threading overhead: fan-out with the same thread counts maintains much higher aggregate handler-invocation rates. The bottleneck is the shared `work_sequence` CAS claim that WorkerPool uses to partition events, which dominates when the per-event handler work is small.
+The fan-out control confirms that the collapse at low handler costs is not a general multi-threading overhead. Fan-out with the same thread counts maintains much higher aggregate handler-invocation rates (the fan-out columns above); the bottleneck is the shared `work_sequence` CAS claim that WorkerPool uses to partition events, which dominates when the per-event handler work is small.
 
 ## Interpreting output
 
