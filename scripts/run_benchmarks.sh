@@ -227,6 +227,14 @@ run_worker_pool() {
     run_benchmark_safe "worker_pool" "WorkerPool scheme A throughput"
 }
 
+# Function to run WorkerPool break-even benchmarks
+run_worker_pool_break_even() {
+    print_status "Running WorkerPool break-even benchmarks..."
+    print_status "This finds the handler-cost inflection point for WorkerPool scheme A."
+    
+    run_benchmark_safe "worker_pool_break_even" "WorkerPool scheme A break-even analysis"
+}
+
 
 # Function to run all benchmarks
 run_all() {
@@ -257,11 +265,12 @@ run_all() {
             "throughput") echo "throughput_comparison" ;;
             "scaling") echo "buffer_size_scaling" ;;
             "worker_pool") echo "worker_pool" ;;
+            "worker_pool_break_even") echo "worker_pool_break_even" ;;
             *) echo "$1" ;;
         esac
     }
     
-    for benchmark in quick spsc mpsc pipeline latency throughput scaling worker_pool; do
+    for benchmark in quick spsc mpsc pipeline latency throughput scaling worker_pool worker_pool_break_even; do
         echo ""
         print_status "=== Running $benchmark benchmark ==="
         if run_$benchmark; then
@@ -364,7 +373,7 @@ compile_all() {
     local benchmarks=("comprehensive_benchmarks" "single_producer_single_consumer" 
                      "multi_producer_single_consumer" "pipeline_processing" 
                      "latency_comparison" "throughput_comparison" 
-                     "buffer_size_scaling")
+                     "buffer_size_scaling" "worker_pool" "worker_pool_break_even")
     
     local failed=0
     for benchmark in "${benchmarks[@]}"; do
@@ -401,7 +410,8 @@ show_help() {
     echo "  latency    Run Latency Comparison benchmarks"
     echo "  throughput Run Throughput Comparison benchmarks"
     echo "  scaling    Run Buffer Size Scaling benchmarks"
-    echo "  worker_pool Run WorkerPool (same-stage parallel consumers) benchmarks"
+    echo "  worker_pool            Run WorkerPool (same-stage parallel consumers) benchmarks"
+    echo "  worker_pool_break_even Run WorkerPool break-even analysis"
     echo "  all        Run ALL benchmark suites (30-60 minutes)"
     echo "  report     Generate HTML benchmark reports"
     echo "  regression Run performance regression test"
@@ -473,6 +483,10 @@ main() {
         worker_pool)
             check_dependencies
             run_worker_pool
+            ;;
+        worker_pool_break_even)
+            check_dependencies
+            run_worker_pool_break_even
             ;;
         all)
             check_dependencies
