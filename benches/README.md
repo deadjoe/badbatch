@@ -92,11 +92,40 @@ Without `--rate` or `--max-rate`, the driver first calibrates throughput and the
 runs the configured load percentages (defaults: 50%, 70%, 90%). With multiple
 loads, the percentage is appended to each raw-sample filename.
 
+The cross-language F.5 protocol is frozen in
+[`docs/f5_tail_latency_protocol.md`](../docs/f5_tail_latency_protocol.md).
+Formal orchestration calibrates each language's allocation-free, allocating-W,
+and allocating-4W arm independently, takes one global common maximum, and then
+passes that value with each arm's own maximum:
+
+```bash
+# Phase A: one artifact per arm and language
+target/release/h2h_tail_latency --calibrate-only --handler-mode allocation-free \
+  --output target/rust-a-calibration.json
+
+# Phase B: identical absolute target, with arm-specific utilization metadata
+target/release/h2h_tail_latency --handler-mode allocating --retention-window 65536 \
+  --rate 100000 --max-rate 200000 --own-max 300000 \
+  --events-total 1000000 --warmup-events 100000 \
+  --samples-output target/rust-bw.csv --output target/rust-bw.json
+```
+
+Allocation-free mode keeps the original measurement hot path and reports zero
+workload allocations. Allocating mode requires the run to fill its entire
+retention window and validates exactly one 48-byte requested allocation per
+measured event. The logical payload remains four `u64` fields (32 bytes); the
+remaining bytes are explicit cross-runtime matching padding, not application
+payload.
+
 Use `--inject-sleep-ms 50` as the coordinated-omission counterfactual: the run is
-invalid unless the injected pause is visible in both p99.9 and max. A run also
+invalid unless the injected backlog is in the protocol's allowed range, the
+recorded post-pause schedule leaves the computed drain allowance, and the pause
+is visible in both p99.9 and max. The default injection point is 25% into the
+measured region and can be changed with `--inject-at-measured-pct`. A run also
 exits non-zero when achieved producer rate is below 95% of target. These are
-harness-validity checks, not portable performance conclusions; formal results
-still require controlled hosts, CPU placement, and repeated runs.
+harness-validity checks, not portable performance conclusions; the full
+control-vs-pause median/rate signature is checked across artifacts, and formal
+results still require controlled hosts, CPU placement, and repeated runs.
 
 The binary embeds its Git revision and dirty state at build time. That
 provenance is independent of the directory used to launch the binary; an
