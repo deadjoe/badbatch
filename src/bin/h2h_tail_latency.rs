@@ -37,7 +37,6 @@ use core_affinity::CoreId;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -953,32 +952,47 @@ fn validate_injected_pause(sleep: Duration, target_rate: u64, stats: &LatencySta
 
 // --- JSON ---------------------------------------------------------------------------
 
-fn git_rev() -> String {
-    Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "unknown".into())
+#[derive(Debug, Clone, Copy)]
+struct BuildProvenance {
+    git_rev: &'static str,
+    dirty: Option<bool>,
 }
 
-fn git_dirty() -> bool {
-    Command::new("git")
-        .args(["status", "--porcelain"])
-        .output()
-        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+impl BuildProvenance {
+    fn current() -> Self {
+        Self {
+            git_rev: option_env!("BADBATCH_BUILD_GIT_REV").unwrap_or("unknown"),
+            dirty: match option_env!("BADBATCH_BUILD_GIT_DIRTY") {
+                Some("false") => Some(false),
+                Some("true") => Some(true),
+                _ => None,
+            },
+        }
+    }
+
+    fn is_valid(self) -> bool {
+        self.git_rev.len() == 40
+            && self.git_rev.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && self.dirty == Some(false)
+    }
+
+    fn dirty_json(self) -> &'static str {
+        match self.dirty {
+            Some(false) => "false",
+            Some(true) => "true",
+            None => "null",
+        }
+    }
 }
 
-fn write_result(cfg: &Config, max_rate: f64, loads: &[LoadResult]) -> String {
+fn write_result(
+    cfg: &Config,
+    max_rate: f64,
+    loads: &[LoadResult],
+    provenance: BuildProvenance,
+) -> String {
     use std::fmt::Write as _;
 
-    let local_rev = git_rev();
     let mut out = String::new();
     out.push_str("{\n");
     writeln!(out, "  \"impl\": \"badbatch-builder-tail-latency\",").unwrap();
@@ -1005,8 +1019,10 @@ fn write_result(cfg: &Config, max_rate: f64, loads: &[LoadResult]) -> String {
         cfg.inject_sleep.map_or(0, |d| d.as_millis() as u64)
     )
     .unwrap();
-    writeln!(out, "  \"git_rev\": \"{local_rev}\",").unwrap();
-    writeln!(out, "  \"dirty\": {},", git_dirty()).unwrap();
+    out.push_str("  \"provenance_source\": \"build_time\",\n");
+    writeln!(out, "  \"provenance_valid\": {},", provenance.is_valid()).unwrap();
+    writeln!(out, "  \"git_rev\": \"{}\",", provenance.git_rev).unwrap();
+    writeln!(out, "  \"dirty\": {},", provenance.dirty_json()).unwrap();
     out.push_str("  \"cpu_affinity\": {\n");
     out.push_str("    \"requested_cpu_list\": [");
     for (index, cpu) in cfg.cpu_list.iter().enumerate() {
@@ -1150,6 +1166,17 @@ fn main() {
         }
     };
 
+    let provenance = BuildProvenance::current();
+    let provenance_valid = provenance.is_valid();
+    if !provenance_valid {
+        eprintln!(
+            "warning: invalid build provenance (git_rev={}, dirty={}); \
+             results will be hard-invalidated",
+            provenance.git_rev,
+            provenance.dirty_json()
+        );
+    }
+
     let max_rate = cfg
         .max_rate
         .or(cfg.rate)
@@ -1175,11 +1202,12 @@ fn main() {
     }
 
     let mut loads = Vec::with_capacity(targets.len());
-    let mut any_invalid = false;
+    let mut any_invalid = !provenance_valid;
     for (pct, target_rate) in targets {
         match run_load(&cfg, target_rate) {
             Ok(mut load) => {
                 load.load_pct = pct;
+                load.valid_run &= provenance_valid;
                 if !load.valid_run {
                     any_invalid = true;
                 }
@@ -1201,7 +1229,7 @@ fn main() {
         }
     }
 
-    let json = write_result(&cfg, max_rate, &loads);
+    let json = write_result(&cfg, max_rate, &loads, provenance);
 
     if let Some(path) = &cfg.output {
         if let Err(error) = ensure_parent(path).and_then(|()| {
@@ -1216,7 +1244,7 @@ fn main() {
 
     if any_invalid {
         eprintln!(
-            "invalid run: a load failed the actual/target rate gate or injected-pause validation"
+            "invalid run: build provenance, actual/target rate, or injected-pause validation failed"
         );
         std::process::exit(3);
     }
@@ -1318,6 +1346,30 @@ mod tests {
     fn actual_rate_gate_is_inclusive_at_95_percent() {
         assert!(rate_is_valid(95_000.0, 100_000));
         assert!(!rate_is_valid(94_999.0, 100_000));
+    }
+
+    #[test]
+    fn build_provenance_requires_a_clean_full_git_revision() {
+        let clean = BuildProvenance {
+            git_rev: "0123456789abcdef0123456789abcdef01234567",
+            dirty: Some(false),
+        };
+        assert!(clean.is_valid());
+        assert!(!BuildProvenance {
+            dirty: Some(true),
+            ..clean
+        }
+        .is_valid());
+        assert!(!BuildProvenance {
+            git_rev: "unknown",
+            ..clean
+        }
+        .is_valid());
+        assert!(!BuildProvenance {
+            dirty: None,
+            ..clean
+        }
+        .is_valid());
     }
 
     #[test]

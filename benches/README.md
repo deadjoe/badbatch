@@ -98,6 +98,10 @@ exits non-zero when achieved producer rate is below 95% of target. These are
 harness-validity checks, not portable performance conclusions; formal results
 still require controlled hosts, CPU placement, and repeated runs.
 
+The binary embeds its Git revision and dirty state at build time. That
+provenance is independent of the directory used to launch the binary; an
+unknown revision or dirty build hard-invalidates every load and exits non-zero.
+
 ### Other runner modes
 
 ```bash
