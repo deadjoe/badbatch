@@ -158,7 +158,8 @@ else
 fi
 while IFS= read -r -d '' java_source; do
   JAVA_SOURCES+=("$java_source")
-done < <(find tools/head_to_head/java -name '*.java' -print0)
+done < <(find tools/head_to_head/java -name '*.java' \
+  ! -name 'TailLatency.java' -print0)
 javac --release 17 -d "$JAVA_CP" "${JAVA_SOURCES[@]}"
 
 BADBATCH_REV="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
