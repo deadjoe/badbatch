@@ -515,6 +515,8 @@ def calibration_command(
     rust_bin: Path,
     java: Path,
     classes: Path,
+    jfr_path: Path | None = None,
+    gc_log_path: Path | None = None,
 ) -> list[str]:
     if language == "rust":
         command = [
@@ -524,7 +526,14 @@ def calibration_command(
             *rust_arguments(args),
         ]
     else:
-        command = java_command(java, classes, args, arm)
+        command = java_command(
+            java,
+            classes,
+            args,
+            arm,
+            jfr_path=jfr_path,
+            gc_log_path=gc_log_path,
+        )
     command.extend(
         [
             "--calibration-events",
@@ -534,6 +543,11 @@ def calibration_command(
             "--calibrate-only",
         ]
     )
+    if language == "java":
+        if jfr_path is not None:
+            command.extend(["--jfr-file", str(jfr_path)])
+        if gc_log_path is not None:
+            command.extend(["--gc-log", str(gc_log_path)])
     return command
 
 
@@ -701,6 +715,16 @@ def main() -> None:
         for language in ("rust", "java"):
             key = f"{language}-{arm.name}"
             output = results / f"calibration-{key}.json"
+            calibration_jfr = (
+                results / f"calibration-{key}.jfr"
+                if language == "java"
+                else None
+            )
+            calibration_gc_log = (
+                results / f"calibration-{key}-gc.log"
+                if language == "java"
+                else None
+            )
             command = calibration_command(
                 language,
                 arm,
@@ -708,6 +732,8 @@ def main() -> None:
                 rust_bin=rust_bin,
                 java=java,
                 classes=classes,
+                jfr_path=calibration_jfr,
+                gc_log_path=calibration_gc_log,
             )
             command.extend(["--output", str(output)])
             run(

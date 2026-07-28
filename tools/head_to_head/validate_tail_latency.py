@@ -186,6 +186,19 @@ def main() -> None:
             )
             check(artifact.get("common_max") is None, f"{path.name}: common_max set")
             check(artifact.get("loads") == [], f"{path.name}: calibration has loads")
+            if language == "java":
+                expected_jfr = root / f"calibration-{key}.jfr"
+                expected_gc = root / f"calibration-{key}-gc.log"
+                check(expected_jfr.is_file(), f"{path.name}: missing calibration JFR")
+                check(expected_gc.is_file(), f"{path.name}: missing calibration GC log")
+                check(
+                    artifact.get("jfr_file") == str(expected_jfr),
+                    f"{path.name}: calibration JFR metadata mismatch",
+                )
+                check(
+                    artifact.get("gc_log") == str(expected_gc),
+                    f"{path.name}: calibration GC metadata mismatch",
+                )
             own_max = math.floor(float(artifact["own_max"]))
             calibration_maxima[key] = own_max
             check(
