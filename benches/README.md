@@ -211,7 +211,7 @@ Includes Fast/Medium/Slow processing points, MemoryUsage (payload/allocation pro
 
 Single producer, `BusySpinWaitStrategy`, 1/2/4/8 workers. Each worker owns its own `CachePadded<AtomicI64>` counter; the producer waits for the per-iteration target. The 1-worker case is a negative control; ≥2 workers exercise the CAS-claim path in `consumer_engine.rs`.
 
-Use this suite to validate changes that touch the work-processor loop (e.g. `4460db6` C.3). The benchmark should show no measurable difference for 1 worker and a measurable difference when the `advertise_work_sequence_if_changed` conditional store is reverted.
+Use this suite to validate changes that touch the work-processor loop (e.g. `4460db6` C.3). The 1-worker arm is a negative control: because single-worker `current` advances every round, the conditional store is equivalent to an unconditional store, so it should show no measurable difference. **If 1 worker shows a measurable difference, the round is contaminated by cross-build artifact and the whole A/B should be discarded.** A measurable difference at ≥2 workers (with a clean 1-worker control) indicates the benchmark can see hot-path changes; it does not establish the direction of C.3's effect.
 
 > **Note:** that difference verifies sensitivity only. Its *direction* is not an established performance result — cross-build comparisons on this crate carry a demonstrated code-layout confound (see F.3), so any claim about C.3's real effect requires the F.2 paired methodology (interleaved pairs, fresh processes, bootstrap CI).
 
