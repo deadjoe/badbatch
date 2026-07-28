@@ -619,6 +619,30 @@ def measurement_command(
     return command
 
 
+def build_measurement_plan(
+    arms: list[Arm],
+) -> list[tuple[bool, Arm, str, str]]:
+    plan: list[tuple[bool, Arm, str, str]] = []
+    for injected in (False, True):
+        phase = "injected" if injected else "control"
+        for arm_index, arm in enumerate(arms):
+            languages = (
+                ("rust", "java")
+                if (arm_index + int(injected)) % 2 == 0
+                else ("java", "rust")
+            )
+            for language in languages:
+                plan.append(
+                    (
+                        injected,
+                        arm,
+                        language,
+                        f"{phase}-{language}-{arm.name}",
+                    )
+                )
+    return plan
+
+
 def main() -> None:
     args = parser().parse_args()
     measured = args.measured_events
@@ -769,47 +793,7 @@ def main() -> None:
         requested_ms=args.inject_sleep_ms,
     )
 
-    execution_order: list[str] = []
-    for injected in (False, True):
-        phase = "injected" if injected else "control"
-        for arm_index, arm in enumerate(arms):
-            languages = (
-                ("rust", "java")
-                if (arm_index + int(injected)) % 2 == 0
-                else ("java", "rust")
-            )
-            for language in languages:
-                key = f"{language}-{arm.name}"
-                label = f"{phase}-{key}"
-                output = results / f"{label}.json"
-                samples = results / f"{label}.csv"
-                jfr_path = (
-                    results / f"{label}.jfr" if language == "java" else None
-                )
-                gc_log_path = (
-                    results / f"{label}-gc.log" if language == "java" else None
-                )
-                command = measurement_command(
-                    language,
-                    arm,
-                    args,
-                    rust_bin=rust_bin,
-                    java=java,
-                    classes=classes,
-                    own_max=own_maxima[key],
-                    common_max=common_max,
-                    output=output,
-                    samples=samples,
-                    jfr_path=jfr_path,
-                    gc_log_path=gc_log_path,
-                    injected=injected,
-                )
-                run(
-                    command,
-                    cwd=root,
-                    log_path=results / f"{label}.log",
-                )
-                execution_order.append(label)
+    measurement_plan = build_measurement_plan(arms)
 
     manifest = {
         "schema_version": 1,
@@ -835,7 +819,7 @@ def main() -> None:
         "calibrations": calibrations,
         "common_max": common_max,
         "preflight": preflight,
-        "execution_order": execution_order,
+        "execution_order": [label for _, _, _, label in measurement_plan],
         "host": {
             "system": platform.system(),
             "release": platform.release(),
@@ -849,10 +833,43 @@ def main() -> None:
         "java_options": args.java_option,
         "rust_bin": str(rust_bin),
     }
+    # Freeze every post-calibration choice before the first measured command.
     (results / "run_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+    for injected, arm, language, label in measurement_plan:
+        key = f"{language}-{arm.name}"
+        output = results / f"{label}.json"
+        samples = results / f"{label}.csv"
+        jfr_path = (
+            results / f"{label}.jfr" if language == "java" else None
+        )
+        gc_log_path = (
+            results / f"{label}-gc.log" if language == "java" else None
+        )
+        command = measurement_command(
+            language,
+            arm,
+            args,
+            rust_bin=rust_bin,
+            java=java,
+            classes=classes,
+            own_max=own_maxima[key],
+            common_max=common_max,
+            output=output,
+            samples=samples,
+            jfr_path=jfr_path,
+            gc_log_path=gc_log_path,
+            injected=injected,
+        )
+        run(
+            command,
+            cwd=root,
+            log_path=results / f"{label}.log",
+        )
+
     run(
         [
             sys.executable,

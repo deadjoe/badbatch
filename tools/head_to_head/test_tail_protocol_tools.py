@@ -73,6 +73,32 @@ class TailProtocolToolsTest(unittest.TestCase):
             runner.frame_type_names({"values": {"stackTrace": None}}),
         )
 
+    def test_measurement_plan_is_complete_and_balanced_before_execution(self) -> None:
+        arms = [
+            runner.Arm("a", "allocation-free", None),
+            runner.Arm("bw", "allocating", 65_536),
+            runner.Arm("b4w", "allocating", 262_144),
+        ]
+        plan = runner.build_measurement_plan(arms)
+        self.assertEqual(
+            [
+                "control-rust-a",
+                "control-java-a",
+                "control-java-bw",
+                "control-rust-bw",
+                "control-rust-b4w",
+                "control-java-b4w",
+                "injected-java-a",
+                "injected-rust-a",
+                "injected-rust-bw",
+                "injected-java-bw",
+                "injected-java-b4w",
+                "injected-rust-b4w",
+            ],
+            [label for _, _, _, label in plan],
+        )
+        self.assertEqual([False] * 6 + [True] * 6, [item[0] for item in plan])
+
     def test_raw_validator_checks_schedule_and_complete_row_count(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "samples.csv"
