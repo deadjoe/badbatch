@@ -52,8 +52,9 @@ extras = []
 # Opt-in lock diagnostics: enables parking_lot's deadlock detector (extra
 # dependencies + background lock tracking). Never enable in production builds.
 deadlock-detection = ["parking_lot/deadlock_detection"]
-# Diagnostic / benchmark binaries (h2h_rust, baseline_metrics, *_breakdown).
-# ~4.3K lines that only benchmark scripts need; gated so library builds and
+# Diagnostic / benchmark binaries (h2h_rust, h2h_tail_latency, baseline_metrics,
+# *_breakdown).
+# ~5.6K lines that only benchmark tooling needs; gated so library builds and
 # `cargo build --bins` in CI/dev stay lean.
 bench-tools = []
 # Opt-in per-round H2H probes. Kept separate so canonical benchmark hot paths
@@ -105,6 +106,11 @@ required-features = ["bench-tools"]
 [[bin]]
 name = "pipeline_breakdown"
 path = "src/bin/pipeline_breakdown.rs"
+required-features = ["bench-tools"]
+
+[[bin]]
+name = "h2h_tail_latency"
+path = "src/bin/h2h_tail_latency.rs"
 required-features = ["bench-tools"]
 
 # Benchmark configurations. Most targets exercise the classic Disruptor DSL,

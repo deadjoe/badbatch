@@ -162,7 +162,7 @@ drop(batch); // commits the consumed prefix; `ack_all()` would skip untaken even
 | `lmax-dsl` | yes | Classic `Disruptor` DSL / `BatchEventProcessor`-oriented API (Java-compat surface) |
 | `extras` | yes | `ElegantConsumer` and related helpers (legacy; producer poisoning requires explicit sequencer wiring) |
 | `deadlock-detection` | no | parking_lot lock diagnostics — never in production builds |
-| `bench-tools` | no | Diagnostic/benchmark binaries (`h2h_rust`, `baseline_metrics`, `*_breakdown`) |
+| `bench-tools` | no | Diagnostic/benchmark binaries (`h2h_rust`, `h2h_tail_latency`, `baseline_metrics`, `*_breakdown`) |
 | `bench-round-diagnostics` | no | Probe-only per-round H2H batch/queue/backpressure counters; implies `bench-tools` |
 
 Core-only: `cargo test --lib --no-default-features`.
