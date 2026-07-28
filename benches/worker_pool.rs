@@ -51,19 +51,34 @@ fn make_handler(
     }
 }
 
+/// Polls the per-worker counters infrequently while spinning.
+///
+/// Reading `Instant::now()` and N remote cache lines every spin iteration adds
+/// a harmonic overhead that grows with the worker count and inflates the
+/// measured collapse. We check progress only every `POLL_INTERVAL` spins to
+/// keep the producer's interference negligible.
+const POLL_INTERVAL: usize = 64;
+
 fn wait_for_counters(
     counters: &[Arc<CachePadded<AtomicI64>>],
     target: i64,
     deadline: Instant,
 ) -> bool {
-    while Instant::now() < deadline {
-        let sum: i64 = counters.iter().map(|c| c.load(Ordering::Relaxed)).sum();
-        if sum >= target {
-            return true;
+    let mut spins: usize = 0;
+    loop {
+        if spins % POLL_INTERVAL == 0 {
+            let sum: i64 = counters.iter().map(|c| c.load(Ordering::Relaxed)).sum();
+            if sum >= target {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+        } else {
+            std::hint::spin_loop();
         }
-        std::hint::spin_loop();
+        spins = spins.wrapping_add(1);
     }
-    false
 }
 
 fn worker_pool_throughput(c: &mut Criterion) {
