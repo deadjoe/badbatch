@@ -759,9 +759,12 @@ Options:
 // --- handlers -----------------------------------------------------------------------
 
 struct CalibrationHandler<H> {
+    start: Arc<OnceLock<Instant>>,
     processed: Arc<AtomicU64>,
     ready: Arc<AtomicU64>,
+    warmup_events: u64,
     workload: H,
+    scratch: Vec<LatencySample>,
     cpu_affinity: Option<usize>,
     affinity_failed: Arc<AtomicBool>,
 }
@@ -769,12 +772,30 @@ struct CalibrationHandler<H> {
 impl<H: HandlerWorkload> EventHandler<LatencyEvent> for CalibrationHandler<H> {
     fn on_event(
         &mut self,
-        _event: &mut LatencyEvent,
+        event: &mut LatencyEvent,
         sequence: i64,
         end_of_batch: bool,
     ) -> DisruptorResult<()> {
         let sequence = u64::try_from(sequence).expect("calibration sequence must be non-negative");
-        self.workload.apply(sequence, false);
+        self.workload
+            .apply(sequence, sequence >= self.warmup_events);
+        let completion_ns = self
+            .start
+            .get()
+            .expect("calibration epoch must be initialized")
+            .elapsed()
+            .as_nanos()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let scratch_mask = u64::try_from(self.scratch.len() - 1).expect("buffer mask must fit u64");
+        let index =
+            usize::try_from(sequence & scratch_mask).expect("masked sequence must fit usize");
+        self.scratch[index] = LatencySample {
+            sequence,
+            planned_ns: event.planned_ns,
+            completion_ns,
+            latency_ns: completion_ns.saturating_sub(event.planned_ns),
+        };
         if end_of_batch {
             let completed = sequence.saturating_add(1);
             self.processed.store(completed, Ordering::Release);
@@ -791,6 +812,7 @@ impl<H: HandlerWorkload> EventHandler<LatencyEvent> for CalibrationHandler<H> {
 
     fn on_shutdown(&mut self) -> DisruptorResult<()> {
         std::hint::black_box(self.workload.stats().retained_checksum);
+        std::hint::black_box(&self.scratch);
         Ok(())
     }
 }
@@ -1005,13 +1027,26 @@ where
     W: badbatch::disruptor::WaitStrategy + Clone + 'static,
     H: HandlerWorkload,
 {
+    let start = Arc::new(OnceLock::new());
     let processed = Arc::new(AtomicU64::new(0));
     let ready = Arc::new(AtomicU64::new(0));
+    let calibration_warmup_events = cfg.calibration_warmup_events();
 
     let handler = CalibrationHandler {
+        start: Arc::clone(&start),
         processed: Arc::clone(&processed),
         ready: Arc::clone(&ready),
+        warmup_events: calibration_warmup_events,
         workload,
+        scratch: vec![
+            LatencySample {
+                sequence: 0,
+                planned_ns: 0,
+                completion_ns: 0,
+                latency_ns: 0,
+            };
+            cfg.buffer_size
+        ],
         cpu_affinity: cfg.cpu(1),
         affinity_failed: Arc::clone(&cfg.affinity_failed),
     };
@@ -1036,7 +1071,9 @@ where
         return Err("failed to pin calibration producer thread".into());
     }
 
-    let calibration_warmup_events = cfg.calibration_warmup_events();
+    start
+        .set(Instant::now())
+        .map_err(|_| "calibration epoch was already initialized".to_string())?;
     for sequence in 0..calibration_warmup_events {
         handle
             .publish(|event| {
