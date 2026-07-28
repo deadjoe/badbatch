@@ -151,6 +151,7 @@ def main() -> None:
     provenance_pairs: dict[str, set[tuple[str, str]]] = {
         language: set() for language in LANGUAGES
     }
+    java_runtime_identities: set[tuple[str, str, str, tuple[str, ...]]] = set()
 
     def record_provenance(
         artifact: dict[str, Any],
@@ -229,6 +230,18 @@ def main() -> None:
             bool(jvm.get("gc_names")) if isinstance(jvm, dict) else False,
             f"{label}: collector metadata missing",
         )
+        if isinstance(jvm, dict):
+            java_version = str(jvm.get("java_version", ""))
+            vm_name = str(jvm.get("vm_name", ""))
+            vm_version = str(jvm.get("vm_version", ""))
+            gc_names = tuple(str(value) for value in jvm.get("gc_names", []))
+            check(
+                bool(java_version and vm_name and vm_version),
+                f"{label}: JVM identity missing",
+            )
+            java_runtime_identities.add(
+                (java_version, vm_name, vm_version, gc_names)
+            )
 
     for language in LANGUAGES:
         check(
@@ -514,6 +527,10 @@ def main() -> None:
             len(provenance_pairs[language]) == 1,
             f"{language} calibration/measurement provenance is inconsistent",
         )
+    check(
+        len(java_runtime_identities) == 1,
+        "Java calibration/measurement runtime identity is inconsistent",
+    )
     if all(len(provenance_pairs[language]) == 1 for language in LANGUAGES):
         rust_harness = next(iter(provenance_pairs["rust"]))[0]
         java_harness = next(iter(provenance_pairs["java"]))[0]
