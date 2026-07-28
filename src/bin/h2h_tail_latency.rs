@@ -591,9 +591,9 @@ fn parse_args() -> Result<Config, String> {
             return Err("handler-mode=allocating requires retention-window > 0".into());
         }
         (HandlerMode::Allocating, Some(window))
-            if !calibrate_only && events_total < u64::try_from(window).unwrap_or(u64::MAX) =>
+            if !calibrate_only && !measured_window_covers_retention(recorded_samples, window) =>
         {
-            return Err("events-total must reach the full allocating retention-window".into());
+            return Err("measured events must reach the full allocating retention-window".into());
         }
         _ => {}
     }
@@ -673,6 +673,10 @@ fn parse_cpu_list(value: &str) -> Result<Vec<usize>, String> {
         return Err("cpu-list must contain unique CPU IDs".into());
     }
     Ok(cpus)
+}
+
+fn measured_window_covers_retention(recorded_samples: u64, retention_window: usize) -> bool {
+    u64::try_from(retention_window).is_ok_and(|window| recorded_samples >= window)
 }
 
 fn parse_percent_list(value: &str) -> Result<Vec<u64>, String> {
@@ -2288,6 +2292,12 @@ mod tests {
         workload.on_start();
         workload.apply(1, true);
         assert_eq!(workload.stats().counters, AllocationCounters::default());
+    }
+
+    #[test]
+    fn allocating_measurement_must_fill_the_retention_window() {
+        assert!(measured_window_covers_retention(262_144, 262_144));
+        assert!(!measured_window_covers_retention(100_000, 262_144));
     }
 
     #[test]
