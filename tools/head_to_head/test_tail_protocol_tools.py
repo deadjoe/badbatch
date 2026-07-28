@@ -114,6 +114,24 @@ class TailProtocolToolsTest(unittest.TestCase):
         self.assertLess(validator.relative_difference(48.0, 48.0), 0.05)
         self.assertGreater(validator.relative_difference(48.0, 40.0), 0.05)
 
+    def test_p50_equivalence_uses_relative_or_timer_floor_tolerance(self) -> None:
+        self.assertTrue(
+            validator.p50_equivalent(
+                108,
+                124,
+                relative_tolerance=0.05,
+                absolute_tolerance_ns=25,
+            )
+        )
+        self.assertFalse(
+            validator.p50_equivalent(
+                1_000,
+                1_100,
+                relative_tolerance=0.05,
+                absolute_tolerance_ns=25,
+            )
+        )
+
     def test_pause_is_predeclared_from_calibration_without_tail_results(self) -> None:
         selected = runner.select_inject_sleep_ms(
             common_max=30_000_000,
