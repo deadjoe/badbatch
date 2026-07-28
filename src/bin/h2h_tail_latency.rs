@@ -1031,6 +1031,13 @@ where
     let processed = Arc::new(AtomicU64::new(0));
     let ready = Arc::new(AtomicU64::new(0));
     let calibration_warmup_events = cfg.calibration_warmup_events();
+    let calibration_schedule_rate = u64::try_from(
+        u128::from(cfg.calibration_events)
+            .saturating_mul(1_000_000_000)
+            .div_ceil(cfg.calibration_duration.as_nanos()),
+    )
+    .unwrap_or(u64::MAX)
+    .max(1);
 
     let handler = CalibrationHandler {
         start: Arc::clone(&start),
@@ -1075,14 +1082,27 @@ where
         .set(Instant::now())
         .map_err(|_| "calibration epoch was already initialized".to_string())?;
     for sequence in 0..calibration_warmup_events {
+        let planned_ns = scheduled_ns(sequence, calibration_schedule_rate)?;
+        std::hint::black_box(
+            start
+                .get()
+                .expect("calibration epoch initialized")
+                .elapsed(),
+        );
         handle
             .publish(|event| {
                 event.sequence = i64::try_from(sequence).expect("calibration warmup must fit i64");
-                event.planned_ns = 0;
+                event.planned_ns = planned_ns;
             })
             .map_err(|error| {
                 format!("calibration warmup publish failed at sequence {sequence}: {error}")
             })?;
+        std::hint::black_box(
+            start
+                .get()
+                .expect("calibration epoch initialized")
+                .elapsed(),
+        );
     }
     if !wait_count(&processed, calibration_warmup_events, cfg.timeout) {
         handle.shutdown();
@@ -1096,15 +1116,17 @@ where
     let mut published = 0u64;
     while published < cfg.calibration_events && measure_start.elapsed() < cfg.calibration_duration {
         let sequence = calibration_warmup_events + published;
+        let planned_ns = scheduled_ns(sequence, calibration_schedule_rate)?;
         handle
             .publish(|event| {
                 event.sequence =
                     i64::try_from(sequence).expect("calibration sequence must fit i64");
-                event.planned_ns = 0;
+                event.planned_ns = planned_ns;
             })
             .map_err(|error| {
                 format!("calibration publish failed at sequence {sequence}: {error}")
             })?;
+        std::hint::black_box(measure_start.elapsed());
         published += 1;
     }
 

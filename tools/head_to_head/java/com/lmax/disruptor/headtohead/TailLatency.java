@@ -175,7 +175,19 @@ public final class TailLatency
         affinity.verify("calibration consumer");
 
         final long warmupEvents = config.calibrationWarmupEvents();
-        publishRange(ring, 0L, warmupEvents);
+        final long calibrationScheduleRate = Math.min(
+                MAX_SCHEDULABLE_RATE,
+                ceilMultiplyDivide(
+                        config.calibrationEvents,
+                        NANOS_PER_SECOND,
+                        config.calibrationDuration.toNanos()));
+        final long calibrationEpoch = System.nanoTime();
+        long timingChecksum = publishCalibrationRange(
+                ring,
+                0L,
+                warmupEvents,
+                calibrationScheduleRate,
+                calibrationEpoch);
         waitForProcessed(handler.processed, warmupEvents, "calibration warmup completion");
 
         final long started = System.nanoTime();
@@ -187,8 +199,9 @@ public final class TailLatency
             final long claimed = ring.next();
             final TailEvent event = ring.get(claimed);
             event.sequence = sequence;
-            event.plannedNs = 0L;
+            event.plannedNs = scheduledNs(sequence, calibrationScheduleRate);
             ring.publish(claimed);
+            timingChecksum ^= System.nanoTime();
             published++;
         }
         waitForProcessed(
@@ -198,6 +211,10 @@ public final class TailLatency
         final long elapsed = System.nanoTime() - started;
         haltAndJoin(processor, consumer);
         handler.validateCalibration();
+        if (timingChecksum == Long.MIN_VALUE)
+        {
+            throw new IllegalStateException("unreachable calibration timing checksum");
+        }
         if (elapsed <= 0L)
         {
             throw new IllegalStateException("calibration duration was zero");
@@ -310,20 +327,27 @@ public final class TailLatency
                 workload);
     }
 
-    private static void publishRange(
+    private static long publishCalibrationRange(
             final RingBuffer<TailEvent> ring,
             final long start,
-            final long count)
+            final long count,
+            final long scheduleRate,
+            final long epoch)
     {
+        long timingChecksum = 0L;
         for (long offset = 0L; offset < count; offset++)
         {
             final long sequence = start + offset;
+            final long plannedNs = scheduledNs(sequence, scheduleRate);
+            timingChecksum ^= System.nanoTime() - epoch;
             final long claimed = ring.next();
             final TailEvent event = ring.get(claimed);
             event.sequence = sequence;
-            event.plannedNs = 0L;
+            event.plannedNs = plannedNs;
             ring.publish(claimed);
+            timingChecksum ^= System.nanoTime() - epoch;
         }
+        return timingChecksum;
     }
 
     private static Thread startProcessor(
