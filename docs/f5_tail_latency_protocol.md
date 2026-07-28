@@ -127,6 +127,12 @@ The Java artifact additionally records the exact JVM version, collector, heap
 settings, and relevant runtime flags. GC and safepoint logs are preserved with
 timestamps that can be aligned to latency samples.
 
+Each measured load records `measurement_epoch_unix_ns`, mapping relative raw
+sample timestamps to wall-clock Unix nanoseconds, plus
+`clock_anchor_uncertainty_ns` from bracketing the wall-clock read with two
+monotonic reads. GC/safepoint attribution is invalid when the relevant pause
+cannot be aligned after accounting for that uncertainty.
+
 ## 6. General validity and pairing
 
 A load is valid only when:

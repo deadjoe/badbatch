@@ -42,7 +42,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_EVENTS_TOTAL: u64 = 1_000_000;
 const DEFAULT_WARMUP_EVENTS: u64 = 100_000;
@@ -1100,9 +1100,49 @@ struct LoadResult {
     rate_valid: bool,
     workload_valid: bool,
     valid_run: bool,
+    measurement_epoch_unix_ns: u64,
+    clock_anchor_uncertainty_ns: u64,
     pause_check: Option<PauseCheck>,
     samples: Vec<LatencySample>,
     workload: WorkloadStats,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClockAnchor {
+    monotonic: Instant,
+    wall_unix_ns: u64,
+    uncertainty_ns: u64,
+}
+
+impl ClockAnchor {
+    fn capture() -> Result<Self, String> {
+        let before = Instant::now();
+        let wall = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("system clock predates Unix epoch: {error}"))?;
+        let after = Instant::now();
+        let span = after.duration_since(before);
+        let midpoint = before + span / 2;
+        let wall_unix_ns = u64::try_from(wall.as_nanos())
+            .map_err(|_| "wall-clock timestamp does not fit u64 nanoseconds".to_string())?;
+        let uncertainty_ns = u64::try_from(span.as_nanos().div_ceil(2)).unwrap_or(u64::MAX);
+        Ok(Self {
+            monotonic: midpoint,
+            wall_unix_ns,
+            uncertainty_ns,
+        })
+    }
+
+    fn project_unix_ns(self, target: Instant) -> Result<u64, String> {
+        let delta = target
+            .checked_duration_since(self.monotonic)
+            .ok_or("measurement epoch predates clock anchor")?;
+        let delta_ns = u64::try_from(delta.as_nanos())
+            .map_err(|_| "clock-anchor delta does not fit u64 nanoseconds".to_string())?;
+        self.wall_unix_ns
+            .checked_add(delta_ns)
+            .ok_or_else(|| "measurement epoch Unix timestamp overflow".to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1285,8 +1325,11 @@ where
         return Err("failed to pin producer thread".into());
     }
 
+    let clock_anchor = ClockAnchor::capture()?;
+    let measurement_epoch = Instant::now();
+    let measurement_epoch_unix_ns = clock_anchor.project_unix_ns(measurement_epoch)?;
     start
-        .set(Instant::now())
+        .set(measurement_epoch)
         .map_err(|_| "measurement epoch was already initialized".to_string())?;
     let mut first_send_ns = None;
     let mut last_send_ns = 0_u64;
@@ -1418,6 +1461,8 @@ where
         rate_valid,
         workload_valid,
         valid_run,
+        measurement_epoch_unix_ns,
+        clock_anchor_uncertainty_ns: clock_anchor.uncertainty_ns,
         pause_check,
         samples,
         workload: outcome.workload,
@@ -1725,6 +1770,18 @@ fn write_result(
         writeln!(out, "      \"rate_valid\": {},", load.rate_valid).unwrap();
         writeln!(out, "      \"workload_valid\": {},", load.workload_valid).unwrap();
         writeln!(out, "      \"valid_run\": {},", load.valid_run).unwrap();
+        writeln!(
+            out,
+            "      \"measurement_epoch_unix_ns\": {},",
+            load.measurement_epoch_unix_ns
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "      \"clock_anchor_uncertainty_ns\": {},",
+            load.clock_anchor_uncertainty_ns
+        )
+        .unwrap();
         if let Some(check) = load.pause_check {
             out.push_str("      \"pause_validation\": {\n");
             writeln!(out, "        \"sleep_ns\": {},", check.sleep_ns).unwrap();
