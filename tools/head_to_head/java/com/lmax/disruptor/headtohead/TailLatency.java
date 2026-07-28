@@ -147,9 +147,11 @@ public final class TailLatency
         return switch (config.handlerMode)
         {
             case ALLOCATION_FREE -> calibrateWithHandler(
-                    config, new AllocationFreeCalibrationHandler());
+                    config, new AllocationFreeCalibrationHandler(config.bufferSize));
             case ALLOCATING -> calibrateWithHandler(
-                    config, new AllocatingCalibrationHandler(config.retentionWindow));
+                    config,
+                    new AllocatingCalibrationHandler(
+                            config.retentionWindow, config.bufferSize));
         };
     }
 
@@ -195,7 +197,7 @@ public final class TailLatency
                 "calibration completion");
         final long elapsed = System.nanoTime() - started;
         haltAndJoin(processor, consumer);
-        handler.validateRetained();
+        handler.validateCalibration();
         if (elapsed <= 0L)
         {
             throw new IllegalStateException("calibration duration was zero");
@@ -918,8 +920,21 @@ public final class TailLatency
     {
         final CountDownLatch ready = new CountDownLatch(1);
         final AtomicLong processed = new AtomicLong();
+        private final long[] plannedNs;
+        private final long[] completionNs;
+        private final long[] latencyNs;
+        private final int scratchMask;
         AffinityTracker affinity;
         int cpuIndex;
+        long epochNanos;
+
+        CalibrationHandler(final int bufferSize)
+        {
+            plannedNs = new long[bufferSize];
+            completionNs = new long[bufferSize];
+            latencyNs = new long[bufferSize];
+            scratchMask = bufferSize - 1;
+        }
 
         void configure(final AffinityTracker affinity, final int cpuIndex)
         {
@@ -931,7 +946,33 @@ public final class TailLatency
         public final void onStart()
         {
             affinity.pinCurrent(cpuIndex, "consumer");
+            epochNanos = System.nanoTime();
             ready.countDown();
+        }
+
+        final void record(final TailEvent event, final long sequence)
+        {
+            final long completion = System.nanoTime() - epochNanos;
+            final int index = (int) sequence & scratchMask;
+            plannedNs[index] = event.plannedNs;
+            completionNs[index] = completion;
+            latencyNs[index] = Math.max(0L, completion - event.plannedNs);
+        }
+
+        final void validateCalibration()
+        {
+            long checksum = 0L;
+            for (int index = 0; index < plannedNs.length; index++)
+            {
+                checksum += plannedNs[index];
+                checksum += completionNs[index];
+                checksum += latencyNs[index];
+            }
+            if (checksum == Long.MIN_VALUE)
+            {
+                throw new IllegalStateException("unreachable calibration scratch checksum");
+            }
+            validateRetained();
         }
 
         abstract void validateRetained();
@@ -939,12 +980,18 @@ public final class TailLatency
 
     private static final class AllocationFreeCalibrationHandler extends CalibrationHandler
     {
+        AllocationFreeCalibrationHandler(final int bufferSize)
+        {
+            super(bufferSize);
+        }
+
         @Override
         public void onEvent(
                 final TailEvent event,
                 final long sequence,
                 final boolean endOfBatch)
         {
+            record(event, sequence);
             if (endOfBatch)
             {
                 processed.lazySet(sequence + 1L);
@@ -962,8 +1009,11 @@ public final class TailLatency
         private final AllocationPayload[] retention;
         private int next;
 
-        AllocatingCalibrationHandler(final int retentionWindow)
+        AllocatingCalibrationHandler(
+                final int retentionWindow,
+                final int bufferSize)
         {
+            super(bufferSize);
             retention = new AllocationPayload[retentionWindow];
         }
 
@@ -979,6 +1029,7 @@ public final class TailLatency
             {
                 next = 0;
             }
+            record(event, sequence);
             if (endOfBatch)
             {
                 processed.lazySet(sequence + 1L);
