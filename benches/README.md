@@ -215,6 +215,16 @@ Use this suite to validate changes that touch the work-processor loop (e.g. `446
 
 > **Note:** that difference verifies sensitivity only. Its *direction* is not an established performance result — cross-build comparisons on this crate carry a demonstrated code-layout confound (see F.3), so any claim about C.3's real effect requires the F.2 paired methodology (interleaved pairs, fresh processes, bootstrap CI).
 
+### `worker_pool_break_even.rs`
+
+**Role:** find the handler-cost inflection point where WorkerPool scheme A stops being a net loss.
+
+Scans worker counts 1/2/4/8 against handler costs trivial / ~50ns / ~100ns / ~200ns / ~400ns / ~800ns / ~10µs, all within a single bench binary. Each tier is self-calibrated inside the bench binary (isolated single-threaded handler cost, ≥3 repetitions, median + range). A fan-out arm (`fan_out_events_with`) with the same thread counts and handler costs serves as a control to isolate shared-claim contention; it is **not** a direct throughput comparison because each fan-out consumer processes every event.
+
+Use this suite to decide whether `also_partition_with` is appropriate for a given handler. On this host (Mac16,11: 10 P-core + 4 E-core), the 8-worker point is reported only as a reference value because 9 busy-spin threads risk heterogeneous-core scheduling.
+
+> **Note:** the self-calibrated ns/event is measured in isolation (single thread, hot cache, direct call). It is the definition users can replicate for their own handlers, but it is not the in-situ cost inside a running Disruptor.
+
 ## Interpreting output
 
 Per suite: first ~10 cases (not sorted by speed), outlier notes, short assessment. For latency suite, read Latency Statistics first.

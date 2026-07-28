@@ -150,6 +150,10 @@ required-features = ["lmax-dsl"]
 name = "worker_pool"
 harness = false
 
+[[bench]]
+name = "worker_pool_break_even"
+harness = false
+
 # Compile-fail UI tests for soundness surface (clone / mode gates).
 [[test]]
 name = "ui_compile_fail"
