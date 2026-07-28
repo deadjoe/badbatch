@@ -148,6 +148,88 @@ def main() -> None:
     expected_allocation = int(manifest["expected_allocation_bytes"])
     java_heap = str(manifest["java_heap"])
     java_options = [str(value) for value in manifest["java_options"]]
+    provenance_pairs: dict[str, set[tuple[str, str]]] = {
+        language: set() for language in LANGUAGES
+    }
+
+    def record_provenance(
+        artifact: dict[str, Any],
+        *,
+        language: str,
+        label: str,
+    ) -> None:
+        check(artifact.get("provenance_valid") is True, f"{label}: provenance")
+        harness_rev = artifact.get("harness_git_rev")
+        implementation_rev = artifact.get("implementation_git_rev")
+        check(full_revision(harness_rev), f"{label}: bad harness revision")
+        check(
+            full_revision(implementation_rev),
+            f"{label}: bad implementation revision",
+        )
+        check(
+            artifact.get("harness_git_dirty") is False,
+            f"{label}: dirty harness",
+        )
+        check(
+            artifact.get("implementation_git_dirty") is False,
+            f"{label}: dirty implementation",
+        )
+        if isinstance(harness_rev, str) and isinstance(implementation_rev, str):
+            provenance_pairs[language].add(
+                (harness_rev.lower(), implementation_rev.lower())
+            )
+
+    def validate_java_runtime(
+        artifact: dict[str, Any],
+        *,
+        label: str,
+        expected_jfr: Path,
+        expected_gc: Path,
+    ) -> None:
+        check(expected_jfr.is_file(), f"{label}: missing JFR")
+        check(expected_gc.is_file(), f"{label}: missing GC/safepoint log")
+        check(
+            artifact.get("jfr_file") == str(expected_jfr),
+            f"{label}: JFR path metadata mismatch",
+        )
+        check(
+            artifact.get("gc_log") == str(expected_gc),
+            f"{label}: GC-log path metadata mismatch",
+        )
+        jvm = artifact.get("jvm", {})
+        check(isinstance(jvm, dict), f"{label}: JVM metadata")
+        input_arguments = (
+            [str(value) for value in jvm.get("input_arguments", [])]
+            if isinstance(jvm, dict)
+            else []
+        )
+        required_jvm_arguments = {
+            f"-Xms{java_heap}",
+            f"-Xmx{java_heap}",
+            "-XX:+AlwaysPreTouch",
+            "-XX:+UseG1GC",
+            *java_options,
+        }
+        check(
+            required_jvm_arguments.issubset(set(input_arguments)),
+            f"{label}: fixed JVM arguments missing",
+        )
+        check(
+            any(
+                argument.startswith("-XX:StartFlightRecording=")
+                for argument in input_arguments
+            ),
+            f"{label}: JFR was not active",
+        )
+        check(
+            any(argument.startswith("-Xlog:gc*") for argument in input_arguments),
+            f"{label}: GC/safepoint logging was not active",
+        )
+        check(
+            bool(jvm.get("gc_names")) if isinstance(jvm, dict) else False,
+            f"{label}: collector metadata missing",
+        )
+
     for language in LANGUAGES:
         check(
             measured_events
@@ -177,7 +259,11 @@ def main() -> None:
                 f"{path.name}: unmatched event padding",
             )
             check(artifact.get("artifact_valid") is True, f"{path.name}: invalid")
-            check(artifact.get("provenance_valid") is True, f"{path.name}: provenance")
+            record_provenance(
+                artifact,
+                language=language,
+                label=path.name,
+            )
             check(
                 artifact.get("handler_mode")
                 == ("allocation-free" if arm == "a" else "allocating"),
@@ -206,15 +292,11 @@ def main() -> None:
             if language == "java":
                 expected_jfr = root / f"calibration-{key}.jfr"
                 expected_gc = root / f"calibration-{key}-gc.log"
-                check(expected_jfr.is_file(), f"{path.name}: missing calibration JFR")
-                check(expected_gc.is_file(), f"{path.name}: missing calibration GC log")
-                check(
-                    artifact.get("jfr_file") == str(expected_jfr),
-                    f"{path.name}: calibration JFR metadata mismatch",
-                )
-                check(
-                    artifact.get("gc_log") == str(expected_gc),
-                    f"{path.name}: calibration GC metadata mismatch",
+                validate_java_runtime(
+                    artifact,
+                    label=path.name,
+                    expected_jfr=expected_jfr,
+                    expected_gc=expected_gc,
                 )
             own_max = math.floor(float(artifact["own_max"]))
             calibration_maxima[key] = own_max
@@ -263,7 +345,6 @@ def main() -> None:
     )
 
     artifacts: dict[tuple[str, str, str], dict[str, Any]] = {}
-    harness_revisions: set[str] = set()
     for phase in PHASES:
         for arm in ARMS:
             for language in LANGUAGES:
@@ -287,27 +368,11 @@ def main() -> None:
                     artifact.get("artifact_valid") is True,
                     f"{path.name}: invalid artifact",
                 )
-                check(
-                    artifact.get("provenance_valid") is True,
-                    f"{path.name}: invalid provenance",
+                record_provenance(
+                    artifact,
+                    language=language,
+                    label=path.name,
                 )
-                harness_rev = artifact.get("harness_git_rev")
-                implementation_rev = artifact.get("implementation_git_rev")
-                check(full_revision(harness_rev), f"{path.name}: bad harness revision")
-                check(
-                    full_revision(implementation_rev),
-                    f"{path.name}: bad implementation revision",
-                )
-                check(
-                    artifact.get("harness_git_dirty") is False,
-                    f"{path.name}: dirty harness",
-                )
-                check(
-                    artifact.get("implementation_git_dirty") is False,
-                    f"{path.name}: dirty implementation",
-                )
-                if isinstance(harness_rev, str):
-                    harness_revisions.add(harness_rev.lower())
                 check(
                     artifact.get("handler_mode")
                     == ("allocation-free" if arm == "a" else "allocating"),
@@ -438,59 +503,24 @@ def main() -> None:
                 if language == "java":
                     expected_jfr = root / f"{label}.jfr"
                     expected_gc = root / f"{label}-gc.log"
-                    check(
-                        expected_jfr.is_file(),
-                        f"{label}: missing JFR",
+                    validate_java_runtime(
+                        artifact,
+                        label=path.name,
+                        expected_jfr=expected_jfr,
+                        expected_gc=expected_gc,
                     )
-                    check(
-                        expected_gc.is_file(),
-                        f"{label}: missing GC/safepoint log",
-                    )
-                    check(
-                        artifact.get("jfr_file") == str(expected_jfr),
-                        f"{label}: JFR path metadata mismatch",
-                    )
-                    check(
-                        artifact.get("gc_log") == str(expected_gc),
-                        f"{label}: GC-log path metadata mismatch",
-                    )
-                    jvm = artifact.get("jvm", {})
-                    check(isinstance(jvm, dict), f"{path.name}: JVM metadata")
-                    input_arguments = (
-                        [str(value) for value in jvm.get("input_arguments", [])]
-                        if isinstance(jvm, dict)
-                        else []
-                    )
-                    required_jvm_arguments = {
-                        f"-Xms{java_heap}",
-                        f"-Xmx{java_heap}",
-                        "-XX:+AlwaysPreTouch",
-                        "-XX:+UseG1GC",
-                        *java_options,
-                    }
-                    check(
-                        required_jvm_arguments.issubset(set(input_arguments)),
-                        f"{path.name}: fixed JVM arguments missing",
-                    )
-                    check(
-                        any(
-                            argument.startswith("-XX:StartFlightRecording=")
-                            for argument in input_arguments
-                        ),
-                        f"{path.name}: JFR was not active",
-                    )
-                    check(
-                        any(argument.startswith("-Xlog:gc*") for argument in input_arguments),
-                        f"{path.name}: GC/safepoint logging was not active",
-                    )
-                    check(
-                        bool(jvm.get("gc_names")) if isinstance(jvm, dict) else False,
-                        f"{path.name}: collector metadata missing",
-                    )
-    check(
-        len(harness_revisions) == 1,
-        "Rust and Java artifacts do not share one BadBatch harness revision",
-    )
+    for language in LANGUAGES:
+        check(
+            len(provenance_pairs[language]) == 1,
+            f"{language} calibration/measurement provenance is inconsistent",
+        )
+    if all(len(provenance_pairs[language]) == 1 for language in LANGUAGES):
+        rust_harness = next(iter(provenance_pairs["rust"]))[0]
+        java_harness = next(iter(provenance_pairs["java"]))[0]
+        check(
+            rust_harness == java_harness,
+            "Rust and Java artifacts do not share one BadBatch harness revision",
+        )
 
     for arm in ARMS:
         for language in LANGUAGES:
