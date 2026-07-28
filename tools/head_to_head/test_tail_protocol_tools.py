@@ -67,6 +67,12 @@ class TailProtocolToolsTest(unittest.TestCase):
         self.assertIn("0: new #1", extracted)
         self.assertNotIn("neighbor", extracted)
 
+    def test_jfr_event_without_stack_trace_is_not_an_allocation_match(self) -> None:
+        self.assertEqual(
+            [],
+            runner.frame_type_names({"values": {"stackTrace": None}}),
+        )
+
     def test_raw_validator_checks_schedule_and_complete_row_count(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "samples.csv"
