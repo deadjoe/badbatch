@@ -164,6 +164,11 @@ timestamps, pairing, allocation alignment, wall-clock anchors, provenance,
 JFR/GC artifact presence, and the predeclared control-versus-pause tolerances.
 It writes `validation_report.json` and exits non-zero on any mismatch.
 
+The default p50 equivalence band is the larger of 5% and 25 ns, so a
+single-digit-nanosecond shift at the timer floor does not masquerade as a
+material median change. Both components are written to the manifest before the
+injected run; override them only before execution.
+
 The defaults pin G1 with a fixed 2 GiB heap and preserve JFR plus timestamped
 GC/safepoint logs. Override JVM flags only before execution and keep them with
 the resulting manifest. The runner produces validity evidence, not a portable

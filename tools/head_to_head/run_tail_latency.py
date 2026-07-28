@@ -145,6 +145,11 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--co-p50-relative-tolerance", type=float, default=0.05)
     result.add_argument(
+        "--co-p50-absolute-tolerance-ns",
+        type=nonnegative_int,
+        default=25,
+    )
+    result.add_argument(
         "--co-achieved-target-tolerance", type=float, default=0.01
     )
     result.add_argument("--java-heap", default="2g")
@@ -825,6 +830,7 @@ def main() -> None:
         "inject_sleep_ms": args.inject_sleep_ms,
         "inject_at_measured_pct": args.inject_at_measured_pct,
         "co_p50_relative_tolerance": args.co_p50_relative_tolerance,
+        "co_p50_absolute_tolerance_ns": args.co_p50_absolute_tolerance_ns,
         "co_achieved_target_tolerance": args.co_achieved_target_tolerance,
         "calibrations": calibrations,
         "common_max": common_max,

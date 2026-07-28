@@ -40,6 +40,20 @@ def relative_difference(left: float, right: float) -> float:
     return abs(left - right) / denominator
 
 
+def p50_equivalent(
+    control: float,
+    injected: float,
+    *,
+    relative_tolerance: float,
+    absolute_tolerance_ns: int,
+) -> bool:
+    allowed_delta = max(
+        float(absolute_tolerance_ns),
+        relative_tolerance * max(abs(control), abs(injected)),
+    )
+    return abs(control - injected) <= allowed_delta
+
+
 def validate_raw(
     path: Path,
     *,
@@ -127,6 +141,9 @@ def main() -> None:
     common_max = int(manifest["common_max"])
     allocation_tolerance = float(manifest["allocation_tolerance"])
     p50_tolerance = float(manifest["co_p50_relative_tolerance"])
+    p50_absolute_tolerance_ns = int(
+        manifest["co_p50_absolute_tolerance_ns"]
+    )
     achieved_tolerance = float(manifest["co_achieved_target_tolerance"])
     expected_allocation = int(manifest["expected_allocation_bytes"])
     java_heap = str(manifest["java_heap"])
@@ -489,7 +506,12 @@ def main() -> None:
                 control_p50 = float(control_load["latency_ns"]["p50"])
                 injected_p50 = float(injected_load["latency_ns"]["p50"])
                 check(
-                    relative_difference(control_p50, injected_p50) <= p50_tolerance,
+                    p50_equivalent(
+                        control_p50,
+                        injected_p50,
+                        relative_tolerance=p50_tolerance,
+                        absolute_tolerance_ns=p50_absolute_tolerance_ns,
+                    ),
                     f"{language}-{arm}-{load_pct}: injected p50 outside tolerance",
                 )
                 control_ratio = float(control_load["actual_target_ratio"])
@@ -541,6 +563,7 @@ def main() -> None:
         "raw_samples_validated_per_load": measured_events,
         "load_levels": load_levels,
         "co_p50_relative_tolerance": p50_tolerance,
+        "co_p50_absolute_tolerance_ns": p50_absolute_tolerance_ns,
         "co_achieved_target_tolerance": achieved_tolerance,
         "allocation_tolerance": allocation_tolerance,
     }
