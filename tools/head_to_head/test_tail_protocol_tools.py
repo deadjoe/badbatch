@@ -116,7 +116,33 @@ class TailProtocolToolsTest(unittest.TestCase):
                     warmup_events=2,
                     measured_events=2,
                     target_rate=100,
+                    expected_latency={
+                        "count": 2,
+                        "p50": 7,
+                        "p99": 11,
+                        "p99.9": 11,
+                        "p99.99": 11,
+                        "max": 11,
+                    },
                 ),
+            )
+            summary_errors = validator.validate_raw(
+                path,
+                warmup_events=2,
+                measured_events=2,
+                target_rate=100,
+                expected_latency={
+                    "count": 2,
+                    "p50": 8,
+                    "p99": 11,
+                    "p99.9": 11,
+                    "p99.99": 11,
+                    "max": 11,
+                },
+            )
+            self.assertTrue(
+                any("summary p50" in error for error in summary_errors),
+                summary_errors,
             )
 
             path.write_text(
