@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 python3 tools/head_to_head/test_report_forks.py
+python3 tools/head_to_head/test_tail_provenance.py
 bash scripts/setup_head_to_head_lmax.sh
 
 TMP_ROOT="${TMPDIR:-/tmp}"
