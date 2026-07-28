@@ -399,7 +399,8 @@ def jfr_events(jfr_tool: Path, recording: Path) -> list[dict[str, Any]]:
 
 
 def frame_type_names(event: dict[str, Any]) -> list[str]:
-    frames = event.get("values", {}).get("stackTrace", {}).get("frames", [])
+    stack_trace = event.get("values", {}).get("stackTrace") or {}
+    frames = stack_trace.get("frames", [])
     return [
         frame.get("method", {}).get("type", {}).get("name", "")
         for frame in frames
