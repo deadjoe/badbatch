@@ -54,14 +54,42 @@ def p50_equivalent(
     return abs(control - injected) <= allowed_delta
 
 
+def required_latency_summary(latencies: list[int]) -> dict[str, int]:
+    ordered = sorted(latencies)
+    if not ordered:
+        return {
+            "count": 0,
+            "p50": 0,
+            "p99": 0,
+            "p99.9": 0,
+            "p99.99": 0,
+            "max": 0,
+        }
+
+    def nearest_rank(basis_points: int) -> int:
+        rank = (len(ordered) * basis_points + 9_999) // 10_000
+        return ordered[max(rank, 1) - 1]
+
+    return {
+        "count": len(ordered),
+        "p50": nearest_rank(5_000),
+        "p99": nearest_rank(9_900),
+        "p99.9": nearest_rank(9_990),
+        "p99.99": nearest_rank(9_999),
+        "max": ordered[-1],
+    }
+
+
 def validate_raw(
     path: Path,
     *,
     warmup_events: int,
     measured_events: int,
     target_rate: int,
+    expected_latency: dict[str, Any] | None = None,
 ) -> list[str]:
     errors: list[str] = []
+    latencies: list[int] = []
     try:
         with path.open(encoding="utf-8") as handle:
             header = handle.readline().rstrip("\n")
@@ -98,12 +126,26 @@ def validate_raw(
                         f"{path.name}:{count + 1}: invalid completion/latency"
                     )
                     break
+                latencies.append(latency)
             if count != measured_events:
                 errors.append(
                     f"{path.name}: raw row count {count} != {measured_events}"
                 )
     except OSError as error:
         errors.append(f"{path.name}: cannot read raw samples: {error}")
+    if not errors and expected_latency is not None:
+        observed = required_latency_summary(latencies)
+        for field, value in observed.items():
+            try:
+                reported = float(expected_latency[field])
+            except (KeyError, TypeError, ValueError):
+                errors.append(f"{path.name}: missing latency summary field {field}")
+                continue
+            if not math.isfinite(reported) or reported != float(value):
+                errors.append(
+                    f"{path.name}: latency summary {field} "
+                    f"{reported} != raw {value}"
+                )
     return errors
 
 
@@ -175,10 +217,60 @@ def main() -> None:
             artifact.get("implementation_git_dirty") is False,
             f"{label}: dirty implementation",
         )
+        check(
+            artifact.get("git_rev") == harness_rev,
+            f"{label}: legacy Git revision alias mismatch",
+        )
+        check(
+            artifact.get("dirty") == artifact.get("harness_git_dirty"),
+            f"{label}: legacy dirty-state alias mismatch",
+        )
+        if language == "rust":
+            check(
+                harness_rev == implementation_rev,
+                f"{label}: Rust implementation revision differs from harness",
+            )
         if isinstance(harness_rev, str) and isinstance(implementation_rev, str):
             provenance_pairs[language].add(
                 (harness_rev.lower(), implementation_rev.lower())
             )
+
+    def validate_common_schema(
+        artifact: dict[str, Any],
+        *,
+        language: str,
+        label: str,
+    ) -> None:
+        expected_impl = (
+            "badbatch-builder-tail-latency"
+            if language == "rust"
+            else "lmax-ring-buffer-tail-latency"
+        )
+        check(artifact.get("impl") == expected_impl, f"{label}: implementation name")
+        check(
+            artifact.get("scenario") == "unicast_tail_latency",
+            f"{label}: scenario mismatch",
+        )
+        check(
+            artifact.get("arrival_model") == "open_loop_fixed_schedule",
+            f"{label}: arrival model mismatch",
+        )
+        check(
+            artifact.get("latency_origin") == "planned_send_time",
+            f"{label}: latency origin mismatch",
+        )
+        check(
+            artifact.get("raw_sample_columns") == RAW_HEADER.split(","),
+            f"{label}: raw-sample schema mismatch",
+        )
+        check(
+            artifact.get("wait_strategy") == manifest["wait_strategy"],
+            f"{label}: wait strategy mismatch",
+        )
+        check(
+            int(artifact.get("buffer_size", -1)) == buffer_size,
+            f"{label}: buffer-size mismatch",
+        )
 
     def validate_java_runtime(
         artifact: dict[str, Any],
@@ -270,6 +362,11 @@ def main() -> None:
             check(
                 artifact.get("event_padding") == "none",
                 f"{path.name}: unmatched event padding",
+            )
+            validate_common_schema(
+                artifact,
+                language=language,
+                label=path.name,
             )
             check(artifact.get("artifact_valid") is True, f"{path.name}: invalid")
             record_provenance(
@@ -376,6 +473,11 @@ def main() -> None:
                 check(
                     artifact.get("event_padding") == "none",
                     f"{path.name}: unmatched event padding",
+                )
+                validate_common_schema(
+                    artifact,
+                    language=language,
+                    label=path.name,
                 )
                 check(
                     artifact.get("artifact_valid") is True,
@@ -505,6 +607,7 @@ def main() -> None:
                             warmup_events=warmup_by_language[language],
                             measured_events=measured_events,
                             target_rate=target_rate,
+                            expected_latency=load.get("latency_ns"),
                         )
                     )
                     if phase == "injected":
