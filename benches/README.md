@@ -254,7 +254,19 @@ Practical guidance:
 - If your handler cost is **above ~150 ns/event**, WorkerPool starts to win; at ~200 ns/event 2 workers already deliver a 1.3× speedup and 4 workers deliver ~1.6×.
 - The 8-worker speedup is a strong function of handler cost: it is near zero below ~200 ns/event and only approaches linear scaling at high costs (~800 ns+). On this host it is **not** a reliable expansion point because 8 busy-spin workers + 1 producer approach the 10 P-core limit and may be scheduled onto E-cores.
 
-The fan-out control confirms that the collapse at low handler costs is not a general multi-threading overhead. Fan-out with the same thread counts maintains much higher aggregate handler-invocation rates (the fan-out columns above); the bottleneck is the shared `work_sequence` CAS claim that WorkerPool uses to partition events, which dominates when the per-event handler work is small.
+The fan-out control confirms that the collapse at low handler costs is not a general multi-threading overhead. Expressing both arms as aggregate handler invocations per second makes the mechanism explicit:
+
+| derived handler cost (ns/event) | WorkerPool 2w (M inv/s) | fan-out 2 (M inv/s) | fan-out / WorkerPool |
+|---:|---:|---:|---:|
+| 8.2 (trivial) | 10.15 | 78.10 | 7.70× |
+| 34.6 (100ns) | 9.05 | 49.00 | 5.41× |
+| 197.2 (200ns) | 6.42 | 9.50 | 1.48× |
+| 851.1 (800ns) | 2.12 | 2.30 | 1.08× |
+| 11,054.5 (010us) | 0.18 | 0.18 | 1.02× |
+
+The same two threads and the same handler cost are used in both arms; the only difference is whether the workers share a single `work_sequence` claim (WorkerPool) or each consume every event independently (fan-out). The ratio falls from ~7.7× down to ~1× as handler cost rises, which is exactly the signature of claim-contention dominance: when the handler is cheap, the CAS claim is the bottleneck; when the handler is expensive, the handler itself dominates and the two arms converge.
+
+The bottleneck is therefore the shared `work_sequence` CAS claim that WorkerPool uses to partition events, which dominates when the per-event handler work is small.
 
 ## Interpreting output
 
