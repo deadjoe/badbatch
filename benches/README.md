@@ -28,6 +28,8 @@ Prefer same-machine, same-environment, same-revision-family comparisons.
 |------|------|
 | `benches/*.rs` | Criterion benchmarks and custom latency stats |
 | `src/bin/h2h_tail_latency.rs` | Standalone open-loop tail-latency driver |
+| `tools/head_to_head/java/.../TailLatency.java` | Matching LMAX Java open-loop driver |
+| `scripts/run_tail_latency_head_to_head.sh` | Six-arm calibration, preflight, run, and validation |
 | `scripts/run_benchmarks.sh` | Suite runner (timeouts, logs, summaries) |
 | `scripts/result_formatter.sh` | Parses Criterion / latency logs into summaries |
 | `benchmark_logs/` | Per-suite stdout/stderr from the runner |
@@ -111,11 +113,11 @@ target/release/h2h_tail_latency --handler-mode allocating --retention-window 655
 ```
 
 Allocation-free mode keeps the original measurement hot path and reports zero
-workload allocations. Allocating mode requires the run to fill its entire
-retention window and validates exactly one 48-byte requested allocation per
-measured event. The logical payload remains four `u64` fields (32 bytes); the
-remaining bytes are explicit cross-runtime matching padding, not application
-payload.
+workload allocations. Allocating mode requires the **measured** region—not
+warmup plus measurement—to fill its entire retention window and validates
+exactly one 48-byte requested allocation per measured event. The logical
+payload remains four `u64` fields (32 bytes); the remaining bytes are explicit
+cross-runtime matching padding, not application payload.
 
 Use `--inject-sleep-ms 50` as the coordinated-omission counterfactual: the run is
 invalid unless the injected backlog is in the protocol's allowed range, the
@@ -130,6 +132,43 @@ results still require controlled hosts, CPU placement, and repeated runs.
 The binary embeds its Git revision and dirty state at build time. That
 provenance is independent of the directory used to launch the binary; an
 unknown revision or dirty build hard-invalidates every load and exits non-zero.
+
+The full Rust/Java protocol has one entry point:
+
+```bash
+# Results must be outside both source repositories. Announce an exclusive
+# compile/benchmark window on a shared host before starting.
+JAVA_HOME=/path/to/jdk-17 \
+  ./scripts/run_tail_latency_head_to_head.sh \
+  --results-dir /absolute/external/path/f5-tail-run \
+  --rust-warmup-events 100000 \
+  --java-warmup-events 1000000 \
+  --measured-events 1000000 \
+  --cpu-list 2,3
+```
+
+The runner does not trust source-level payload size or independently chosen
+load percentages. It first builds both artifacts with immutable provenance,
+checks the A/B bytecode, uses JFR to verify the Java B payload size, calibrates
+Rust/Java × A/B-W/B-4W, and chooses the minimum of all six maxima. Every arm
+then receives the same absolute 50/70/90% targets, followed by its own injected
+pause counterfactual. After calibration but before any tail result is observed,
+the runner freezes a whole-millisecond pause targeting five times the lower
+backlog bound while remaining inside the protocol's bounds at every load
+(falling back to the hard lower bound if needed). `--inject-sleep-ms` may
+predeclare a different value, but an out-of-range choice aborts before
+measurement. Rust and Java warmup counts are separate; freeze them
+from runtime-specific steady-state evidence before a formal run while keeping
+the measured sample count common. The validator streams every raw row, checks exact planned
+timestamps, pairing, allocation alignment, wall-clock anchors, provenance,
+JFR/GC artifact presence, and the predeclared control-versus-pause tolerances.
+It writes `validation_report.json` and exits non-zero on any mismatch.
+
+The defaults pin G1 with a fixed 2 GiB heap and preserve JFR plus timestamped
+GC/safepoint logs. Override JVM flags only before execution and keep them with
+the resulting manifest. The runner produces validity evidence, not a portable
+performance conclusion; host controls, order, repeated runs, and the protocol's
+attribution limits still govern any claim.
 
 ### Other runner modes
 
