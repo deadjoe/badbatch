@@ -14,6 +14,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 
@@ -25,6 +26,24 @@ ALLOCATION_EVENTS = (
 )
 MINIMUM_CONTROL_REPLICATES = 3
 MINIMUM_CALIBRATION_REPLICATES = 3
+PAUSE_PRECISION_CANDIDATES_US = (
+    10,
+    20,
+    50,
+    100,
+    200,
+    500,
+    1_000,
+    2_000,
+    5_000,
+)
+PAUSE_PRECISION_REPLICATES = 5
+PAUSE_PRECISION_MAX_OVERSHOOT_RATIO = 1.75
+PAUSE_PRECISION_MAX_RELATIVE_RANGE = 0.10
+PAUSE_PRECISION_RATE = 1_000_000
+PAUSE_PRECISION_COMMON_MAX = 2_000_000
+PAUSE_PRECISION_MEASURED_EVENTS = 100_000
+PAUSE_PRECISION_WARMUP_EVENTS = 100_000
 A_EQUIVALENCE_BASELINE_REV = "36f6abce33925bd37fa898726a47018b6045d154"
 A_EQUIVALENCE_CURRENT_REV = "067f71813ecd24a8df5e1536ab9959d096fceeec"
 
@@ -91,12 +110,45 @@ def expected_affected_samples(
     return (numerator + denominator - 1) // denominator
 
 
+def worst_observed_pause_us(requested_us: int, max_overshoot_ratio: float) -> int:
+    return math.ceil(requested_us * max_overshoot_ratio)
+
+
+def maximum_safe_requested_pause_us(
+    *,
+    common_max: int,
+    target_rate: int,
+    maximum_affected: int,
+    requested_upper_us: int,
+    max_overshoot_ratio: float,
+) -> int:
+    lower = 0
+    upper = requested_upper_us
+    while lower < upper:
+        candidate = (lower + upper + 1) // 2
+        worst_affected = expected_affected_samples(
+            common_max=common_max,
+            target_rate=target_rate,
+            pause_us=worst_observed_pause_us(
+                candidate,
+                max_overshoot_ratio,
+            ),
+        )
+        if worst_affected <= maximum_affected:
+            lower = candidate
+        else:
+            upper = candidate - 1
+    return lower
+
+
 def select_inject_sleep_us_by_load(
     *,
     common_max: int,
     load_levels: list[int],
     measured_events: int,
     requested_us_by_load: dict[int, int] | None,
+    minimum_requested_us: int,
+    max_overshoot_ratio: float,
 ) -> dict[int, int]:
     minimum_affected = (measured_events + 999) // 1_000
     maximum_affected = measured_events // 10
@@ -118,25 +170,49 @@ def select_inject_sleep_us_by_load(
         numerator_per_us = target_rate * common_max
         denominator = 1_000_000 * (common_max - target_rate)
         lower_us = max(
-            1,
+            minimum_requested_us,
             ((minimum_affected - 1) * denominator) // numerator_per_us + 1,
         )
-        preferred_us = max(
-            1,
-            ((preferred_affected - 1) * denominator) // numerator_per_us + 1,
+        requested_upper_us = (maximum_affected * denominator) // numerator_per_us
+        preferred_upper_us = maximum_safe_requested_pause_us(
+            common_max=common_max,
+            target_rate=target_rate,
+            maximum_affected=preferred_affected,
+            requested_upper_us=requested_upper_us,
+            max_overshoot_ratio=max_overshoot_ratio,
         )
-        upper_us = (maximum_affected * denominator) // numerator_per_us
-        if lower_us > upper_us:
-            raise SystemExit(
-                f"no integer-microsecond pause satisfies affected-sample bounds "
-                f"at load {load_pct}%; increase measured-events"
+        if lower_us > preferred_upper_us:
+            worst_affected_at_minimum = expected_affected_samples(
+                common_max=common_max,
+                target_rate=target_rate,
+                pause_us=worst_observed_pause_us(
+                    minimum_requested_us,
+                    max_overshoot_ratio,
+                ),
             )
-        automatic_us = preferred_us if preferred_us <= upper_us else lower_us
+            required_measured_events = max(
+                100_000,
+                20 * worst_affected_at_minimum,
+            )
+            raise SystemExit(
+                "no precision-qualified microsecond pause satisfies the "
+                f"preferred affected-sample band at load {load_pct}%: "
+                f"minimum requested={minimum_requested_us}us, "
+                f"preferred-safe interval={lower_us}..={preferred_upper_us}us; "
+                "increase measured-events to at least "
+                f"{required_measured_events}"
+            )
         pause_us = (
-            automatic_us
+            preferred_upper_us
             if requested_us_by_load is None
             else requested_us_by_load[load_pct]
         )
+        if not lower_us <= pause_us <= preferred_upper_us:
+            raise SystemExit(
+                f"inject pause {pause_us}us at load {load_pct}% lies outside "
+                "the precision-qualified preferred-safe interval "
+                f"{lower_us}..={preferred_upper_us}us"
+            )
         affected = expected_affected_samples(
             common_max=common_max,
             target_rate=target_rate,
@@ -147,6 +223,20 @@ def select_inject_sleep_us_by_load(
                 f"inject pause {pause_us}us at load {load_pct}% produces "
                 f"{affected} affected samples outside "
                 f"{minimum_affected}..={maximum_affected}"
+            )
+        worst_affected = expected_affected_samples(
+            common_max=common_max,
+            target_rate=target_rate,
+            pause_us=worst_observed_pause_us(
+                pause_us,
+                max_overshoot_ratio,
+            ),
+        )
+        if worst_affected > preferred_affected:
+            raise SystemExit(
+                f"inject pause {pause_us}us at load {load_pct}% can produce "
+                f"{worst_affected} affected samples at the precision-preflight "
+                f"overshoot ceiling, above preferred {preferred_affected}"
             )
         selected[load_pct] = pause_us
     return selected
@@ -273,7 +363,8 @@ def run(
     cwd: Path,
     log_path: Path,
     env: dict[str, str] | None = None,
-) -> None:
+    allowed_returncodes: tuple[int, ...] = (0,),
+) -> int:
     with log_path.open("w", encoding="utf-8") as log:
         log.write("$ " + shlex.join(command) + "\n")
         log.flush()
@@ -286,10 +377,11 @@ def run(
             text=True,
             check=False,
         )
-    if completed.returncode != 0:
+    if completed.returncode not in allowed_returncodes:
         raise SystemExit(
             f"command failed with status {completed.returncode}; see {log_path}"
         )
+    return completed.returncode
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -601,6 +693,231 @@ def allocation_preflight(
             "event_types": sorted({event["type"] for event in payload_events}),
         }
     return observed
+
+
+def summarize_pause_precision(
+    observed_ns: list[int],
+    *,
+    requested_us: int,
+    max_overshoot_ratio: float,
+    max_relative_range: float,
+) -> dict[str, Any]:
+    if not observed_ns:
+        raise ValueError("pause precision observations must not be empty")
+    requested_ns = requested_us * 1_000
+    ratios = [observed / requested_ns for observed in observed_ns]
+    ratio_median = float(median(ratios))
+    ratio_full_range = max(ratios) - min(ratios)
+    relative_range = (
+        ratio_full_range / ratio_median
+        if ratio_median != 0.0
+        else math.inf
+    )
+    passed = (
+        min(ratios) >= 1.0
+        and max(ratios) <= max_overshoot_ratio
+        and relative_range <= max_relative_range
+    )
+    return {
+        "requested_us": requested_us,
+        "observed_ns": observed_ns,
+        "observed_median_ns": float(median(observed_ns)),
+        "observed_full_range_ns": max(observed_ns) - min(observed_ns),
+        "observed_over_requested": ratios,
+        "ratio_median": ratio_median,
+        "ratio_max": max(ratios),
+        "ratio_full_range": ratio_full_range,
+        "ratio_full_range_over_median": relative_range,
+        "passed": passed,
+    }
+
+
+def pause_precision_preflight(
+    args: argparse.Namespace,
+    *,
+    root: Path,
+    results: Path,
+    rust_bin: Path,
+    java: Path,
+    classes: Path,
+    arm: Arm,
+) -> dict[str, Any]:
+    observations: dict[str, dict[int, list[int]]] = {
+        language: {} for language in ("rust", "java")
+    }
+    artifact_paths: dict[str, dict[int, list[str]]] = {
+        language: {} for language in ("rust", "java")
+    }
+    exit_statuses: dict[str, dict[int, list[int]]] = {
+        language: {} for language in ("rust", "java")
+    }
+    execution_order: list[str] = []
+    attempted_candidates: list[int] = []
+    selected: int | None = None
+
+    for candidate_index, requested_us in enumerate(
+        PAUSE_PRECISION_CANDIDATES_US
+    ):
+        attempted_candidates.append(requested_us)
+        for replicate in range(1, PAUSE_PRECISION_REPLICATES + 1):
+            languages = (
+                ("rust", "java")
+                if (candidate_index + replicate - 1) % 2 == 0
+                else ("java", "rust")
+            )
+            for language in languages:
+                label = (
+                    f"pause-precision-{requested_us}us-r{replicate}-{language}"
+                )
+                execution_order.append(label)
+                output = results / f"{label}.json"
+                samples = Path(os.devnull)
+                jfr_path = (
+                    results / f"{label}.jfr"
+                    if language == "java"
+                    else None
+                )
+                gc_log_path = (
+                    results / f"{label}-gc.log"
+                    if language == "java"
+                    else None
+                )
+                if language == "rust":
+                    command = [
+                        str(rust_bin),
+                        *arm_arguments(arm),
+                        *common_arguments(
+                            args,
+                            "rust",
+                            measured_override=PAUSE_PRECISION_MEASURED_EVENTS,
+                            warmup_override=PAUSE_PRECISION_WARMUP_EVENTS,
+                        ),
+                        *rust_arguments(args),
+                    ]
+                else:
+                    command = java_command(
+                        java,
+                        classes,
+                        args,
+                        arm,
+                        jfr_path=jfr_path,
+                        gc_log_path=gc_log_path,
+                        measured_override=PAUSE_PRECISION_MEASURED_EVENTS,
+                        warmup_override=PAUSE_PRECISION_WARMUP_EVENTS,
+                    )
+                command.extend(
+                    [
+                        "--rate",
+                        str(PAUSE_PRECISION_RATE),
+                        "--max-rate",
+                        str(PAUSE_PRECISION_COMMON_MAX),
+                        "--own-max",
+                        str(PAUSE_PRECISION_COMMON_MAX),
+                        "--inject-sleep-us-by-load",
+                        str(requested_us),
+                        "--inject-at-measured-pct",
+                        str(args.inject_at_measured_pct),
+                        "--output",
+                        str(output),
+                        "--samples-output",
+                        str(samples),
+                    ]
+                )
+                if language == "java":
+                    command.extend(
+                        [
+                            "--jfr-file",
+                            str(jfr_path),
+                            "--gc-log",
+                            str(gc_log_path),
+                        ]
+                    )
+                status = run(
+                    command,
+                    cwd=root,
+                    log_path=results / f"{label}.log",
+                    allowed_returncodes=(0, 3),
+                )
+                artifact = read_json(output)
+                loads = artifact.get("loads", [])
+                if len(loads) != 1:
+                    raise SystemExit(
+                        f"pause precision artifact has wrong load count: {output}"
+                    )
+                pause = loads[0].get("pause_validation", {})
+                requested_ns = int(pause.get("requested_sleep_ns", 0))
+                observed_ns = int(pause.get("observed_sleep_ns", 0))
+                if requested_ns != requested_us * 1_000 or observed_ns <= 0:
+                    raise SystemExit(
+                        f"invalid pause precision observation: {output}"
+                    )
+                observations[language].setdefault(requested_us, []).append(
+                    observed_ns
+                )
+                artifact_paths[language].setdefault(requested_us, []).append(
+                    output.name
+                )
+                exit_statuses[language].setdefault(requested_us, []).append(
+                    status
+                )
+
+        candidate_passed = True
+        for language in ("rust", "java"):
+            summary = summarize_pause_precision(
+                observations[language][requested_us],
+                requested_us=requested_us,
+                max_overshoot_ratio=PAUSE_PRECISION_MAX_OVERSHOOT_RATIO,
+                max_relative_range=PAUSE_PRECISION_MAX_RELATIVE_RANGE,
+            )
+            candidate_passed &= bool(summary["passed"])
+        if candidate_passed:
+            selected = requested_us
+            break
+
+    summaries: dict[str, dict[str, Any]] = {
+        language: {} for language in ("rust", "java")
+    }
+    for language in ("rust", "java"):
+        for requested_us in attempted_candidates:
+            summary = summarize_pause_precision(
+                observations[language][requested_us],
+                requested_us=requested_us,
+                max_overshoot_ratio=PAUSE_PRECISION_MAX_OVERSHOOT_RATIO,
+                max_relative_range=PAUSE_PRECISION_MAX_RELATIVE_RANGE,
+            )
+            summary["artifacts"] = artifact_paths[language][requested_us]
+            summary["exit_statuses"] = exit_statuses[language][requested_us]
+            summaries[language][str(requested_us)] = summary
+
+    report = {
+        "schema_version": 1,
+        "candidates_us": list(PAUSE_PRECISION_CANDIDATES_US),
+        "attempted_candidates_us": attempted_candidates,
+        "replicates": PAUSE_PRECISION_REPLICATES,
+        "max_overshoot_ratio": PAUSE_PRECISION_MAX_OVERSHOOT_RATIO,
+        "max_ratio_full_range_over_median": (
+            PAUSE_PRECISION_MAX_RELATIVE_RANGE
+        ),
+        "rate": PAUSE_PRECISION_RATE,
+        "common_max": PAUSE_PRECISION_COMMON_MAX,
+        "measured_events": PAUSE_PRECISION_MEASURED_EVENTS,
+        "warmup_events": PAUSE_PRECISION_WARMUP_EVENTS,
+        "inject_at_measured_pct": args.inject_at_measured_pct,
+        "execution_order": execution_order,
+        "selected_minimum_requested_us": selected,
+        "results": summaries,
+    }
+    report_path = results / "pause_precision_report.json"
+    report_path.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    if selected is None:
+        raise SystemExit(
+            "no pause-precision candidate satisfied both runtimes; see "
+            f"{report_path}"
+        )
+    return report
 
 
 def calibration_command(
@@ -918,6 +1235,15 @@ def main() -> None:
         classes=classes,
         arms=arms,
     )
+    pause_precision = pause_precision_preflight(
+        args,
+        root=root,
+        results=results,
+        rust_bin=rust_bin,
+        java=java,
+        classes=classes,
+        arm=arms[0],
+    )
 
     calibration_plan = build_calibration_plan(
         arms,
@@ -1002,6 +1328,12 @@ def main() -> None:
         load_levels=args.load_levels,
         measured_events=measured,
         requested_us_by_load=args.inject_sleep_us_by_load,
+        minimum_requested_us=int(
+            pause_precision["selected_minimum_requested_us"]
+        ),
+        max_overshoot_ratio=float(
+            pause_precision["max_overshoot_ratio"]
+        ),
     )
 
     measurement_plan = build_measurement_plan(
@@ -1042,6 +1374,17 @@ def main() -> None:
         "calibrations": calibrations,
         "common_max": common_max,
         "preflight": preflight,
+        "pause_precision": {
+            "path": "pause_precision_report.json",
+            "selected_minimum_requested_us": (
+                pause_precision["selected_minimum_requested_us"]
+            ),
+            "max_overshoot_ratio": pause_precision["max_overshoot_ratio"],
+            "max_ratio_full_range_over_median": (
+                pause_precision["max_ratio_full_range_over_median"]
+            ),
+            "replicates": pause_precision["replicates"],
+        },
         "a_equivalence": {
             "path": "a-equivalence/a_equivalence_report.json",
             "passed": a_equivalence.get("passed"),

@@ -17,6 +17,24 @@ PHASES = ("control", "injected")
 RAW_HEADER = "sequence,planned_ns,completion_ns,latency_ns"
 MINIMUM_CONTROL_REPLICATES = 3
 MINIMUM_CALIBRATION_REPLICATES = 3
+PAUSE_PRECISION_CANDIDATES_US = (
+    10,
+    20,
+    50,
+    100,
+    200,
+    500,
+    1_000,
+    2_000,
+    5_000,
+)
+PAUSE_PRECISION_REPLICATES = 5
+PAUSE_PRECISION_MAX_OVERSHOOT_RATIO = 1.75
+PAUSE_PRECISION_MAX_RELATIVE_RANGE = 0.10
+PAUSE_PRECISION_RATE = 1_000_000
+PAUSE_PRECISION_COMMON_MAX = 2_000_000
+PAUSE_PRECISION_MEASURED_EVENTS = 100_000
+PAUSE_PRECISION_WARMUP_EVENTS = 100_000
 A_EQUIVALENCE_BASELINE_REV = "36f6abce33925bd37fa898726a47018b6045d154"
 A_EQUIVALENCE_CURRENT_REV = "067f71813ecd24a8df5e1536ab9959d096fceeec"
 
@@ -129,6 +147,25 @@ def expected_calibration_order(calibration_replicates: int) -> list[str]:
                 else ("java", "rust")
             )
             order.extend(f"{phase}-{language}-{arm}" for language in languages)
+    return order
+
+
+def expected_pause_precision_order(
+    candidates_us: list[int],
+    replicates: int,
+) -> list[str]:
+    order: list[str] = []
+    for candidate_index, requested_us in enumerate(candidates_us):
+        for replicate in range(1, replicates + 1):
+            languages = (
+                ("rust", "java")
+                if (candidate_index + replicate - 1) % 2 == 0
+                else ("java", "rust")
+            )
+            order.extend(
+                f"pause-precision-{requested_us}us-r{replicate}-{language}"
+                for language in languages
+            )
     return order
 
 
@@ -279,6 +316,15 @@ def main() -> None:
         int(load): int(duration)
         for load, duration in manifest["inject_sleep_us_by_load"].items()
     }
+    pause_precision_entry = manifest["pause_precision"]
+    pause_precision_path = root / str(pause_precision_entry["path"])
+    pause_precision = load_json(pause_precision_path)
+    precision_minimum_requested_us = int(
+        pause_precision["selected_minimum_requested_us"]
+    )
+    precision_max_overshoot_ratio = float(
+        pause_precision["max_overshoot_ratio"]
+    )
     provenance_pairs: dict[str, set[tuple[str, str]]] = {
         language: set() for language in LANGUAGES
     }
@@ -483,6 +529,380 @@ def main() -> None:
                 (java_version, vm_name, vm_version, gc_names)
             )
 
+    check(
+        pause_precision_entry.get("path") == "pause_precision_report.json",
+        "pause precision report path mismatch",
+    )
+    check(
+        pause_precision.get("schema_version") == 1,
+        "unsupported pause precision schema",
+    )
+    check(
+        pause_precision_entry.get("selected_minimum_requested_us")
+        == precision_minimum_requested_us,
+        "pause precision manifest selection mismatch",
+    )
+    check(
+        float(pause_precision_entry.get("max_overshoot_ratio", -1.0))
+        == precision_max_overshoot_ratio,
+        "pause precision manifest overshoot ceiling mismatch",
+    )
+    check(
+        int(pause_precision.get("replicates", 0))
+        == PAUSE_PRECISION_REPLICATES,
+        "pause precision replicate count mismatch",
+    )
+    check(
+        list(pause_precision.get("candidates_us", []))
+        == list(PAUSE_PRECISION_CANDIDATES_US),
+        "pause precision candidate list mismatch",
+    )
+    check(
+        float(pause_precision.get("max_overshoot_ratio", -1.0))
+        == PAUSE_PRECISION_MAX_OVERSHOOT_RATIO,
+        "pause precision overshoot ceiling mismatch",
+    )
+    check(
+        float(
+            pause_precision.get(
+                "max_ratio_full_range_over_median",
+                -1.0,
+            )
+        )
+        == PAUSE_PRECISION_MAX_RELATIVE_RANGE,
+        "pause precision stability limit mismatch",
+    )
+    check(
+        int(pause_precision.get("rate", 0)) == PAUSE_PRECISION_RATE,
+        "pause precision rate mismatch",
+    )
+    check(
+        int(pause_precision.get("common_max", 0))
+        == PAUSE_PRECISION_COMMON_MAX,
+        "pause precision common max mismatch",
+    )
+    check(
+        int(pause_precision.get("measured_events", 0))
+        == PAUSE_PRECISION_MEASURED_EVENTS,
+        "pause precision measured count mismatch",
+    )
+    check(
+        int(pause_precision.get("warmup_events", 0))
+        == PAUSE_PRECISION_WARMUP_EVENTS,
+        "pause precision warmup count mismatch",
+    )
+    check(
+        int(pause_precision.get("inject_at_measured_pct", 0))
+        == int(manifest["inject_at_measured_pct"]),
+        "pause precision injection point mismatch",
+    )
+    attempted_precision_candidates = [
+        int(value)
+        for value in pause_precision.get("attempted_candidates_us", [])
+    ]
+    if precision_minimum_requested_us in PAUSE_PRECISION_CANDIDATES_US:
+        selected_index = PAUSE_PRECISION_CANDIDATES_US.index(
+            precision_minimum_requested_us
+        )
+        check(
+            attempted_precision_candidates
+            == list(PAUSE_PRECISION_CANDIDATES_US[: selected_index + 1]),
+            "pause precision did not stop at the first passing candidate",
+        )
+    else:
+        errors.append("pause precision selected an unknown candidate")
+    check(
+        pause_precision.get("execution_order")
+        == expected_pause_precision_order(
+            attempted_precision_candidates,
+            PAUSE_PRECISION_REPLICATES,
+        ),
+        "pause precision execution order mismatch",
+    )
+
+    precision_candidate_passes: dict[int, dict[str, bool]] = {}
+    precision_results = pause_precision.get("results", {})
+    check(
+        isinstance(precision_results, dict)
+        and set(precision_results) == set(LANGUAGES),
+        "pause precision result languages mismatch",
+    )
+    if isinstance(precision_results, dict):
+        for language in LANGUAGES:
+            language_results = precision_results.get(language, {})
+            check(
+                isinstance(language_results, dict)
+                and set(language_results)
+                == {
+                    str(candidate)
+                    for candidate in attempted_precision_candidates
+                },
+                f"{language}: pause precision candidate results mismatch",
+            )
+    for requested_us in attempted_precision_candidates:
+        precision_candidate_passes[requested_us] = {}
+        for language in LANGUAGES:
+            entry = precision_results.get(language, {}).get(
+                str(requested_us),
+                {},
+            )
+            expected_paths = [
+                (
+                    f"pause-precision-{requested_us}us-r{replicate}-"
+                    f"{language}.json"
+                )
+                for replicate in range(1, PAUSE_PRECISION_REPLICATES + 1)
+            ]
+            check(
+                entry.get("artifacts") == expected_paths,
+                f"{language}-{requested_us}us: precision artifact list mismatch",
+            )
+            observed_values: list[int] = []
+            artifact_validity: list[bool] = []
+            for path_text in expected_paths:
+                path = root / path_text
+                artifact = load_json(path)
+                label = path.name
+                check(
+                    artifact.get("language") == language,
+                    f"{label}: wrong language",
+                )
+                check(
+                    artifact.get("run_mode") == "measurement",
+                    f"{label}: wrong mode",
+                )
+                check(
+                    artifact.get("handler_mode") == "allocation-free",
+                    f"{label}: precision handler mismatch",
+                )
+                check(
+                    artifact.get("retention_window") is None,
+                    f"{label}: precision retention mismatch",
+                )
+                validate_common_schema(
+                    artifact,
+                    language=language,
+                    label=label,
+                )
+                record_provenance(
+                    artifact,
+                    language=language,
+                    label=label,
+                )
+                check(
+                    int(artifact.get("events_total", -1))
+                    == (
+                        PAUSE_PRECISION_MEASURED_EVENTS
+                        + PAUSE_PRECISION_WARMUP_EVENTS
+                    ),
+                    f"{label}: precision event count mismatch",
+                )
+                check(
+                    int(artifact.get("warmup_events", -1))
+                    == PAUSE_PRECISION_WARMUP_EVENTS,
+                    f"{label}: precision warmup mismatch",
+                )
+                check(
+                    math.floor(float(artifact.get("common_max", 0.0)))
+                    == PAUSE_PRECISION_COMMON_MAX,
+                    f"{label}: precision common max mismatch",
+                )
+                check(
+                    math.floor(float(artifact.get("own_max", 0.0)))
+                    == PAUSE_PRECISION_COMMON_MAX,
+                    f"{label}: precision own max mismatch",
+                )
+                check(
+                    artifact.get("inject_sleep_us_by_load")
+                    == [requested_us],
+                    f"{label}: precision requested pause mismatch",
+                )
+                check(
+                    int(artifact.get("inject_at_measured_pct", 0))
+                    == int(manifest["inject_at_measured_pct"]),
+                    f"{label}: precision injection point mismatch",
+                )
+                loads = artifact.get("loads", [])
+                if len(loads) != 1:
+                    errors.append(f"{label}: precision load count mismatch")
+                    continue
+                load = loads[0]
+                check(
+                    int(load.get("target_rate", 0)) == PAUSE_PRECISION_RATE,
+                    f"{label}: precision target rate mismatch",
+                )
+                pause = load.get("pause_validation", {})
+                requested_ns = int(pause.get("requested_sleep_ns", 0))
+                observed_ns = int(pause.get("observed_sleep_ns", 0))
+                check(
+                    requested_ns == requested_us * 1_000,
+                    f"{label}: precision requested duration mismatch",
+                )
+                check(
+                    observed_ns > 0,
+                    f"{label}: precision observed duration missing",
+                )
+                check(
+                    int(pause.get("pause_completed_ns", -1))
+                    - int(pause.get("pause_started_ns", 0))
+                    == observed_ns,
+                    f"{label}: precision observed duration mismatch",
+                )
+                observed_values.append(observed_ns)
+                artifact_validity.append(
+                    artifact.get("artifact_valid") is True
+                )
+                if language == "java":
+                    validate_java_runtime(
+                        artifact,
+                        label=label,
+                        expected_jfr=root / f"{path.stem}.jfr",
+                        expected_gc=root / f"{path.stem}-gc.log",
+                    )
+
+            exit_statuses = entry.get("exit_statuses", [])
+            check(
+                isinstance(exit_statuses, list)
+                and len(exit_statuses) == PAUSE_PRECISION_REPLICATES
+                and all(status in (0, 3) for status in exit_statuses),
+                f"{language}-{requested_us}us: precision exit statuses invalid",
+            )
+            if isinstance(exit_statuses, list):
+                check(
+                    [status == 0 for status in exit_statuses]
+                    == artifact_validity,
+                    f"{language}-{requested_us}us: precision status mismatch",
+                )
+
+            ratios = [
+                observed / (requested_us * 1_000)
+                for observed in observed_values
+            ]
+            ratio_median = float(median(ratios)) if ratios else math.inf
+            ratio_full_range = (
+                max(ratios) - min(ratios)
+                if ratios
+                else math.inf
+            )
+            relative_range = (
+                ratio_full_range / ratio_median
+                if ratio_median not in (0.0, math.inf)
+                else math.inf
+            )
+            passed = (
+                len(ratios) == PAUSE_PRECISION_REPLICATES
+                and min(ratios, default=0.0) >= 1.0
+                and max(ratios, default=math.inf)
+                <= PAUSE_PRECISION_MAX_OVERSHOOT_RATIO
+                and relative_range <= PAUSE_PRECISION_MAX_RELATIVE_RANGE
+            )
+            precision_candidate_passes[requested_us][language] = passed
+            check(
+                entry.get("observed_ns") == observed_values,
+                f"{language}-{requested_us}us: precision observations mismatch",
+            )
+            check(
+                entry.get("observed_full_range_ns")
+                == (
+                    max(observed_values) - min(observed_values)
+                    if observed_values
+                    else None
+                ),
+                f"{language}-{requested_us}us: precision observed range mismatch",
+            )
+            check(
+                math.isclose(
+                    float(entry.get("observed_median_ns", math.inf)),
+                    float(median(observed_values))
+                    if observed_values
+                    else math.inf,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                ),
+                f"{language}-{requested_us}us: precision observed median mismatch",
+            )
+            reported_ratios = entry.get("observed_over_requested", [])
+            check(
+                isinstance(reported_ratios, list)
+                and len(reported_ratios) == len(ratios)
+                and all(
+                    math.isclose(
+                        float(reported),
+                        expected,
+                        rel_tol=0.0,
+                        abs_tol=1e-12,
+                    )
+                    for reported, expected in zip(
+                        reported_ratios,
+                        ratios,
+                    )
+                ),
+                f"{language}-{requested_us}us: precision ratios mismatch",
+            )
+            check(
+                entry.get("passed") == passed,
+                f"{language}-{requested_us}us: precision verdict mismatch",
+            )
+            check(
+                math.isclose(
+                    float(entry.get("ratio_median", math.inf)),
+                    ratio_median,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                ),
+                f"{language}-{requested_us}us: precision median ratio mismatch",
+            )
+            check(
+                math.isclose(
+                    float(entry.get("ratio_max", math.inf)),
+                    max(ratios, default=math.inf),
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                ),
+                f"{language}-{requested_us}us: precision max ratio mismatch",
+            )
+            check(
+                math.isclose(
+                    float(entry.get("ratio_full_range", math.inf)),
+                    ratio_full_range,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                ),
+                f"{language}-{requested_us}us: precision ratio range mismatch",
+            )
+            check(
+                math.isclose(
+                    float(
+                        entry.get(
+                            "ratio_full_range_over_median",
+                            math.inf,
+                        )
+                    ),
+                    relative_range,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                ),
+                f"{language}-{requested_us}us: precision range mismatch",
+            )
+
+    combined_precision_passes = {
+        candidate: all(by_language.values())
+        and set(by_language) == set(LANGUAGES)
+        for candidate, by_language in precision_candidate_passes.items()
+    }
+    check(
+        combined_precision_passes.get(precision_minimum_requested_us) is True,
+        "selected pause precision candidate did not pass both runtimes",
+    )
+    check(
+        not any(
+            passed
+            for candidate, passed in combined_precision_passes.items()
+            if candidate < precision_minimum_requested_us
+        ),
+        "pause precision skipped an earlier passing candidate",
+    )
+
     for language in LANGUAGES:
         check(
             measured_events
@@ -524,6 +944,39 @@ def main() -> None:
         set(inject_sleep_us_by_load) == set(load_levels),
         "per-load injection durations do not match load levels",
     )
+    check(
+        all(
+            duration >= precision_minimum_requested_us
+            for duration in inject_sleep_us_by_load.values()
+        ),
+        "injection duration falls below precision-qualified minimum",
+    )
+    check(
+        float(
+            pause_precision_entry.get(
+                "max_ratio_full_range_over_median",
+                -1.0,
+            )
+        )
+        == PAUSE_PRECISION_MAX_RELATIVE_RANGE,
+        "pause precision manifest stability limit mismatch",
+    )
+    for load_pct in load_levels:
+        target_rate = (common_max * load_pct + 50) // 100
+        worst_observed_ns = math.ceil(
+            inject_sleep_us_by_load[load_pct]
+            * 1_000
+            * precision_max_overshoot_ratio
+        )
+        _, worst_affected = expected_pause_counts(
+            common_max=common_max,
+            target_rate=target_rate,
+            observed_sleep_ns=worst_observed_ns,
+        )
+        check(
+            worst_affected <= measured_events // 20,
+            f"load {load_pct}: precision overshoot exceeds preferred affected band",
+        )
     check(
         p50_empirical_rule == "control_p50_full_range_ns",
         "unsupported empirical p50 tolerance rule",
@@ -1091,6 +1544,15 @@ def main() -> None:
         ),
         "co_p50_empirical_tolerance_rule": p50_empirical_rule,
         "inject_sleep_us_by_load": inject_sleep_us_by_load,
+        "pause_precision": {
+            "selected_minimum_requested_us": precision_minimum_requested_us,
+            "max_overshoot_ratio": precision_max_overshoot_ratio,
+            "max_ratio_full_range_over_median": (
+                PAUSE_PRECISION_MAX_RELATIVE_RANGE
+            ),
+            "attempted_candidates_us": attempted_precision_candidates,
+            "candidate_passes": combined_precision_passes,
+        },
         "control_p50_stability": control_p50_results,
         "co_achieved_target_tolerance": achieved_tolerance,
         "allocation_tolerance": allocation_tolerance,

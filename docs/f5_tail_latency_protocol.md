@@ -182,9 +182,10 @@ ceil(N / 1000) <= A <= floor(N / 10)
 The lower bound places p99.9 inside the conservatively estimated affected
 population, but it does not by itself guarantee the separate visibility
 threshold: an arm can drain its consumer backlog faster than the end-to-end
-`common_max` service-rate bound. The automatic selector therefore targets
-`floor(N / 20)`, halfway to the upper bound. This keeps a 2x margin for
-observed sleep overshoot while providing enough depth for the p99.9 signature.
+`common_max` service-rate bound. The automatic selector therefore chooses the
+largest precision-qualified request whose preflight worst-observed affected
+count is at most `floor(N / 20)`. This keeps a 2x margin to the final hard
+upper bound while providing depth for the p99.9 signature.
 The upper bound makes the complete drain-amplified population at least an
 order of magnitude smaller than the measured population, rather than allowing
 the injection to move the body of the distribution.
@@ -196,16 +197,37 @@ backlog. Conservatively define:
 minimum_drain_time = pause_duration * L / (1 - L)
 ```
 
+Before calibration, automatically characterize each target host's actual
+pause-delivery precision through the same Rust and Java allocation-free handler
+paths and the exact formal runtime profile, including CPU placement and Java
+heap, collector, JFR, and GC/safepoint logging. Try
+`10, 20, 50, 100, 200, 500, 1000, 2000, 5000` microseconds in ascending order,
+using five balanced fresh processes per language and candidate. The first
+candidate is precision-qualified only when both languages have
+`min(observed/requested) >= 1`, `max(observed/requested) <= 1.75`, and
+`full range(observed/requested) / median <= 10%`. Stop at the first joint pass.
+If none passes, fail before calibration with the complete diagnostics; never
+substitute a host-independent timing constant.
+
 Choose the requested pause independently for every load after calibration, at
-microsecond resolution, by the predeclared `A` bounds; a single duration must
-not be reused across 50%, 70%, and 90%. Record both requested and observed
-pause nanoseconds. Recompute `B`, `A`, and drain time from the observed
-duration, and invalidate an oversleep that violates either affected-population
-bound. From the end of the observed pause through the last planned send, the
-measured region must retain at least `minimum_drain_time`; a 2x margin is
-recommended. The injection sequence, planned injection time, remaining
-measured time, and computed drain allowance must be recorded. Normally the
-pause belongs in the first half of the measured region, never near its end.
+microsecond resolution, by intersecting the predeclared `A` bounds with that
+host's precision-qualified minimum; a single duration must not be reused
+across 50%, 70%, and 90%. The selector must also reserve the preflight
+overshoot ceiling: a requested duration is admissible only when the affected
+population at `1.75 × requested` is no larger than `floor(N / 20)`, rather
+than merely fitting under the final `floor(N / 10)` hard gate. This preserves
+a second 2x margin for delivery variation on the actual run. If the
+intersection is empty, fail with the minimum measured sample count needed to
+make it non-empty (`20 ×` the worst-observed affected count at the
+precision-qualified minimum). Record both requested and observed pause
+nanoseconds.
+Recompute `B`, `A`, and drain time from the observed duration, and invalidate
+an oversleep that violates either affected-population bound. From the end of
+the observed pause through the last planned send, the measured region must
+retain at least `minimum_drain_time`; a 2x margin is recommended. The
+injection sequence, planned injection time, remaining measured time, and
+computed drain allowance must be recorded. Normally the pause belongs in the
+first half of the measured region, never near its end.
 
 Acceptance requires all three signals together:
 
