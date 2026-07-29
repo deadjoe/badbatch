@@ -27,6 +27,10 @@ ALLOCATION_EVENTS = (
 MINIMUM_CONTROL_REPLICATES = 3
 MINIMUM_INJECTED_REPLICATES = 3
 MINIMUM_CALIBRATION_REPLICATES = 3
+DEFAULT_CO_P50_RELATIVE_TOLERANCE = 0.025
+DEFAULT_CO_P50_MAX_RELATIVE_RANGE = 0.05
+MEASUREMENT_ORDER_RULE = "replicate_interleaved_control_then_injected"
+SIGNED_RESIDUAL_RULE = "two_sided_exact_sign_test_and_load_monotonicity"
 PAUSE_PRECISION_CANDIDATES_US = (
     10,
     20,
@@ -311,13 +315,22 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--inject-at-measured-pct", type=positive_int, default=25
     )
-    result.add_argument("--co-p50-relative-tolerance", type=float, default=0.05)
+    result.add_argument(
+        "--co-p50-relative-tolerance",
+        type=float,
+        default=DEFAULT_CO_P50_RELATIVE_TOLERANCE,
+        help=(
+            "predeclared relative p50 floor; must be strictly below the "
+            "per-side stability limit so stable empirical ranges can affect "
+            "the equivalence band"
+        ),
+    )
     result.add_argument(
         "--co-p50-max-relative-range",
         "--co-control-p50-max-relative-range",
         dest="co_p50_max_relative_range",
         type=float,
-        default=0.05,
+        default=DEFAULT_CO_P50_MAX_RELATIVE_RANGE,
         help=(
             "per-side full-range/median stability prerequisite; an unstable "
             "control or injected side makes p50 equivalence inconclusive "
@@ -1050,41 +1063,40 @@ def build_measurement_plan(
     control_replicates: int = MINIMUM_CONTROL_REPLICATES,
     injected_replicates: int = MINIMUM_INJECTED_REPLICATES,
 ) -> list[tuple[bool, Arm, str, str]]:
+    if control_replicates != injected_replicates:
+        raise ValueError(
+            "control and injected replicate counts must match for paired "
+            "phase interleaving"
+        )
     plan: list[tuple[bool, Arm, str, str]] = []
     for replicate in range(1, control_replicates + 1):
-        phase = "control" if replicate == 1 else f"control-r{replicate}"
-        for arm_index, arm in enumerate(arms):
-            languages = (
-                ("rust", "java")
-                if (arm_index + replicate - 1) % 2 == 0
-                else ("java", "rust")
+        for injected in (False, True):
+            phase_name = "injected" if injected else "control"
+            phase = (
+                phase_name
+                if replicate == 1
+                else f"{phase_name}-r{replicate}"
             )
-            for language in languages:
-                plan.append(
-                    (
-                        False,
-                        arm,
-                        language,
-                        f"{phase}-{language}-{arm.name}",
-                    )
+            for arm_index, arm in enumerate(arms):
+                control_languages = (
+                    ("rust", "java")
+                    if (arm_index + replicate - 1) % 2 == 0
+                    else ("java", "rust")
                 )
-    for replicate in range(1, injected_replicates + 1):
-        phase = "injected" if replicate == 1 else f"injected-r{replicate}"
-        for arm_index, arm in enumerate(arms):
-            languages = (
-                ("java", "rust")
-                if (arm_index + replicate - 1) % 2 == 0
-                else ("rust", "java")
-            )
-            for language in languages:
-                plan.append(
-                    (
-                        True,
-                        arm,
-                        language,
-                        f"{phase}-{language}-{arm.name}",
-                    )
+                languages = (
+                    tuple(reversed(control_languages))
+                    if injected
+                    else control_languages
                 )
+                for language in languages:
+                    plan.append(
+                        (
+                            injected,
+                            arm,
+                            language,
+                            f"{phase}-{language}-{arm.name}",
+                        )
+                    )
     return plan
 
 
@@ -1124,6 +1136,13 @@ def main() -> None:
         raise SystemExit("CO p50 tolerance must be in 0..=1")
     if not 0.0 <= args.co_p50_max_relative_range <= 1.0:
         raise SystemExit("CO p50 range limit must be in 0..=1")
+    if not (
+        args.co_p50_relative_tolerance < args.co_p50_max_relative_range
+    ):
+        raise SystemExit(
+            "CO p50 relative tolerance must be strictly below the stability "
+            "range limit so the empirical range is reachable"
+        )
     if not 0.0 <= args.co_achieved_target_tolerance <= 1.0:
         raise SystemExit("CO achieved tolerance must be in 0..=1")
     if args.control_replicates < MINIMUM_CONTROL_REPLICATES:
@@ -1137,6 +1156,11 @@ def main() -> None:
             "at least "
             f"{MINIMUM_INJECTED_REPLICATES} independent injected replicates "
             "are required"
+        )
+    if args.control_replicates != args.injected_replicates:
+        raise SystemExit(
+            "control and injected replicate counts must match for paired "
+            "phase interleaving"
         )
     if args.calibration_replicates < MINIMUM_CALIBRATION_REPLICATES:
         raise SystemExit(
@@ -1369,7 +1393,7 @@ def main() -> None:
     )
 
     manifest = {
-        "schema_version": 4,
+        "schema_version": 5,
         "protocol": "docs/f5_tail_latency_protocol.md",
         "results_dir": str(results),
         "buffer_size": args.buffer_size,
@@ -1398,6 +1422,8 @@ def main() -> None:
         "co_p50_empirical_tolerance_rule": (
             "max_control_and_injected_p50_full_range_ns"
         ),
+        "co_p50_signed_residual_rule": SIGNED_RESIDUAL_RULE,
+        "measurement_order_rule": MEASUREMENT_ORDER_RULE,
         "co_achieved_target_tolerance": args.co_achieved_target_tolerance,
         "calibrations": calibrations,
         "common_max": common_max,

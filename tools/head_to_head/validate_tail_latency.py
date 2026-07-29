@@ -18,6 +18,9 @@ RAW_HEADER = "sequence,planned_ns,completion_ns,latency_ns"
 MINIMUM_CONTROL_REPLICATES = 3
 MINIMUM_INJECTED_REPLICATES = 3
 MINIMUM_CALIBRATION_REPLICATES = 3
+MEASUREMENT_ORDER_RULE = "replicate_interleaved_control_then_injected"
+SIGNED_RESIDUAL_RULE = "two_sided_exact_sign_test_and_load_monotonicity"
+SIGNED_RESIDUAL_ALPHA = 0.05
 PAUSE_PRECISION_CANDIDATES_US = (
     10,
     20,
@@ -121,31 +124,157 @@ def p50_stability(
     )
 
 
+def exact_two_sided_sign_test(positive: int, negative: int) -> float:
+    if positive < 0 or negative < 0:
+        raise ValueError("sign counts must be non-negative")
+    trials = positive + negative
+    if trials == 0:
+        return 1.0
+    smaller = min(positive, negative)
+    lower_tail = sum(math.comb(trials, index) for index in range(smaller + 1))
+    return min(1.0, 2.0 * lower_tail / (2**trials))
+
+
+def signed_delta_summary(deltas: list[float]) -> dict[str, Any]:
+    positive = sum(delta > 0.0 for delta in deltas)
+    negative = sum(delta < 0.0 for delta in deltas)
+    zero = len(deltas) - positive - negative
+    nonzero = positive + negative
+    if nonzero >= 2 and negative == 0:
+        common_direction = "positive"
+    elif nonzero >= 2 and positive == 0:
+        common_direction = "negative"
+    else:
+        common_direction = None
+    return {
+        "total": len(deltas),
+        "positive": positive,
+        "negative": negative,
+        "zero": zero,
+        "nonzero": nonzero,
+        "common_nonzero_direction": common_direction,
+        "two_sided_exact_sign_test_p_value": exact_two_sided_sign_test(
+            positive,
+            negative,
+        ),
+    }
+
+
+def signed_residual_analysis(
+    p50_results: dict[str, dict[str, Any]],
+    load_levels: list[int],
+) -> dict[str, Any]:
+    all_deltas = [
+        float(entry["injected_minus_control_median_ns"])
+        for entry in p50_results.values()
+    ]
+    decided_deltas = [
+        float(entry["injected_minus_control_median_ns"])
+        for entry in p50_results.values()
+        if not str(entry["equivalence_status"]).startswith("inconclusive")
+    ]
+    groups: dict[str, dict[str, Any]] = {}
+    monotonic_groups: list[str] = []
+    for language in LANGUAGES:
+        for arm in ARMS:
+            cells = [
+                (
+                    load,
+                    float(
+                        p50_results[f"{language}-{arm}-{load}"][
+                            "injected_minus_control_median_ns"
+                        ]
+                    ),
+                )
+                for load in load_levels
+                if f"{language}-{arm}-{load}" in p50_results
+            ]
+            deltas = [delta for _, delta in cells]
+            nondecreasing = len(deltas) >= 2 and all(
+                left <= right for left, right in zip(deltas, deltas[1:])
+            )
+            nonincreasing = len(deltas) >= 2 and all(
+                left >= right for left, right in zip(deltas, deltas[1:])
+            )
+            constant = len(set(deltas)) <= 1
+            load_monotonic_nonconstant = (
+                not constant and (nondecreasing or nonincreasing)
+            )
+            key = f"{language}-{arm}"
+            if load_monotonic_nonconstant:
+                monotonic_groups.append(key)
+            groups[key] = {
+                "by_load": [
+                    {"load_pct": load, "delta_ns": delta}
+                    for load, delta in cells
+                ],
+                "nondecreasing": nondecreasing,
+                "nonincreasing": nonincreasing,
+                "constant": constant,
+                "load_monotonic_nonconstant": load_monotonic_nonconstant,
+            }
+
+    all_summary = signed_delta_summary(all_deltas)
+    decided_summary = signed_delta_summary(decided_deltas)
+    observations: list[str] = []
+    if (
+        all_summary["nonzero"] > 0
+        and all_summary["two_sided_exact_sign_test_p_value"]
+        <= SIGNED_RESIDUAL_ALPHA
+    ):
+        observations.append("all_cells_signed_imbalance")
+    if (
+        decided_summary["nonzero"] > 0
+        and decided_summary["two_sided_exact_sign_test_p_value"]
+        <= SIGNED_RESIDUAL_ALPHA
+    ):
+        observations.append("decided_cells_signed_imbalance")
+    if monotonic_groups:
+        observations.append("load_monotonic_nonconstant_groups")
+    return {
+        "rule": SIGNED_RESIDUAL_RULE,
+        "alpha": SIGNED_RESIDUAL_ALPHA,
+        "all_cells": all_summary,
+        "decided_cells": decided_summary,
+        "groups": groups,
+        "load_monotonic_nonconstant_groups": monotonic_groups,
+        "observations": observations,
+        "requires_residual_observation": bool(observations),
+    }
+
+
 def expected_measurement_order(
     control_replicates: int,
     injected_replicates: int,
 ) -> list[str]:
+    if control_replicates != injected_replicates:
+        raise ValueError(
+            "control and injected replicate counts must match for paired "
+            "phase interleaving"
+        )
     order: list[str] = []
     for replicate in range(1, control_replicates + 1):
-        phase = "control" if replicate == 1 else f"control-r{replicate}"
-        for arm_index, arm in enumerate(ARMS):
-            languages = (
-                ("rust", "java")
-                if (arm_index + replicate - 1) % 2 == 0
-                else ("java", "rust")
+        for injected in (False, True):
+            phase_name = "injected" if injected else "control"
+            phase = (
+                phase_name
+                if replicate == 1
+                else f"{phase_name}-r{replicate}"
             )
-            order.extend(f"{phase}-{language}-{arm}" for language in languages)
-    for replicate in range(1, injected_replicates + 1):
-        phase = "injected" if replicate == 1 else f"injected-r{replicate}"
-        for arm_index, arm in enumerate(ARMS):
-            languages = (
-                ("java", "rust")
-                if (arm_index + replicate - 1) % 2 == 0
-                else ("rust", "java")
-            )
-            order.extend(
-                f"{phase}-{language}-{arm}" for language in languages
-            )
+            for arm_index, arm in enumerate(ARMS):
+                control_languages = (
+                    ("rust", "java")
+                    if (arm_index + replicate - 1) % 2 == 0
+                    else ("java", "rust")
+                )
+                languages = (
+                    tuple(reversed(control_languages))
+                    if injected
+                    else control_languages
+                )
+                order.extend(
+                    f"{phase}-{language}-{arm}" for language in languages
+                )
     return order
 
 
@@ -296,7 +425,7 @@ def main() -> None:
         if not condition:
             errors.append(message)
 
-    check(manifest.get("schema_version") == 4, "unsupported run manifest schema")
+    check(manifest.get("schema_version") == 5, "unsupported run manifest schema")
     buffer_size = int(manifest["buffer_size"])
     measured_events = int(manifest["measured_events"])
     warmup_by_language = {
@@ -320,6 +449,10 @@ def main() -> None:
     p50_tolerance = float(manifest["co_p50_relative_tolerance"])
     p50_max_relative_range = float(manifest["co_p50_max_relative_range"])
     p50_empirical_rule = str(manifest["co_p50_empirical_tolerance_rule"])
+    p50_signed_residual_rule = str(
+        manifest["co_p50_signed_residual_rule"]
+    )
+    measurement_order_rule = str(manifest["measurement_order_rule"])
     achieved_tolerance = float(manifest["co_achieved_target_tolerance"])
     expected_allocation = int(manifest["expected_allocation_bytes"])
     java_heap = str(manifest["java_heap"])
@@ -999,6 +1132,22 @@ def main() -> None:
         "unsupported empirical p50 tolerance rule",
     )
     check(
+        0.0 <= p50_tolerance < p50_max_relative_range <= 1.0,
+        "p50 tolerance must be strictly below the stability range limit",
+    )
+    check(
+        control_replicates == injected_replicates,
+        "control and injected replicate counts must match",
+    )
+    check(
+        measurement_order_rule == MEASUREMENT_ORDER_RULE,
+        "unsupported measurement order rule",
+    )
+    check(
+        p50_signed_residual_rule == SIGNED_RESIDUAL_RULE,
+        "unsupported signed residual rule",
+    )
+    check(
         measured_events >= 4 * buffer_size,
         "measured event count does not fill B-4W",
     )
@@ -1135,13 +1284,18 @@ def main() -> None:
         int(preflight.get("bw", {}).get("samples", 0)) > 0,
         "B JFR allocation preflight has no observations",
     )
-    check(
-        manifest.get("execution_order")
-        == expected_measurement_order(
+    expected_order = (
+        expected_measurement_order(
             control_replicates,
             injected_replicates,
-        ),
-        "execution order is not the frozen balanced order",
+        )
+        if control_replicates == injected_replicates
+        else None
+    )
+    check(
+        expected_order is not None
+        and manifest.get("execution_order") == expected_order,
+        "execution order is not the frozen replicate-interleaved order",
     )
 
     artifacts: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -1485,14 +1639,22 @@ def main() -> None:
                     injected_p50s,
                     max_relative_range=p50_max_relative_range,
                 )
-                allowed_p50_delta = max(
-                    control_p50_full_range,
-                    injected_p50_full_range,
-                    p50_tolerance
+                allowed_p50_delta_components = {
+                    "control_full_range_ns": control_p50_full_range,
+                    "injected_full_range_ns": injected_p50_full_range,
+                    "relative_floor_ns": p50_tolerance
                     * max(
                         abs(control_p50_median),
                         abs(injected_p50_median),
                     ),
+                }
+                allowed_p50_delta = max(
+                    allowed_p50_delta_components.values()
+                )
+                allowed_p50_delta_sources = sorted(
+                    name
+                    for name, value in allowed_p50_delta_components.items()
+                    if value == allowed_p50_delta
                 )
                 equivalent = (
                     control_stable
@@ -1587,9 +1749,18 @@ def main() -> None:
                         injected_ratio_median
                     ),
                     "allowed_delta_ns": allowed_p50_delta,
+                    "allowed_delta_components_ns": (
+                        allowed_p50_delta_components
+                    ),
+                    "allowed_delta_sources": allowed_p50_delta_sources,
                     "equivalent": equivalent,
                     "equivalence_status": equivalence_status,
                 }
+
+    p50_signed_residual_analysis = signed_residual_analysis(
+        p50_equivalence_results,
+        load_levels,
+    )
 
     for phase in PHASES:
         for arm in ARMS:
@@ -1617,7 +1788,7 @@ def main() -> None:
                     )
 
     report = {
-        "schema_version": 4,
+        "schema_version": 5,
         "passed": not errors,
         "errors": errors,
         "common_max": common_max,
@@ -1635,6 +1806,8 @@ def main() -> None:
         "co_p50_relative_tolerance": p50_tolerance,
         "co_p50_max_relative_range": p50_max_relative_range,
         "co_p50_empirical_tolerance_rule": p50_empirical_rule,
+        "co_p50_signed_residual_rule": p50_signed_residual_rule,
+        "measurement_order_rule": measurement_order_rule,
         "inject_sleep_us_by_load": inject_sleep_us_by_load,
         "pause_precision": {
             "selected_minimum_requested_us": precision_minimum_requested_us,
@@ -1646,6 +1819,7 @@ def main() -> None:
             "candidate_passes": combined_precision_passes,
         },
         "p50_equivalence": p50_equivalence_results,
+        "p50_signed_residual_analysis": p50_signed_residual_analysis,
         "co_achieved_target_tolerance": achieved_tolerance,
         "allocation_tolerance": allocation_tolerance,
     }

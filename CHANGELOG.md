@@ -15,6 +15,28 @@ jobs cannot silently raise this minimum.
 
 ## [0.2.0] — 2026-07
 
+### Tail-latency protocol phase and residual validity
+
+- **Replicate-interleaved counterfactuals.** The formal control/injected matrix
+  now requires equal replicate counts and runs each control block immediately
+  before its matching injected block. This breaks the previous all-control then
+  all-injected time/phase confound while preserving the balanced per-block
+  Rust/Java order and total runtime.
+- **Reachable empirical p50 band.** The fixed relative floor is now 2.5% while
+  the independent per-side stability ceiling remains 5%. Runner and validator
+  reject configurations where the relative floor is not strictly smaller than
+  the stability ceiling, and tests exercise an empirical-range branch that is
+  reachable through the formal validator.
+- **Signed residuals are first-class evidence.** Validation reports now include
+  positive/negative/zero delta counts, two-sided exact sign tests, and
+  non-constant load-monotonic language/arm groups. These observations are
+  surfaced even when every affected cell remains within its equivalence band;
+  they do not silently become timer noise or a new acceptance gate.
+- **Manifest schema 5.** The manifest freezes the phase-order and signed
+  residual rules before measurement. Schema-4 artifacts remain historical
+  evidence for their original instrument revision rather than being
+  reinterpreted under the corrected protocol.
+
 ### Simple and full WaitStrategy semantic convergence (A.6)
 
 - **Alert has terminal priority.** `SimpleWaitStrategyAdapter::wait_for_with_alert`

@@ -74,7 +74,9 @@ class TailProtocolToolsTest(unittest.TestCase):
             runner.frame_type_names({"values": {"stackTrace": None}}),
         )
 
-    def test_measurement_plan_is_complete_and_balanced_before_execution(self) -> None:
+    def test_measurement_plan_interleaves_paired_phases_before_execution(
+        self,
+    ) -> None:
         arms = [
             runner.Arm("a", "allocation-free", None),
             runner.Arm("bw", "allocating", 65_536),
@@ -89,30 +91,30 @@ class TailProtocolToolsTest(unittest.TestCase):
                 "control-rust-bw",
                 "control-rust-b4w",
                 "control-java-b4w",
-                "control-r2-java-a",
-                "control-r2-rust-a",
-                "control-r2-rust-bw",
-                "control-r2-java-bw",
-                "control-r2-java-b4w",
-                "control-r2-rust-b4w",
-                "control-r3-rust-a",
-                "control-r3-java-a",
-                "control-r3-java-bw",
-                "control-r3-rust-bw",
-                "control-r3-rust-b4w",
-                "control-r3-java-b4w",
                 "injected-java-a",
                 "injected-rust-a",
                 "injected-rust-bw",
                 "injected-java-bw",
                 "injected-java-b4w",
                 "injected-rust-b4w",
+                "control-r2-java-a",
+                "control-r2-rust-a",
+                "control-r2-rust-bw",
+                "control-r2-java-bw",
+                "control-r2-java-b4w",
+                "control-r2-rust-b4w",
                 "injected-r2-rust-a",
                 "injected-r2-java-a",
                 "injected-r2-java-bw",
                 "injected-r2-rust-bw",
                 "injected-r2-rust-b4w",
                 "injected-r2-java-b4w",
+                "control-r3-rust-a",
+                "control-r3-java-a",
+                "control-r3-java-bw",
+                "control-r3-rust-bw",
+                "control-r3-rust-b4w",
+                "control-r3-java-b4w",
                 "injected-r3-java-a",
                 "injected-r3-rust-a",
                 "injected-r3-rust-bw",
@@ -122,11 +124,22 @@ class TailProtocolToolsTest(unittest.TestCase):
             ],
             [label for _, _, _, label in plan],
         )
-        self.assertEqual([False] * 18 + [True] * 18, [item[0] for item in plan])
+        self.assertEqual(
+            ([False] * 6 + [True] * 6) * 3,
+            [item[0] for item in plan],
+        )
         self.assertEqual(
             [label for _, _, _, label in plan],
             validator.expected_measurement_order(3, 3),
         )
+        with self.assertRaisesRegex(ValueError, "counts must match"):
+            runner.build_measurement_plan(
+                arms,
+                control_replicates=3,
+                injected_replicates=4,
+            )
+        with self.assertRaisesRegex(ValueError, "counts must match"):
+            validator.expected_measurement_order(3, 4)
         calibration_plan = runner.build_calibration_plan(arms)
         self.assertEqual(
             [label for _, _, _, label in calibration_plan],
@@ -223,38 +236,52 @@ class TailProtocolToolsTest(unittest.TestCase):
             )
         )
 
-    def test_p50_equivalence_uses_relative_or_either_empirical_range(self) -> None:
+    def test_p50_empirical_range_is_reachable_after_stability(self) -> None:
+        defaults = runner.parser().parse_args(
+            [
+                "--results-dir",
+                "/tmp/results",
+                "--a-equivalence-dir",
+                "/tmp/a-equivalence",
+            ]
+        )
+        self.assertEqual(0.025, defaults.co_p50_relative_tolerance)
+        self.assertEqual(0.05, defaults.co_p50_max_relative_range)
+        self.assertLess(
+            defaults.co_p50_relative_tolerance,
+            defaults.co_p50_max_relative_range,
+        )
         self.assertTrue(
             validator.p50_equivalent(
-                110,
-                124,
-                relative_tolerance=0.05,
-                control_full_range_ns=16,
-                injected_full_range_ns=4,
+                100,
+                103,
+                relative_tolerance=0.025,
+                control_full_range_ns=4,
+                injected_full_range_ns=2,
             )
         )
         self.assertTrue(
             validator.p50_equivalent(
-                110,
-                124,
-                relative_tolerance=0.05,
-                control_full_range_ns=4,
-                injected_full_range_ns=16,
+                100,
+                103,
+                relative_tolerance=0.025,
+                control_full_range_ns=2,
+                injected_full_range_ns=4,
             )
         )
         self.assertFalse(
             validator.p50_equivalent(
-                110,
-                124,
-                relative_tolerance=0.05,
-                control_full_range_ns=4,
-                injected_full_range_ns=3,
+                100,
+                103,
+                relative_tolerance=0.025,
+                control_full_range_ns=2,
+                injected_full_range_ns=2,
             )
         )
         self.assertEqual(
-            (120.0, 3.0, 0.025, True),
+            (100.0, 4.0, 0.04, True),
             validator.p50_stability(
-                [120.0, 117.0, 120.0],
+                [98.0, 100.0, 102.0],
                 max_relative_range=0.05,
             ),
         )
@@ -267,10 +294,39 @@ class TailProtocolToolsTest(unittest.TestCase):
             validator.p50_equivalent(
                 1_000,
                 1_100,
-                relative_tolerance=0.05,
+                relative_tolerance=0.025,
                 control_full_range_ns=25,
                 injected_full_range_ns=25,
             )
+        )
+
+    def test_signed_residual_analysis_surfaces_pattern_without_failing_cells(
+        self,
+    ) -> None:
+        self.assertAlmostEqual(
+            0.0001220703125,
+            validator.exact_two_sided_sign_test(14, 0),
+        )
+        results = {
+            f"rust-a-{load}": {
+                "injected_minus_control_median_ns": delta,
+                "equivalence_status": "pass",
+            }
+            for load, delta in ((50, 1.0), (70, 2.0), (90, 3.0))
+        }
+        analysis = validator.signed_residual_analysis(
+            results,
+            [50, 70, 90],
+        )
+        self.assertEqual(3, analysis["all_cells"]["positive"])
+        self.assertEqual(
+            ["rust-a"],
+            analysis["load_monotonic_nonconstant_groups"],
+        )
+        self.assertTrue(analysis["requires_residual_observation"])
+        self.assertIn(
+            "load_monotonic_nonconstant_groups",
+            analysis["observations"],
         )
 
     def test_pause_is_predeclared_per_load_from_total_affected_samples(self) -> None:
