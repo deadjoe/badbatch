@@ -193,18 +193,30 @@ near its end.
 
 Acceptance requires all three signals together:
 
-1. Injected-run p50 remains within a predeclared equivalence tolerance of the
-   control p50. The tolerance must be fixed before the injected result is
-   inspected.
+1. Run at least three independent, fresh-process controls for every
+   language/arm/load combination. Record their p50 values, median, minimum,
+   maximum, and full range. Compare the injected p50 with the control median,
+   using the predeclared tolerance rule
+   `max(5% relative difference, control p50 full range in ns)`. The formula and
+   replicate count must be frozen before any control is run; the observed
+   range is then derived only from controls, before the injected result is
+   inspected. There is no unmeasured fixed nanosecond floor.
 2. Injected-run p99.9 is at least 50% of the pause duration and max is at least
    80% of the pause duration, placing both in the pause's time scale.
 3. Achieved/target remains near 1.0 under injection, within a predeclared tight
-   scheduling tolerance and without a material drop from control. Merely
-   passing the general 0.95 validity gate is insufficient.
+   scheduling tolerance and without a material drop from the median control.
+   Every control replicate must independently pass this tight rate gate.
+   Merely passing the general 0.95 validity gate is insufficient.
 
 Max alone never establishes coordinated-omission resistance. The expected
 signature is an essentially unchanged median, pause-scale tail and maximum,
 and unchanged offered rate.
+
+The report must retain the signed
+`injected p50 - control median p50` delta at every load. A monotonic or
+load-correlated signed pattern remains a reported residual observation even
+when it lies inside the empirical equivalence band; it must not be relabeled
+as timer noise.
 
 Run this complete counterfactual independently for A, B-W, and B-4W in both
 languages. Each run recomputes the pause-backlog bounds, drain allowance, and
@@ -226,6 +238,15 @@ that were fully allocated before measurement. This arm measures the runtime,
 JIT, safepoint, scheduling, and harness floor. If the Java GC log shows no
 collection in the measured region, this arm provides no evidence for or
 against a GC advantage.
+
+The first A/B harness extension must also preserve a separate, self-contained
+A-equivalence evidence bundle against the immediately preceding
+allocation-free harness. It contains at least five adjacent, alternating
+fresh-process pairs at identical configuration, raw samples, clean build-time
+revisions for both binaries, zero A-arm workload counters, and a
+machine-readable report of achieved/target plus p50/p99/p99.9. This is a
+measurement-apparatus regression gate, not portable performance evidence, and
+must be indexed alongside the final matrix rather than existing only in chat.
 
 ### B. Allocation and reclamation workload
 
