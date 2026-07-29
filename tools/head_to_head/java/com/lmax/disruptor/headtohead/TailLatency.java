@@ -234,7 +234,7 @@ public final class TailLatency
         affinity.pinCurrent(0, "publisher");
         affinity.verify("measurement publisher");
 
-        final MeasurementState state = new MeasurementState(config, target.targetRate);
+        final MeasurementState state = new MeasurementState(config, target);
         final MeasurementHandler handler = switch (config.handlerMode)
         {
             case ALLOCATION_FREE -> new AllocationFreeHandler(state);
@@ -296,10 +296,9 @@ public final class TailLatency
         final boolean rateValid = actualRate >= target.targetRate * VALID_RUN_THRESHOLD;
         final LatencyStats stats = LatencyStats.from(state.latencyNs);
         final WorkloadStats workload = handler.workloadStats(config);
-        final PauseCheck pause = config.injectSleep == null
+        final PauseCheck pause = target.injectSleepNs == 0L
                 ? null
                 : PauseCheck.from(
-                        config,
                         target.targetRate,
                         commonMax,
                         stats,
@@ -437,6 +436,30 @@ public final class TailLatency
                 : value.longValueExact();
     }
 
+    private static long ceilTripleProductDivide(
+            final long first,
+            final long second,
+            final long third,
+            final long denominator)
+    {
+        if (first < 0L || second < 0L || third < 0L || denominator <= 0L)
+        {
+            throw new IllegalArgumentException(
+                    "ceilTripleProductDivide requires non-negative values");
+        }
+        final BigInteger numerator = BigInteger.valueOf(first)
+                .multiply(BigInteger.valueOf(second))
+                .multiply(BigInteger.valueOf(third));
+        final BigInteger divisor = BigInteger.valueOf(denominator);
+        final BigInteger value = numerator
+                .add(divisor)
+                .subtract(BigInteger.ONE)
+                .divide(divisor);
+        return value.compareTo(BigInteger.valueOf(Long.MAX_VALUE)) > 0
+                ? Long.MAX_VALUE
+                : value.longValueExact();
+    }
+
     private static Path samplesPathForLoad(final Path base, final long loadPct)
     {
         if (loadPct == 0L)
@@ -508,7 +531,7 @@ public final class TailLatency
                   --calibration-events <N>
                   --calibration-duration-ms <N>
                   --cpu-list <N,N,...>
-                  --inject-sleep-ms <N>
+                  --inject-sleep-us-by-load <U,U,...>
                   --inject-at-measured-pct <1..99>
                   --gc-log <path>
                   --jfr-file <path>
@@ -587,7 +610,7 @@ public final class TailLatency
         boolean affinityVerifiedAll;
         String outputPath;
         String samplesOutput;
-        Duration injectSleep;
+        long[] injectSleepNsByLoad = new long[0];
         long injectAtMeasuredPct = DEFAULT_INJECT_AT_MEASURED_PCT;
         String gcLog;
         String jfrFile;
@@ -640,9 +663,9 @@ public final class TailLatency
                     case "--output" -> config.outputPath = value(args, ++index, argument);
                     case "--samples-output" ->
                             config.samplesOutput = value(args, ++index, argument);
-                    case "--inject-sleep-ms" ->
-                            config.injectSleep = Duration.ofMillis(
-                                    positiveLong(value(args, ++index, argument), argument));
+                    case "--inject-sleep-us-by-load" ->
+                            config.injectSleepNsByLoad = parseDurationUsList(
+                                    value(args, ++index, argument));
                     case "--inject-at-measured-pct" ->
                             config.injectAtMeasuredPct =
                                     positiveLong(value(args, ++index, argument), argument);
@@ -719,7 +742,7 @@ public final class TailLatency
             if (calibrateOnly)
             {
                 if (rate != null || maxRate != null || ownMax != null
-                        || injectSleep != null || samplesOutput != null)
+                        || injectSleepNsByLoad.length != 0 || samplesOutput != null)
                 {
                     throw new IllegalArgumentException(
                             "calibrate-only rejects measurement-only flags");
@@ -756,6 +779,14 @@ public final class TailLatency
                             "load levels must be in 1..=100");
                 }
             }
+            final int expectedInjectionDurations = rate == null ? loadLevels.length : 1;
+            if (injectSleepNsByLoad.length != 0
+                    && injectSleepNsByLoad.length != expectedInjectionDurations)
+            {
+                throw new IllegalArgumentException(
+                        "inject-sleep-us-by-load must contain "
+                                + expectedInjectionDurations + " values");
+            }
             validateSchedulableRate(rate, "--rate");
             validateSchedulableRate(maxRate, "--max-rate");
             validateSchedulableRate(ownMax, "--own-max");
@@ -779,15 +810,24 @@ public final class TailLatency
         {
             if (rate != null)
             {
-                return List.of(new Target(0L, rate));
+                return List.of(new Target(
+                        0L,
+                        rate,
+                        injectSleepNsByLoad.length == 0 ? 0L : injectSleepNsByLoad[0]));
             }
             final List<Target> targets = new ArrayList<>(loadLevels.length);
-            for (final long load : loadLevels)
+            for (int index = 0; index < loadLevels.length; index++)
             {
+                final long load = loadLevels[index];
                 final long target = Math.round(commonMax * load / 100.0);
                 if (target > 0L)
                 {
-                    targets.add(new Target(load, target));
+                    targets.add(new Target(
+                            load,
+                            target,
+                            injectSleepNsByLoad.length == 0
+                                    ? 0L
+                                    : injectSleepNsByLoad[index]));
                 }
             }
             return targets;
@@ -888,6 +928,17 @@ public final class TailLatency
             return result;
         }
 
+        private static long[] parseDurationUsList(final String text)
+        {
+            final long[] micros = parseLoadLevels(text);
+            final long[] nanos = new long[micros.length];
+            for (int index = 0; index < micros.length; index++)
+            {
+                nanos[index] = Math.multiplyExact(micros[index], 1_000L);
+            }
+            return nanos;
+        }
+
         private static List<Integer> parseCpuList(final String text)
         {
             if (text.isEmpty())
@@ -909,7 +960,7 @@ public final class TailLatency
         }
     }
 
-    private record Target(long loadPct, long targetRate)
+    private record Target(long loadPct, long targetRate, long injectSleepNs)
     {
     }
 
@@ -1098,7 +1149,7 @@ public final class TailLatency
         long pausePlannedNs;
         long pauseSequence = -1L;
 
-        MeasurementState(final Config config, final long targetRate)
+        MeasurementState(final Config config, final Target target)
         {
             warmupEvents = config.warmupEvents;
             finalSequence = config.eventsTotal - 1L;
@@ -1106,7 +1157,7 @@ public final class TailLatency
             plannedNs = new long[sampleCount];
             completionNs = new long[sampleCount];
             latencyNs = new long[sampleCount];
-            if (config.injectSleep == null)
+            if (target.injectSleepNs == 0L)
             {
                 injectSequence = -1L;
                 injectSleepNs = 0L;
@@ -1116,9 +1167,9 @@ public final class TailLatency
                 injectSequence = config.warmupEvents
                         + (config.eventsTotal - config.warmupEvents)
                         * config.injectAtMeasuredPct / 100L;
-                injectSleepNs = config.injectSleep.toNanos();
+                injectSleepNs = target.injectSleepNs;
             }
-            if (targetRate <= 0L)
+            if (target.targetRate <= 0L)
             {
                 throw new IllegalArgumentException("target rate must be positive");
             }
@@ -1359,11 +1410,13 @@ public final class TailLatency
     }
 
     private record PauseCheck(
-            long sleepNs,
+            long requestedSleepNs,
+            long observedSleepNs,
             long injectionSequence,
             long injectionPlannedNs,
             long pauseStartedNs,
             long pauseCompletedNs,
+            long expectedBacklogSamples,
             long expectedAffectedSamples,
             long sampleCount,
             long minimumAffectedSamples,
@@ -1371,14 +1424,13 @@ public final class TailLatency
             double loadFraction,
             long minimumDrainNs,
             long remainingPlannedNsAfterPause,
-            boolean backlogInRange,
+            boolean affectedInRange,
             boolean drainAllowanceMet,
             boolean doubleDrainAllowanceMet,
             boolean p99_9Visible,
             boolean maxVisible)
     {
         static PauseCheck from(
-                final Config config,
                 final long targetRate,
                 final double commonMax,
                 final LatencyStats stats,
@@ -1389,29 +1441,50 @@ public final class TailLatency
             {
                 throw new IllegalStateException("configured pause was not observed");
             }
-            final long sleepNs = config.injectSleep.toNanos();
-            final long expected = Math.max(
+            final long requestedSleepNs = state.injectSleepNs;
+            final long observedSleepNs = Math.max(
+                    0L, state.pauseCompletedNs - state.pauseStartedNs);
+            if (observedSleepNs == 0L)
+            {
+                throw new IllegalStateException("observed injected pause duration was zero");
+            }
+            final long expectedBacklog = Math.max(
                     1L,
-                    ceilMultiplyDivide(targetRate, sleepNs, NANOS_PER_SECOND));
+                    ceilMultiplyDivide(targetRate, observedSleepNs, NANOS_PER_SECOND));
             final long minimum = (stats.count + 999L) / 1_000L;
             final long maximum = stats.count / 10L;
             final long common = (long) Math.floor(commonMax);
-            final long drain = targetRate < common
-                    ? ceilMultiplyDivide(sleepNs, targetRate, common - targetRate)
-                    : Long.MAX_VALUE;
+            if (targetRate >= common)
+            {
+                throw new IllegalStateException("target rate must remain below common max");
+            }
+            final long expectedAffected = Math.max(
+                    1L,
+                    ceilTripleProductDivide(
+                            targetRate,
+                            observedSleepNs,
+                            common,
+                            Math.multiplyExact(
+                                    NANOS_PER_SECOND,
+                                    common - targetRate)));
+            final long drain = ceilMultiplyDivide(
+                    observedSleepNs, targetRate, common - targetRate);
             final long remaining = Math.max(0L, lastPlannedNs - state.pauseCompletedNs);
-            final boolean backlog = expected >= minimum && expected <= maximum;
+            final boolean backlog =
+                    expectedAffected >= minimum && expectedAffected <= maximum;
             final boolean drainMet = remaining >= drain;
             final boolean doubleDrain = remaining >= saturatingMultiply(drain, 2L);
-            final boolean p999 = backlog && stats.p99_9 >= sleepNs * 0.5;
-            final boolean max = stats.max >= sleepNs * 0.8;
+            final boolean p999 = backlog && stats.p99_9 >= observedSleepNs * 0.5;
+            final boolean max = stats.max >= observedSleepNs * 0.8;
             return new PauseCheck(
-                    sleepNs,
+                    requestedSleepNs,
+                    observedSleepNs,
                     state.pauseSequence,
                     state.pausePlannedNs,
                     state.pauseStartedNs,
                     state.pauseCompletedNs,
-                    expected,
+                    expectedBacklog,
+                    expectedAffected,
                     stats.count,
                     minimum,
                     maximum,
@@ -1427,7 +1500,7 @@ public final class TailLatency
 
         boolean valid()
         {
-            return backlogInRange && drainAllowanceMet && p99_9Visible && maxVisible;
+            return affectedInRange && drainAllowanceMet && p99_9Visible && maxVisible;
         }
 
         private static long saturatingMultiply(final long value, final long multiplier)
@@ -1645,16 +1718,26 @@ public final class TailLatency
                     config.calibrationWarmupEvents(),
                     true);
             number(out, 2, "calibration_events_limit", config.calibrationEvents, true);
+            number(
+                    out,
+                    2,
+                    "calibration_duration_ms",
+                    config.calibrationDuration.toMillis(),
+                    true);
             decimal(out, 2, "max_rate", commonMax == null ? ownMax : commonMax, true);
             decimal(out, 2, "own_max", ownMax, true);
             nullableDecimal(out, 2, "common_max", commonMax, true);
             decimal(out, 2, "minimum_actual_target_ratio", VALID_RUN_THRESHOLD, true);
-            number(
-                    out,
-                    2,
-                    "inject_sleep_ms",
-                    config.injectSleep == null ? 0L : config.injectSleep.toMillis(),
-                    true);
+            out.append("  \"inject_sleep_us_by_load\": [");
+            for (int index = 0; index < config.injectSleepNsByLoad.length; index++)
+            {
+                if (index > 0)
+                {
+                    out.append(", ");
+                }
+                out.append(config.injectSleepNsByLoad[index] / 1_000L);
+            }
+            out.append("],\n");
             number(
                     out,
                     2,
@@ -1803,11 +1886,18 @@ public final class TailLatency
         private static void appendPause(final StringBuilder out, final PauseCheck pause)
         {
             out.append("      \"pause_validation\": {\n");
-            number(out, 8, "sleep_ns", pause.sleepNs, true);
+            number(out, 8, "requested_sleep_ns", pause.requestedSleepNs, true);
+            number(out, 8, "observed_sleep_ns", pause.observedSleepNs, true);
             number(out, 8, "injection_sequence", pause.injectionSequence, true);
             number(out, 8, "injection_planned_ns", pause.injectionPlannedNs, true);
             number(out, 8, "pause_started_ns", pause.pauseStartedNs, true);
             number(out, 8, "pause_completed_ns", pause.pauseCompletedNs, true);
+            number(
+                    out,
+                    8,
+                    "expected_backlog_samples",
+                    pause.expectedBacklogSamples,
+                    true);
             number(
                     out,
                     8,
@@ -1827,7 +1917,7 @@ public final class TailLatency
                     "maximum_affected_samples",
                     pause.maximumAffectedSamples,
                     true);
-            bool(out, 8, "backlog_in_range", pause.backlogInRange, true);
+            bool(out, 8, "affected_in_range", pause.affectedInRange, true);
             decimal(out, 8, "load_fraction", pause.loadFraction, true);
             number(out, 8, "minimum_drain_ns", pause.minimumDrainNs, true);
             number(

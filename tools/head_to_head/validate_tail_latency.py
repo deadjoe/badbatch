@@ -16,6 +16,7 @@ LANGUAGES = ("rust", "java")
 PHASES = ("control", "injected")
 RAW_HEADER = "sequence,planned_ns,completion_ns,latency_ns"
 MINIMUM_CONTROL_REPLICATES = 3
+MINIMUM_CALIBRATION_REPLICATES = 3
 A_EQUIVALENCE_BASELINE_REV = "36f6abce33925bd37fa898726a47018b6045d154"
 A_EQUIVALENCE_CURRENT_REV = "067f71813ecd24a8df5e1536ab9959d096fceeec"
 
@@ -44,6 +45,24 @@ def relative_difference(left: float, right: float) -> float:
     return abs(left - right) / denominator
 
 
+def expected_pause_counts(
+    *,
+    common_max: int,
+    target_rate: int,
+    observed_sleep_ns: int,
+) -> tuple[int, int]:
+    if not 0 < target_rate < common_max:
+        raise ValueError("target rate must be in 1..common_max")
+    backlog_numerator = target_rate * observed_sleep_ns
+    backlog = (backlog_numerator + 999_999_999) // 1_000_000_000
+    affected_denominator = 1_000_000_000 * (common_max - target_rate)
+    affected_numerator = backlog_numerator * common_max
+    affected = (
+        affected_numerator + affected_denominator - 1
+    ) // affected_denominator
+    return max(backlog, 1), max(affected, 1)
+
+
 def p50_equivalent(
     control_median: float,
     injected: float,
@@ -56,6 +75,28 @@ def p50_equivalent(
         relative_tolerance * max(abs(control_median), abs(injected)),
     )
     return abs(control_median - injected) <= allowed_delta
+
+
+def control_p50_stability(
+    control_p50s: list[float],
+    *,
+    max_relative_range: float,
+) -> tuple[float, float, float, bool]:
+    if not control_p50s:
+        raise ValueError("control p50 samples must not be empty")
+    observed_median = float(median(control_p50s))
+    full_range = max(control_p50s) - min(control_p50s)
+    relative_range = (
+        full_range / abs(observed_median)
+        if observed_median != 0.0
+        else (0.0 if full_range == 0.0 else math.inf)
+    )
+    return (
+        observed_median,
+        full_range,
+        relative_range,
+        relative_range <= max_relative_range,
+    )
 
 
 def expected_measurement_order(control_replicates: int) -> list[str]:
@@ -74,6 +115,20 @@ def expected_measurement_order(control_replicates: int) -> list[str]:
             ("java", "rust") if arm_index % 2 == 0 else ("rust", "java")
         )
         order.extend(f"injected-{language}-{arm}" for language in languages)
+    return order
+
+
+def expected_calibration_order(calibration_replicates: int) -> list[str]:
+    order: list[str] = []
+    for replicate in range(1, calibration_replicates + 1):
+        phase = "calibration" if replicate == 1 else f"calibration-r{replicate}"
+        for arm_index, arm in enumerate(ARMS):
+            languages = (
+                ("rust", "java")
+                if (arm_index + replicate - 1) % 2 == 0
+                else ("java", "rust")
+            )
+            order.extend(f"{phase}-{language}-{arm}" for language in languages)
     return order
 
 
@@ -191,7 +246,7 @@ def main() -> None:
         if not condition:
             errors.append(message)
 
-    check(manifest.get("schema_version") == 2, "unsupported run manifest schema")
+    check(manifest.get("schema_version") == 3, "unsupported run manifest schema")
     buffer_size = int(manifest["buffer_size"])
     measured_events = int(manifest["measured_events"])
     warmup_by_language = {
@@ -205,13 +260,25 @@ def main() -> None:
     load_levels = [int(value) for value in manifest["load_levels"]]
     common_max = int(manifest["common_max"])
     allocation_tolerance = float(manifest["allocation_tolerance"])
+    calibration_replicates = int(manifest["calibration_replicates"])
+    calibration_duration_ms = int(manifest["calibration_duration_ms"])
+    maximum_planned_measured_duration_ms = int(
+        manifest["maximum_planned_measured_duration_ms"]
+    )
     control_replicates = int(manifest["control_replicates"])
     p50_tolerance = float(manifest["co_p50_relative_tolerance"])
+    control_p50_max_relative_range = float(
+        manifest["co_control_p50_max_relative_range"]
+    )
     p50_empirical_rule = str(manifest["co_p50_empirical_tolerance_rule"])
     achieved_tolerance = float(manifest["co_achieved_target_tolerance"])
     expected_allocation = int(manifest["expected_allocation_bytes"])
     java_heap = str(manifest["java_heap"])
     java_options = [str(value) for value in manifest["java_options"]]
+    inject_sleep_us_by_load = {
+        int(load): int(duration)
+        for load, duration in manifest["inject_sleep_us_by_load"].items()
+    }
     provenance_pairs: dict[str, set[tuple[str, str]]] = {
         language: set() for language in LANGUAGES
     }
@@ -347,6 +414,11 @@ def main() -> None:
             int(artifact.get("buffer_size", -1)) == buffer_size,
             f"{label}: buffer-size mismatch",
         )
+        check(
+            int(artifact.get("calibration_duration_ms", -1))
+            == calibration_duration_ms,
+            f"{label}: calibration-duration mismatch",
+        )
 
     def validate_java_runtime(
         artifact: dict[str, Any],
@@ -423,6 +495,36 @@ def main() -> None:
         "fewer than three independent control replicates",
     )
     check(
+        calibration_replicates >= MINIMUM_CALIBRATION_REPLICATES,
+        "fewer than three independent calibration replicates",
+    )
+    check(
+        calibration_duration_ms >= maximum_planned_measured_duration_ms,
+        "calibration window is shorter than a planned measured load",
+    )
+    expected_maximum_measured_ms = max(
+        (
+            measured_events * 1_000
+            + ((common_max * load_pct + 50) // 100)
+            - 1
+        )
+        // ((common_max * load_pct + 50) // 100)
+        for load_pct in load_levels
+    )
+    check(
+        maximum_planned_measured_duration_ms
+        == expected_maximum_measured_ms,
+        "maximum planned measured duration mismatch",
+    )
+    check(
+        0.0 <= control_p50_max_relative_range <= 1.0,
+        "invalid control p50 relative-range limit",
+    )
+    check(
+        set(inject_sleep_us_by_load) == set(load_levels),
+        "per-load injection durations do not match load levels",
+    )
+    check(
         p50_empirical_rule == "control_p50_full_range_ns",
         "unsupported empirical p50 tolerance rule",
     )
@@ -430,8 +532,14 @@ def main() -> None:
         measured_events >= 4 * buffer_size,
         "measured event count does not fill B-4W",
     )
+    check(
+        manifest.get("calibration_execution_order")
+        == expected_calibration_order(calibration_replicates),
+        "calibration execution order is not the frozen balanced order",
+    )
 
     calibration_maxima: dict[str, int] = {}
+    calibration_replicate_maxima: dict[str, list[int]] = {}
     for arm in ARMS:
         for language in LANGUAGES:
             key = f"{language}-{arm}"
@@ -439,64 +547,102 @@ def main() -> None:
             if not isinstance(entry, dict):
                 errors.append(f"missing calibration manifest entry: {key}")
                 continue
-            path = root / str(entry["path"])
-            artifact = load_json(path)
-            check(artifact.get("run_mode") == "calibration", f"{path.name}: wrong mode")
-            check(artifact.get("language") == language, f"{path.name}: wrong language")
             check(
-                artifact.get("event_padding") == "none",
-                f"{path.name}: unmatched event padding",
+                entry.get("selection_rule")
+                == "minimum_of_independent_replicates",
+                f"{key}: wrong calibration selection rule",
             )
-            validate_common_schema(
-                artifact,
-                language=language,
-                label=path.name,
-            )
-            check(artifact.get("artifact_valid") is True, f"{path.name}: invalid")
-            record_provenance(
-                artifact,
-                language=language,
-                label=path.name,
-            )
+            replicate_entries = entry.get("replicates", [])
             check(
-                artifact.get("handler_mode")
-                == ("allocation-free" if arm == "a" else "allocating"),
-                f"{path.name}: handler mode mismatch",
+                isinstance(replicate_entries, list)
+                and len(replicate_entries) == calibration_replicates,
+                f"{key}: calibration replicate count mismatch",
             )
-            check(
-                artifact.get("retention_window")
-                == expected_retention(arm, buffer_size),
-                f"{path.name}: retention mismatch",
-            )
-            check(
-                int(artifact.get("warmup_events", -1))
-                == warmup_by_language[language],
-                f"{path.name}: calibration warmup input mismatch",
-            )
-            check(
-                int(artifact.get("calibration_warmup_events", -1))
-                == max(
-                    warmup_by_language[language],
-                    expected_retention(arm, buffer_size) or 0,
-                ),
-                f"{path.name}: effective calibration warmup mismatch",
-            )
-            check(artifact.get("common_max") is None, f"{path.name}: common_max set")
-            check(artifact.get("loads") == [], f"{path.name}: calibration has loads")
-            if language == "java":
-                expected_jfr = root / f"calibration-{key}.jfr"
-                expected_gc = root / f"calibration-{key}-gc.log"
-                validate_java_runtime(
-                    artifact,
-                    label=path.name,
-                    expected_jfr=expected_jfr,
-                    expected_gc=expected_gc,
+            observed_maxima: list[int] = []
+            for replicate_entry in replicate_entries:
+                if not isinstance(replicate_entry, dict):
+                    errors.append(f"{key}: malformed calibration replicate")
+                    continue
+                path = root / str(replicate_entry["path"])
+                artifact = load_json(path)
+                check(
+                    artifact.get("run_mode") == "calibration",
+                    f"{path.name}: wrong mode",
                 )
-            own_max = math.floor(float(artifact["own_max"]))
-            calibration_maxima[key] = own_max
+                check(
+                    artifact.get("language") == language,
+                    f"{path.name}: wrong language",
+                )
+                check(
+                    artifact.get("event_padding") == "none",
+                    f"{path.name}: unmatched event padding",
+                )
+                validate_common_schema(
+                    artifact,
+                    language=language,
+                    label=path.name,
+                )
+                check(
+                    artifact.get("artifact_valid") is True,
+                    f"{path.name}: invalid",
+                )
+                record_provenance(
+                    artifact,
+                    language=language,
+                    label=path.name,
+                )
+                check(
+                    artifact.get("handler_mode")
+                    == ("allocation-free" if arm == "a" else "allocating"),
+                    f"{path.name}: handler mode mismatch",
+                )
+                check(
+                    artifact.get("retention_window")
+                    == expected_retention(arm, buffer_size),
+                    f"{path.name}: retention mismatch",
+                )
+                check(
+                    int(artifact.get("warmup_events", -1))
+                    == warmup_by_language[language],
+                    f"{path.name}: calibration warmup input mismatch",
+                )
+                check(
+                    int(artifact.get("calibration_warmup_events", -1))
+                    == max(
+                        warmup_by_language[language],
+                        expected_retention(arm, buffer_size) or 0,
+                    ),
+                    f"{path.name}: effective calibration warmup mismatch",
+                )
+                check(
+                    artifact.get("common_max") is None,
+                    f"{path.name}: common_max set",
+                )
+                check(
+                    artifact.get("loads") == [],
+                    f"{path.name}: calibration has loads",
+                )
+                if language == "java":
+                    expected_jfr = root / f"{path.stem}.jfr"
+                    expected_gc = root / f"{path.stem}-gc.log"
+                    validate_java_runtime(
+                        artifact,
+                        label=path.name,
+                        expected_jfr=expected_jfr,
+                        expected_gc=expected_gc,
+                    )
+                own_max = math.floor(float(artifact["own_max"]))
+                observed_maxima.append(own_max)
+                check(
+                    own_max == int(replicate_entry["own_max_floor"]),
+                    f"{path.name}: floored own max mismatch",
+                )
+            selected = min(observed_maxima) if observed_maxima else 0
+            calibration_replicate_maxima[key] = observed_maxima
+            calibration_maxima[key] = selected
             check(
-                own_max == int(entry["own_max_floor"]),
-                f"{path.name}: floored own max mismatch",
+                selected == int(entry["own_max_floor"]),
+                f"{key}: selected calibration maximum mismatch",
             )
 
     if calibration_maxima:
@@ -603,6 +749,16 @@ def main() -> None:
                         int(artifact.get("warmup_events", -1))
                         == warmup_by_language[language],
                         f"{path.name}: warmup mismatch",
+                    )
+                    expected_injection_us = (
+                        [inject_sleep_us_by_load[load] for load in load_levels]
+                        if phase == "injected"
+                        else []
+                    )
+                    check(
+                        artifact.get("inject_sleep_us_by_load")
+                        == expected_injection_us,
+                        f"{path.name}: per-load injection durations mismatch",
                     )
                     check(
                         math.floor(float(artifact["common_max"])) == common_max,
@@ -711,6 +867,58 @@ def main() -> None:
                         )
                         if phase == "injected":
                             pause = load.get("pause_validation", {})
+                            requested_sleep_ns = (
+                                inject_sleep_us_by_load[load_pct] * 1_000
+                            )
+                            observed_sleep_ns = int(
+                                pause.get("observed_sleep_ns", 0)
+                            )
+                            expected_backlog, expected_affected = (
+                                expected_pause_counts(
+                                    common_max=common_max,
+                                    target_rate=target_rate,
+                                    observed_sleep_ns=observed_sleep_ns,
+                                )
+                            )
+                            check(
+                                int(pause.get("requested_sleep_ns", -1))
+                                == requested_sleep_ns,
+                                f"{path.name}: requested pause mismatch",
+                            )
+                            check(
+                                observed_sleep_ns > 0,
+                                f"{path.name}: observed pause duration missing",
+                            )
+                            check(
+                                int(pause.get("pause_completed_ns", -1))
+                                - int(pause.get("pause_started_ns", 0))
+                                == observed_sleep_ns,
+                                f"{path.name}: observed pause duration mismatch",
+                            )
+                            check(
+                                int(pause.get("expected_backlog_samples", -1))
+                                == expected_backlog,
+                                f"{path.name}: pause backlog mismatch",
+                            )
+                            check(
+                                int(pause.get("expected_affected_samples", -1))
+                                == expected_affected,
+                                f"{path.name}: drain-amplified affected count mismatch",
+                            )
+                            minimum_affected = (
+                                measured_events + 999
+                            ) // 1_000
+                            maximum_affected = measured_events // 10
+                            check(
+                                minimum_affected
+                                <= expected_affected
+                                <= maximum_affected,
+                                f"{path.name}: affected population outside bounds",
+                            )
+                            check(
+                                pause.get("affected_in_range") is True,
+                                f"{path.name}: affected-range gate",
+                            )
                             check(
                                 pause.get("valid") is True,
                                 f"{path.name}: injected pause structural gate",
@@ -741,7 +949,7 @@ def main() -> None:
             "Rust and Java artifacts do not share one BadBatch harness revision",
         )
 
-    control_p50_stability: dict[str, dict[str, Any]] = {}
+    control_p50_results: dict[str, dict[str, Any]] = {}
     for arm in ARMS:
         for language in LANGUAGES:
             injected = artifacts.get(("injected", language, arm), {})
@@ -763,24 +971,41 @@ def main() -> None:
                 control_p50s = [
                     float(load["latency_ns"]["p50"]) for load in control_loads
                 ]
-                control_p50_median = float(median(control_p50s))
-                control_p50_full_range = max(control_p50s) - min(control_p50s)
+                (
+                    control_p50_median,
+                    control_p50_full_range,
+                    control_relative_range,
+                    control_stable,
+                ) = control_p50_stability(
+                    control_p50s,
+                    max_relative_range=control_p50_max_relative_range,
+                )
                 injected_p50 = float(injected_load["latency_ns"]["p50"])
                 allowed_p50_delta = max(
                     control_p50_full_range,
                     p50_tolerance
                     * max(abs(control_p50_median), abs(injected_p50)),
                 )
-                equivalent = p50_equivalent(
+                equivalent = control_stable and p50_equivalent(
                     control_p50_median,
                     injected_p50,
                     relative_tolerance=p50_tolerance,
                     control_full_range_ns=control_p50_full_range,
                 )
-                check(
-                    equivalent,
-                    f"{language}-{arm}-{load_pct}: injected p50 outside tolerance",
-                )
+                if not control_stable:
+                    errors.append(
+                        f"{language}-{arm}-{load_pct}: control p50 unstable; "
+                        "equivalence inconclusive"
+                    )
+                    equivalence_status = "inconclusive_control_instability"
+                elif not equivalent:
+                    errors.append(
+                        f"{language}-{arm}-{load_pct}: "
+                        "injected p50 outside tolerance"
+                    )
+                    equivalence_status = "fail"
+                else:
+                    equivalence_status = "pass"
                 control_ratios = [
                     float(load["actual_target_ratio"]) for load in control_loads
                 ]
@@ -800,18 +1025,24 @@ def main() -> None:
                     injected_ratio + achieved_tolerance >= control_ratio_median,
                     f"{language}-{arm}-{load_pct}: achieved rate materially dropped",
                 )
-                control_p50_stability[f"{language}-{arm}-{load_pct}"] = {
+                control_p50_results[f"{language}-{arm}-{load_pct}"] = {
                     "control_p50_ns": control_p50s,
                     "control_p50_median_ns": control_p50_median,
                     "control_p50_min_ns": min(control_p50s),
                     "control_p50_max_ns": max(control_p50s),
                     "control_p50_full_range_ns": control_p50_full_range,
+                    "control_p50_relative_range": control_relative_range,
+                    "control_stability_limit": (
+                        control_p50_max_relative_range
+                    ),
+                    "control_stable": control_stable,
                     "injected_p50_ns": injected_p50,
                     "injected_minus_control_median_ns": (
                         injected_p50 - control_p50_median
                     ),
                     "allowed_delta_ns": allowed_p50_delta,
                     "equivalent": equivalent,
+                    "equivalence_status": equivalence_status,
                 }
 
     for phase in PHASES:
@@ -840,17 +1071,27 @@ def main() -> None:
                     )
 
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "passed": not errors,
         "errors": errors,
         "common_max": common_max,
         "calibration_maxima": calibration_maxima,
+        "calibration_replicate_maxima": calibration_replicate_maxima,
+        "calibration_replicates": calibration_replicates,
+        "calibration_duration_ms": calibration_duration_ms,
+        "maximum_planned_measured_duration_ms": (
+            maximum_planned_measured_duration_ms
+        ),
         "raw_samples_validated_per_load": measured_events,
         "load_levels": load_levels,
         "control_replicates": control_replicates,
         "co_p50_relative_tolerance": p50_tolerance,
+        "co_control_p50_max_relative_range": (
+            control_p50_max_relative_range
+        ),
         "co_p50_empirical_tolerance_rule": p50_empirical_rule,
-        "control_p50_stability": control_p50_stability,
+        "inject_sleep_us_by_load": inject_sleep_us_by_load,
+        "control_p50_stability": control_p50_results,
         "co_achieved_target_tolerance": achieved_tolerance,
         "allocation_tolerance": allocation_tolerance,
     }

@@ -101,7 +101,8 @@ and allocating-4W arm independently, takes one global common maximum, and then
 passes that value with each arm's own maximum:
 
 ```bash
-# Phase A: one artifact per arm and language
+# Phase A: at least three fresh-process artifacts per arm and language;
+# the runner conservatively selects the minimum calibrated maximum
 target/release/h2h_tail_latency --calibrate-only --handler-mode allocation-free \
   --output target/rust-a-calibration.json
 
@@ -119,15 +120,17 @@ exactly one 48-byte requested allocation per measured event. The logical
 payload remains four `u64` fields (32 bytes); the remaining bytes are explicit
 cross-runtime matching padding, not application payload.
 
-Use `--inject-sleep-ms 50` as the coordinated-omission counterfactual: the run is
-invalid unless the injected backlog is in the protocol's allowed range, the
-recorded post-pause schedule leaves the computed drain allowance, and the pause
-is visible in both p99.9 and max. The default injection point is 25% into the
-measured region and can be changed with `--inject-at-measured-pct`. A run also
-exits non-zero when achieved producer rate is below 95% of target. These are
-harness-validity checks, not portable performance conclusions; the full
-control-vs-pause median/rate signature is checked across artifacts, and formal
-results still require controlled hosts, CPU placement, and repeated runs.
+Use `--inject-sleep-us-by-load 167,72,19` as a direct coordinated-omission
+counterfactual for three configured loads. The run is invalid unless the
+**observed** pause keeps the complete drain-amplified affected population in
+the protocol's allowed range, the recorded post-pause schedule leaves the
+computed drain allowance, and the pause is visible in both p99.9 and max. The
+default injection point is 25% into the measured region and can be changed
+with `--inject-at-measured-pct`. A run also exits non-zero when achieved
+producer rate is below 95% of target. These are harness-validity checks, not
+portable performance conclusions; the full control-vs-pause median and tighter
+rate signature is checked across repeated artifacts, and formal results still
+require controlled hosts, CPU placement, and repeated runs.
 
 The binary embeds its Git revision and dirty state at build time. That
 provenance is independent of the directory used to launch the binary; an
@@ -150,24 +153,29 @@ JAVA_HOME=/path/to/jdk-17 \
 The runner does not trust source-level payload size or independently chosen
 load percentages. It first builds both artifacts with immutable provenance,
 checks the A/B bytecode, uses JFR to verify the Java B payload size, calibrates
-Rust/Java × A/B-W/B-4W, and chooses the minimum of all six maxima. Every arm
-then receives the same absolute 50/70/90% targets, followed by its own injected
-pause counterfactual. After calibration but before any tail result is observed,
-the runner freezes a whole-millisecond pause targeting five times the lower
-backlog bound while remaining inside the protocol's bounds at every load
-(falling back to the hard lower bound if needed). `--inject-sleep-ms` may
-predeclare a different value, but an out-of-range choice aborts before
-measurement. Rust and Java warmup counts are separate; freeze them
-from runtime-specific steady-state evidence before a formal run while keeping
-the measured sample count common. The validator streams every raw row, checks exact planned
-timestamps, pairing, allocation alignment, wall-clock anchors, provenance,
-JFR/GC artifact presence, and the predeclared control-versus-pause tolerances.
-It writes `validation_report.json` and exits non-zero on any mismatch.
+Rust/Java × A/B-W/B-4W in at least three balanced fresh processes, selects each
+arm's minimum, and chooses the minimum of all six conservative maxima. Every
+arm then receives the same absolute 50/70/90% targets, three fresh-process
+controls, and one injected pause counterfactual. After calibration but before
+any tail result is observed, the runner freezes a separate microsecond pause
+for every load, targeting five times the lower total-affected bound while
+remaining inside the protocol's bounds (falling back to the hard lower bound
+if needed). `--inject-sleep-us-by-load 50:U,70:U,90:U` may predeclare
+different values, but an out-of-range choice aborts before measurement. Rust
+and Java warmup counts are separate; freeze them from runtime-specific
+steady-state evidence before a formal run while keeping the measured sample
+count common. The validator streams every raw row, checks exact planned
+timestamps, requested and observed pauses, direct backlog and drain-amplified
+affected counts, pairing, allocation alignment, wall-clock anchors,
+provenance, JFR/GC artifact presence, and the predeclared
+control-versus-pause tolerances. It writes `validation_report.json` and exits
+non-zero on any mismatch.
 
-The default p50 equivalence band is the larger of 5% and 25 ns, so a
-single-digit-nanosecond shift at the timer floor does not masquerade as a
-material median change. Both components are written to the manifest before the
-injected run; override them only before execution.
+The default p50 equivalence band is the larger of 5% and the full range of the
+three control p50 values, but the empirical range can be used only when
+`full range / control median <= 5%`. An unstable control makes equivalence
+inconclusive instead of widening the band. The formulas and limits are written
+to the manifest before the first control; override them only before execution.
 
 The defaults pin G1 with a fixed 2 GiB heap and preserve JFR plus timestamped
 GC/safepoint logs. Override JVM flags only before execution and keep them with
