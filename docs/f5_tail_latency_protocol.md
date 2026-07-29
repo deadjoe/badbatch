@@ -29,9 +29,12 @@ comparable evidence.
 Rate selection has two explicit phases.
 
 1. Calibrate the maximum sustainable rate of Rust and Java independently on
-   the same host and configuration. A calibrated rate is sustainable only if
-   its achieved/target ratio is at least 0.95 and every other validity gate
-   passes.
+   the same host and configuration. Run at least three balanced,
+   fresh-process calibrations for every language/arm and select the minimum
+   observed maximum as that arm's conservative `own_max`; a single peak
+   calibration is insufficient. Every replicate must retain full provenance,
+   runtime, profiling, and validity evidence. The configured calibration
+   duration must not be shorter than the longest planned measured load.
 2. Set one common reference rate:
 
    ```text
@@ -159,43 +162,55 @@ Let:
 
 ```text
 N = measured sample count
-B = ceil(target_rate * pause_duration_seconds)
+L = target_rate / common_max
+B = ceil(target_rate * observed_pause_duration_seconds)
+A = ceil(B / (1 - L))
 ```
 
-Here `B` means the estimated pause backlog, not allocation arm B in section 8.
+Here `B` is only the direct backlog accumulated while the consumer is paused;
+it is not allocation arm B in section 8. `A` is the total affected population,
+including events that arrive while that backlog drains. Omitting the
+`1 / (1 - L)` factor is invalid and can undercount the 90%-load population by
+10x.
 
 The counterfactual is executable only when:
 
 ```text
-ceil(N / 1000) <= B <= floor(N / 10)
+ceil(N / 1000) <= A <= floor(N / 10)
 ```
 
 The lower bound gives p99.9 enough affected observations to see the pause. The
-upper bound makes the pause-created backlog at least an order of magnitude
-smaller than the measured population, rather than allowing the injection to
-dominate the run.
+upper bound makes the complete drain-amplified population at least an order of
+magnitude smaller than the measured population, rather than allowing the
+injection to move the body of the distribution.
 
 The injection point must also leave enough measured time to drain the pause
 backlog. Conservatively define:
 
 ```text
-L = target_rate / common_max
 minimum_drain_time = pause_duration * L / (1 - L)
 ```
 
-From the end of the injected pause through the last planned send, the measured
-region must retain at least `minimum_drain_time`; a 2x margin is recommended.
-For example, a 50 ms pause at the 90% load requires at least 450 ms after the
-pause, preferably 900 ms. The injection sequence, planned injection time,
-remaining measured time, and computed drain allowance must be recorded.
-Normally the pause belongs in the first half of the measured region, never
-near its end.
+Choose the requested pause independently for every load after calibration, at
+microsecond resolution, by the predeclared `A` bounds; a single duration must
+not be reused across 50%, 70%, and 90%. Record both requested and observed
+pause nanoseconds. Recompute `B`, `A`, and drain time from the observed
+duration, and invalidate an oversleep that violates either affected-population
+bound. From the end of the observed pause through the last planned send, the
+measured region must retain at least `minimum_drain_time`; a 2x margin is
+recommended. The injection sequence, planned injection time, remaining
+measured time, and computed drain allowance must be recorded. Normally the
+pause belongs in the first half of the measured region, never near its end.
 
 Acceptance requires all three signals together:
 
 1. Run at least three independent, fresh-process controls for every
    language/arm/load combination. Record their p50 values, median, minimum,
-   maximum, and full range. Compare the injected p50 with the control median,
+   maximum, and full range. Before using dispersion as a tolerance, require
+   `control full range / control median <= 5%`. If that stability prerequisite
+   fails, label p50 equivalence **inconclusive** and retain its GC/safepoint
+   logs; never let a control-side GC spike widen the band. For a stable
+   control, compare the injected p50 with the control median,
    using the predeclared tolerance rule
    `max(5% relative difference, control p50 full range in ns)`. The formula and
    replicate count must be frozen before any control is run; the observed

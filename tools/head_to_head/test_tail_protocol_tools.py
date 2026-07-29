@@ -115,6 +115,11 @@ class TailProtocolToolsTest(unittest.TestCase):
             [label for _, _, _, label in plan],
             validator.expected_measurement_order(3),
         )
+        calibration_plan = runner.build_calibration_plan(arms)
+        self.assertEqual(
+            [label for _, _, _, label in calibration_plan],
+            validator.expected_calibration_order(3),
+        )
 
     def test_raw_validator_checks_schedule_and_complete_row_count(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -214,6 +219,18 @@ class TailProtocolToolsTest(unittest.TestCase):
                 control_full_range_ns=4,
             )
         )
+        self.assertEqual(
+            (120.0, 3.0, 0.025, True),
+            validator.control_p50_stability(
+                [120.0, 117.0, 120.0],
+                max_relative_range=0.05,
+            ),
+        )
+        unstable = validator.control_p50_stability(
+            [134.0, 119.0, 1_905.0],
+            max_relative_range=0.05,
+        )
+        self.assertFalse(unstable[3])
         self.assertFalse(
             validator.p50_equivalent(
                 1_000,
@@ -223,29 +240,45 @@ class TailProtocolToolsTest(unittest.TestCase):
             )
         )
 
-    def test_pause_is_predeclared_from_calibration_without_tail_results(self) -> None:
-        selected = runner.select_inject_sleep_ms(
+    def test_pause_is_predeclared_per_load_from_total_affected_samples(self) -> None:
+        selected = runner.select_inject_sleep_us_by_load(
             common_max=30_000_000,
             load_levels=[50, 70, 90],
             measured_events=1_000_000,
-            requested_ms=None,
+            requested_us_by_load=None,
         )
-        self.assertEqual(1, selected)
+        self.assertEqual({50: 167, 70: 72, 90: 19}, selected)
         self.assertEqual(
-            100,
-            runner.select_inject_sleep_ms(
+            {50: 49_991, 70: 21_425, 90: 5_555},
+            runner.select_inject_sleep_us_by_load(
                 common_max=100_000,
                 load_levels=[50, 70, 90],
                 measured_events=1_000_000,
-                requested_ms=None,
+                requested_us_by_load=None,
+            ),
+        )
+        self.assertEqual(
+            5_130,
+            runner.expected_affected_samples(
+                common_max=10_000_000,
+                target_rate=9_000_000,
+                pause_us=57,
+            ),
+        )
+        self.assertEqual(
+            (513, 5_130),
+            validator.expected_pause_counts(
+                common_max=10_000_000,
+                target_rate=9_000_000,
+                observed_sleep_ns=57_000,
             ),
         )
         with self.assertRaises(SystemExit):
-            runner.select_inject_sleep_ms(
+            runner.select_inject_sleep_us_by_load(
                 common_max=30_000_000,
                 load_levels=[50, 70, 90],
                 measured_events=1_000_000,
-                requested_ms=50,
+                requested_us_by_load={50: 1, 70: 1, 90: 1},
             )
 
 

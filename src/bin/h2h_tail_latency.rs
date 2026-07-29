@@ -16,9 +16,10 @@
 //! Outputs p50 / p99 / p99.9 / p99.99 / max per load level and can dump raw
 //! samples.
 //!
-//! Counterfactual validation: `--inject-sleep-ms N` makes the handler sleep
-//! once for N milliseconds; a correct harness will show a ~N-ms spike in
-//! p99.9 and max.
+//! Counterfactual validation: `--inject-sleep-us-by-load U1,U2,...` makes the
+//! handler sleep once during each measured load. A correct harness accounts
+//! for the drain-amplified affected population and shows the pause in p99.9
+//! and max.
 
 #![allow(
     missing_docs,
@@ -341,7 +342,7 @@ struct Config {
     output: Option<PathBuf>,
     samples_output: Option<PathBuf>,
     timeout: Duration,
-    inject_sleep: Option<Duration>,
+    inject_sleeps: Vec<Duration>,
     inject_at_measured_pct: u64,
 }
 
@@ -364,7 +365,7 @@ fn parse_args() -> Result<Config, String> {
     let mut cpu_list = Vec::new();
     let mut output = None;
     let mut samples_output = None;
-    let mut inject_sleep = None;
+    let mut inject_sleeps = Vec::new();
     let mut inject_at_measured_pct = DEFAULT_INJECT_AT_MEASURED_PCT;
     let mut quick = false;
     // `quick` is consumed below when applying smaller defaults.
@@ -476,16 +477,10 @@ fn parse_args() -> Result<Config, String> {
                     args.next().ok_or("missing --samples-output")?,
                 ));
             }
-            "--inject-sleep-ms" => {
-                let ms: u64 = args
-                    .next()
-                    .ok_or("missing --inject-sleep-ms")?
-                    .parse()
-                    .map_err(|e| format!("inject-sleep-ms: {e}"))?;
-                if ms == 0 {
-                    return Err("inject-sleep-ms must be > 0".into());
-                }
-                inject_sleep = Some(Duration::from_millis(ms));
+            "--inject-sleep-us-by-load" => {
+                inject_sleeps = parse_duration_us_list(
+                    &args.next().ok_or("missing --inject-sleep-us-by-load")?,
+                )?;
             }
             "--inject-at-measured-pct" => {
                 inject_at_measured_pct = args
@@ -621,13 +616,19 @@ fn parse_args() -> Result<Config, String> {
         && (rate.is_some()
             || max_rate.is_some()
             || own_max.is_some()
-            || inject_sleep.is_some()
+            || !inject_sleeps.is_empty()
             || samples_output.is_some())
     {
         return Err(
             "calibrate-only rejects measurement-only rate/max/own-max/injection/sample flags"
                 .into(),
         );
+    }
+    let expected_inject_sleeps = if rate.is_some() { 1 } else { load_levels.len() };
+    if !inject_sleeps.is_empty() && inject_sleeps.len() != expected_inject_sleeps {
+        return Err(format!(
+            "inject-sleep-us-by-load must contain {expected_inject_sleeps} values"
+        ));
     }
 
     Ok(Config {
@@ -650,7 +651,7 @@ fn parse_args() -> Result<Config, String> {
         output,
         samples_output,
         timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-        inject_sleep,
+        inject_sleeps,
         inject_at_measured_pct,
     })
 }
@@ -688,6 +689,24 @@ fn parse_percent_list(value: &str) -> Result<Vec<u64>, String> {
         .map(|part| {
             part.parse::<u64>()
                 .map_err(|error| format!("invalid load level {part:?}: {error}"))
+        })
+        .collect()
+}
+
+fn parse_duration_us_list(value: &str) -> Result<Vec<Duration>, String> {
+    if value.is_empty() {
+        return Err("inject-sleep-us-by-load must not be empty".into());
+    }
+    value
+        .split(',')
+        .map(|part| {
+            let micros = part
+                .parse::<u64>()
+                .map_err(|error| format!("invalid injection duration {part:?}: {error}"))?;
+            if micros == 0 {
+                return Err("injection durations must be positive".into());
+            }
+            Ok(Duration::from_micros(micros))
         })
         .collect()
 }
@@ -747,7 +766,7 @@ Options:
   --calibration-events <N>              (max events for calibration; default 100_000_000)
   --calibration-duration-ms <N>         (max duration for calibration; default 2000)
   --cpu-list <N,N,...>                  (pin producer/consumer to logical CPUs)
-  --inject-sleep-ms <N>                 (inject one N-ms handler sleep for CO validation)
+  --inject-sleep-us-by-load <U,U,...>   (one per-load handler sleep for CO validation)
   --inject-at-measured-pct <1..99>      (default 25)
   --output <path.json>                  (latency statistics JSON)
   --samples-output <path.csv>           (required raw schedule/completion samples)
@@ -1218,11 +1237,13 @@ struct LatencyStats {
 
 #[derive(Debug, Clone, Copy)]
 struct PauseCheck {
-    sleep_ns: u64,
+    requested_sleep_ns: u64,
+    observed_sleep_ns: u64,
     injection_sequence: u64,
     injection_planned_ns: u64,
     pause_started_ns: u64,
     pause_completed_ns: u64,
+    expected_backlog_samples: u64,
     expected_affected_samples: u64,
     minimum_affected_samples: u64,
     maximum_affected_samples: u64,
@@ -1235,17 +1256,17 @@ struct PauseCheck {
 }
 
 impl PauseCheck {
-    fn backlog_in_range(self) -> bool {
+    fn affected_in_range(self) -> bool {
         self.expected_affected_samples >= self.minimum_affected_samples
             && self.expected_affected_samples <= self.maximum_affected_samples
     }
 
     fn p99_9_visible(self) -> bool {
-        self.backlog_in_range() && self.observed_p99_9_ns >= self.sleep_ns as f64 * 0.5
+        self.affected_in_range() && self.observed_p99_9_ns >= self.observed_sleep_ns as f64 * 0.5
     }
 
     fn max_visible(self) -> bool {
-        self.observed_max_ns >= self.sleep_ns as f64 * 0.8
+        self.observed_max_ns >= self.observed_sleep_ns as f64 * 0.8
     }
 
     fn drain_allowance_met(self) -> bool {
@@ -1257,7 +1278,7 @@ impl PauseCheck {
     }
 
     fn is_valid(self) -> bool {
-        self.backlog_in_range()
+        self.affected_in_range()
             && self.drain_allowance_met()
             && self.p99_9_visible()
             && self.max_visible()
@@ -1269,6 +1290,7 @@ fn run_load(
     target_rate: u64,
     common_max: f64,
     own_max: f64,
+    inject_sleep: Option<Duration>,
 ) -> Result<LoadResult, String> {
     match cfg.wait {
         WaitKind::BusySpin => run_load_w(
@@ -1276,6 +1298,7 @@ fn run_load(
             target_rate,
             common_max,
             own_max,
+            inject_sleep,
             BusySpinWaitStrategy::new(),
         ),
         WaitKind::Yielding => run_load_w(
@@ -1283,6 +1306,7 @@ fn run_load(
             target_rate,
             common_max,
             own_max,
+            inject_sleep,
             YieldingWaitStrategy::new(),
         ),
     }
@@ -1305,6 +1329,7 @@ fn run_load_w<W>(
     target_rate: u64,
     common_max: f64,
     own_max: f64,
+    inject_sleep: Option<Duration>,
     wait: W,
 ) -> Result<LoadResult, String>
 where
@@ -1316,6 +1341,7 @@ where
             target_rate,
             common_max,
             own_max,
+            inject_sleep,
             wait,
             AllocationFreeWorkload,
         ),
@@ -1324,6 +1350,7 @@ where
             target_rate,
             common_max,
             own_max,
+            inject_sleep,
             wait,
             AllocatingWorkload::new(
                 cfg.retention_window
@@ -1338,6 +1365,7 @@ fn run_load_with_workload<W, H>(
     target_rate: u64,
     common_max: f64,
     own_max: f64,
+    inject_sleep: Option<Duration>,
     wait: W,
     workload: H,
 ) -> Result<LoadResult, String>
@@ -1356,7 +1384,7 @@ where
         Arc::clone(&ready),
         cfg.warmup_events,
         cfg.events_total,
-        cfg.inject_sleep,
+        inject_sleep,
         cfg.inject_at_measured_pct,
         workload,
         cfg.cpu(1),
@@ -1493,8 +1521,7 @@ where
     let rate_valid = rate_is_valid(actual_rate, target_rate);
     let stats = compute_stats(&samples);
     let last_planned_ns = scheduled_ns(cfg.events_total - 1, target_rate)?;
-    let pause_check = cfg
-        .inject_sleep
+    let pause_check = inject_sleep
         .map(|sleep| {
             let observation = outcome
                 .injection
@@ -1589,34 +1616,51 @@ fn validate_injected_pause(
     observation: InjectionObservation,
     last_planned_ns: u64,
 ) -> Result<PauseCheck, String> {
-    let sleep_ns = sleep.as_nanos().try_into().unwrap_or(u64::MAX);
-    let affected_numerator = u128::from(target_rate).saturating_mul(u128::from(sleep_ns));
-    let expected_affected_samples = affected_numerator
+    let requested_sleep_ns = sleep.as_nanos().try_into().unwrap_or(u64::MAX);
+    let observed_sleep_ns = observation
+        .completed_ns
+        .saturating_sub(observation.started_ns);
+    if observed_sleep_ns == 0 {
+        return Err("observed injected pause duration was zero".into());
+    }
+    if !common_max.is_finite() || common_max <= 0.0 {
+        return Err("common max must be finite and positive".into());
+    }
+    let common_max_u64 = common_max.floor() as u64;
+    if target_rate >= common_max_u64 {
+        return Err("target rate must remain below common max".into());
+    }
+    let backlog_numerator = u128::from(target_rate).saturating_mul(u128::from(observed_sleep_ns));
+    let expected_backlog_samples = backlog_numerator
         .saturating_add(999_999_999)
         .checked_div(1_000_000_000)
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    let affected_numerator = backlog_numerator.saturating_mul(u128::from(common_max_u64));
+    let affected_denominator =
+        1_000_000_000_u128.saturating_mul(u128::from(common_max_u64 - target_rate));
+    let expected_affected_samples = affected_numerator
+        .saturating_add(affected_denominator.saturating_sub(1))
+        .checked_div(affected_denominator)
         .and_then(|value| u64::try_from(value).ok())
         .unwrap_or(u64::MAX)
         .max(1);
     let sample_count = u64::try_from(stats.count).unwrap_or(u64::MAX);
     let minimum_affected_samples = sample_count.saturating_add(999) / 1_000;
     let maximum_affected_samples = sample_count / 10;
-    if !common_max.is_finite() || common_max <= 0.0 {
-        return Err("common max must be finite and positive".into());
-    }
-    let common_max_u64 = common_max.floor() as u64;
-    let minimum_drain_ns = if target_rate < common_max_u64 {
-        let numerator = u128::from(sleep_ns).saturating_mul(u128::from(target_rate));
-        let denominator = u128::from(common_max_u64 - target_rate);
-        u64::try_from(numerator.div_ceil(denominator)).unwrap_or(u64::MAX)
-    } else {
-        u64::MAX
-    };
+    let drain_numerator = u128::from(observed_sleep_ns).saturating_mul(u128::from(target_rate));
+    let drain_denominator = u128::from(common_max_u64 - target_rate);
+    let minimum_drain_ns =
+        u64::try_from(drain_numerator.div_ceil(drain_denominator)).unwrap_or(u64::MAX);
     Ok(PauseCheck {
-        sleep_ns,
+        requested_sleep_ns,
+        observed_sleep_ns,
         injection_sequence: observation.sequence,
         injection_planned_ns: observation.planned_ns,
         pause_started_ns: observation.started_ns,
         pause_completed_ns: observation.completed_ns,
+        expected_backlog_samples,
         expected_affected_samples,
         minimum_affected_samples,
         maximum_affected_samples,
@@ -1728,6 +1772,12 @@ fn write_result(
         cfg.calibration_events
     )
     .unwrap();
+    writeln!(
+        out,
+        "  \"calibration_duration_ms\": {},",
+        cfg.calibration_duration.as_millis()
+    )
+    .unwrap();
     let legacy_max_rate = common_max.unwrap_or(own_max);
     writeln!(out, "  \"max_rate\": {legacy_max_rate:.6},").unwrap();
     writeln!(out, "  \"own_max\": {own_max:.6},").unwrap();
@@ -1738,12 +1788,14 @@ fn write_result(
     }
     let threshold = VALID_RUN_THRESHOLD;
     writeln!(out, "  \"minimum_actual_target_ratio\": {threshold:.6},").unwrap();
-    writeln!(
-        out,
-        "  \"inject_sleep_ms\": {},",
-        cfg.inject_sleep.map_or(0, |d| d.as_millis() as u64)
-    )
-    .unwrap();
+    out.push_str("  \"inject_sleep_us_by_load\": [");
+    for (index, sleep) in cfg.inject_sleeps.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        write!(out, "{}", sleep.as_micros()).unwrap();
+    }
+    out.push_str("],\n");
     writeln!(
         out,
         "  \"inject_at_measured_pct\": {},",
@@ -1843,11 +1895,28 @@ fn write_result(
         .unwrap();
         if let Some(check) = load.pause_check {
             out.push_str("      \"pause_validation\": {\n");
-            writeln!(out, "        \"sleep_ns\": {},", check.sleep_ns).unwrap();
+            writeln!(
+                out,
+                "        \"requested_sleep_ns\": {},",
+                check.requested_sleep_ns
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "        \"observed_sleep_ns\": {},",
+                check.observed_sleep_ns
+            )
+            .unwrap();
             writeln!(
                 out,
                 "        \"injection_sequence\": {},",
                 check.injection_sequence
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "        \"expected_backlog_samples\": {},",
+                check.expected_backlog_samples
             )
             .unwrap();
             writeln!(
@@ -1889,8 +1958,8 @@ fn write_result(
             .unwrap();
             writeln!(
                 out,
-                "        \"backlog_in_range\": {},",
-                check.backlog_in_range()
+                "        \"affected_in_range\": {},",
+                check.affected_in_range()
             )
             .unwrap();
             writeln!(
@@ -2158,8 +2227,9 @@ fn main() {
 
     let mut loads = Vec::with_capacity(targets.len());
     let mut any_invalid = !provenance_valid;
-    for (pct, target_rate) in targets {
-        match run_load(&cfg, target_rate, common_max, own_max) {
+    for (index, (pct, target_rate)) in targets.into_iter().enumerate() {
+        let inject_sleep = cfg.inject_sleeps.get(index).copied();
+        match run_load(&cfg, target_rate, common_max, own_max, inject_sleep) {
             Ok(mut load) => {
                 load.load_pct = pct;
                 load.valid_run &= provenance_valid;
@@ -2240,6 +2310,19 @@ mod tests {
     }
 
     #[test]
+    fn per_load_injection_durations_use_microsecond_resolution() {
+        assert_eq!(
+            parse_duration_us_list("167,72,19").unwrap(),
+            vec![
+                Duration::from_micros(167),
+                Duration::from_micros(72),
+                Duration::from_micros(19),
+            ]
+        );
+        assert!(parse_duration_us_list("167,0,19").is_err());
+    }
+
+    #[test]
     fn percentile_uses_nearest_rank_for_tail_boundaries() {
         let values = (1..=10_000).collect::<Vec<u64>>();
         assert_f64_eq(percentile_basis_points(&values, 5_000), 5_000.0);
@@ -2305,7 +2388,9 @@ mod tests {
             1_000_000_000,
         )
         .unwrap();
-        assert!(check.backlog_in_range());
+        assert_eq!(check.expected_backlog_samples, 5_000);
+        assert_eq!(check.expected_affected_samples, 10_000);
+        assert!(check.affected_in_range());
         assert!(check.drain_allowance_met());
         assert!(check.double_drain_allowance_met());
         assert!(check.p99_9_visible());
@@ -2356,7 +2441,7 @@ mod tests {
             1_080_000_000,
         )
         .unwrap();
-        assert!(late_check.backlog_in_range());
+        assert!(late_check.affected_in_range());
         assert!(!late_check.drain_allowance_met());
         assert!(!late_check.is_valid());
 
@@ -2366,13 +2451,15 @@ mod tests {
             200_000.0,
             &visible,
             InjectionObservation {
-                completed_ns: 300_000_000,
-                ..late
+                sequence: 25_000,
+                planned_ns: 250_000_000,
+                started_ns: 250_000_000,
+                completed_ns: 450_000_000,
             },
             1_100_000_000,
         )
         .unwrap();
-        assert!(!oversized.backlog_in_range());
+        assert!(!oversized.affected_in_range());
         assert!(!oversized.is_valid());
     }
 

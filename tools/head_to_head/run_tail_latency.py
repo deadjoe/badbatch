@@ -24,6 +24,7 @@ ALLOCATION_EVENTS = (
     "jdk.ObjectAllocationInNewTLAB,jdk.ObjectAllocationOutsideTLAB"
 )
 MINIMUM_CONTROL_REPLICATES = 3
+MINIMUM_CALIBRATION_REPLICATES = 3
 A_EQUIVALENCE_BASELINE_REV = "36f6abce33925bd37fa898726a47018b6045d154"
 A_EQUIVALENCE_CURRENT_REV = "067f71813ecd24a8df5e1536ab9959d096fceeec"
 
@@ -51,50 +52,103 @@ def nonnegative_int(text: str) -> int:
 
 def parse_load_levels(text: str) -> list[int]:
     levels = [positive_int(part) for part in text.split(",") if part]
-    if not levels or any(level > 100 for level in levels):
-        raise argparse.ArgumentTypeError("load levels must be in 1..=100")
+    if not levels or any(level >= 100 for level in levels):
+        raise argparse.ArgumentTypeError("load levels must be in 1..=99")
     return levels
 
 
-def select_inject_sleep_ms(
+def parse_load_duration_map(text: str) -> dict[int, int]:
+    result: dict[int, int] = {}
+    for item in text.split(","):
+        try:
+            load_text, duration_text = item.split(":", 1)
+            load_pct = positive_int(load_text)
+            duration_us = positive_int(duration_text)
+        except (ValueError, argparse.ArgumentTypeError) as error:
+            raise argparse.ArgumentTypeError(
+                "expected comma-separated LOAD:DURATION_US pairs"
+            ) from error
+        if load_pct >= 100:
+            raise argparse.ArgumentTypeError("load percentage must be in 1..=99")
+        if load_pct in result:
+            raise argparse.ArgumentTypeError(f"duplicate load percentage: {load_pct}")
+        result[load_pct] = duration_us
+    if not result:
+        raise argparse.ArgumentTypeError("at least one load duration is required")
+    return result
+
+
+def expected_affected_samples(
+    *,
+    common_max: int,
+    target_rate: int,
+    pause_us: int,
+) -> int:
+    if not 0 < target_rate < common_max:
+        raise ValueError("target rate must be in 1..common_max")
+    numerator = target_rate * pause_us * common_max
+    denominator = 1_000_000 * (common_max - target_rate)
+    return (numerator + denominator - 1) // denominator
+
+
+def select_inject_sleep_us_by_load(
     *,
     common_max: int,
     load_levels: list[int],
     measured_events: int,
-    requested_ms: int | None,
-) -> int:
+    requested_us_by_load: dict[int, int] | None,
+) -> dict[int, int]:
     minimum_affected = (measured_events + 999) // 1_000
     maximum_affected = measured_events // 10
-    lower_ms = 1
-    preferred_lower_ms = 1
-    upper_ms: int | None = None
     preferred_affected = min(maximum_affected, minimum_affected * 5)
+    if requested_us_by_load is not None and set(requested_us_by_load) != set(
+        load_levels
+    ):
+        raise SystemExit(
+            "inject-sleep-us-by-load keys must exactly match load-levels"
+        )
+
+    selected: dict[int, int] = {}
     for load_pct in load_levels:
         target_rate = (common_max * load_pct + 50) // 100
-        if target_rate <= 0:
-            raise SystemExit(f"load {load_pct}% produced a non-positive target")
-        arm_lower = ((minimum_affected - 1) * 1_000) // target_rate + 1
-        arm_preferred = ((preferred_affected - 1) * 1_000) // target_rate + 1
-        arm_upper = (maximum_affected * 1_000) // target_rate
-        lower_ms = max(lower_ms, arm_lower)
-        preferred_lower_ms = max(preferred_lower_ms, arm_preferred)
-        upper_ms = arm_upper if upper_ms is None else min(upper_ms, arm_upper)
-    if upper_ms is None or lower_ms > upper_ms:
-        raise SystemExit(
-            "no integer-millisecond pause satisfies the frozen backlog bounds; "
-            "increase measured-events"
+        if not 0 < target_rate < common_max:
+            raise SystemExit(
+                f"load {load_pct}% produced a target outside 1..common_max-1"
+            )
+        numerator_per_us = target_rate * common_max
+        denominator = 1_000_000 * (common_max - target_rate)
+        lower_us = max(
+            1,
+            ((minimum_affected - 1) * denominator) // numerator_per_us + 1,
         )
-    automatic_ms = (
-        preferred_lower_ms
-        if preferred_lower_ms <= upper_ms
-        else lower_ms
-    )
-    selected = automatic_ms if requested_ms is None else requested_ms
-    if not lower_ms <= selected <= upper_ms:
-        raise SystemExit(
-            f"inject-sleep-ms {selected} violates the calibrated backlog interval "
-            f"{lower_ms}..={upper_ms}; choose a value in range or omit the flag"
+        preferred_us = max(
+            1,
+            ((preferred_affected - 1) * denominator) // numerator_per_us + 1,
         )
+        upper_us = (maximum_affected * denominator) // numerator_per_us
+        if lower_us > upper_us:
+            raise SystemExit(
+                f"no integer-microsecond pause satisfies affected-sample bounds "
+                f"at load {load_pct}%; increase measured-events"
+            )
+        automatic_us = preferred_us if preferred_us <= upper_us else lower_us
+        pause_us = (
+            automatic_us
+            if requested_us_by_load is None
+            else requested_us_by_load[load_pct]
+        )
+        affected = expected_affected_samples(
+            common_max=common_max,
+            target_rate=target_rate,
+            pause_us=pause_us,
+        )
+        if not minimum_affected <= affected <= maximum_affected:
+            raise SystemExit(
+                f"inject pause {pause_us}us at load {load_pct}% produces "
+                f"{affected} affected samples outside "
+                f"{minimum_affected}..={maximum_affected}"
+            )
+        selected[load_pct] = pause_us
     return selected
 
 
@@ -135,6 +189,15 @@ def parser() -> argparse.ArgumentParser:
         "--calibration-duration-ms", type=positive_int, default=2_000
     )
     result.add_argument(
+        "--calibration-replicates",
+        type=positive_int,
+        default=MINIMUM_CALIBRATION_REPLICATES,
+        help=(
+            "independent fresh-process calibrations per language/arm; the "
+            "conservative selected maximum is their minimum"
+        ),
+    )
+    result.add_argument(
         "--load-levels", type=parse_load_levels, default=parse_load_levels("50,70,90")
     )
     result.add_argument(
@@ -147,17 +210,26 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--allocation-tolerance", type=float, default=0.05)
     result.add_argument("--preflight-rate", type=positive_int, default=100_000)
     result.add_argument(
-        "--inject-sleep-ms",
-        type=positive_int,
+        "--inject-sleep-us-by-load",
+        type=parse_load_duration_map,
         help=(
-            "fixed pause duration; omitted selects the smallest integer "
-            "millisecond satisfying the frozen backlog bounds after calibration"
+            "comma-separated LOAD:DURATION_US overrides; omitted derives one "
+            "microsecond-resolution pause per load from total affected samples"
         ),
     )
     result.add_argument(
         "--inject-at-measured-pct", type=positive_int, default=25
     )
     result.add_argument("--co-p50-relative-tolerance", type=float, default=0.05)
+    result.add_argument(
+        "--co-control-p50-max-relative-range",
+        type=float,
+        default=0.05,
+        help=(
+            "control full-range/median stability prerequisite; an unstable "
+            "control makes the p50 equivalence result inconclusive"
+        ),
+    )
     result.add_argument(
         "--control-replicates",
         type=positive_int,
@@ -629,8 +701,11 @@ def measurement_command(
     if injected:
         command.extend(
             [
-                "--inject-sleep-ms",
-                str(args.inject_sleep_ms),
+                "--inject-sleep-us-by-load",
+                ",".join(
+                    str(args.inject_sleep_us_by_load[load])
+                    for load in args.load_levels
+                ),
                 "--inject-at-measured-pct",
                 str(args.inject_at_measured_pct),
             ]
@@ -676,6 +751,31 @@ def build_measurement_plan(
     return plan
 
 
+def build_calibration_plan(
+    arms: list[Arm],
+    calibration_replicates: int = MINIMUM_CALIBRATION_REPLICATES,
+) -> list[tuple[int, Arm, str, str]]:
+    plan: list[tuple[int, Arm, str, str]] = []
+    for replicate in range(1, calibration_replicates + 1):
+        phase = "calibration" if replicate == 1 else f"calibration-r{replicate}"
+        for arm_index, arm in enumerate(arms):
+            languages = (
+                ("rust", "java")
+                if (arm_index + replicate - 1) % 2 == 0
+                else ("java", "rust")
+            )
+            for language in languages:
+                plan.append(
+                    (
+                        replicate,
+                        arm,
+                        language,
+                        f"{phase}-{language}-{arm.name}",
+                    )
+                )
+    return plan
+
+
 def main() -> None:
     args = parser().parse_args()
     measured = args.measured_events
@@ -685,6 +785,8 @@ def main() -> None:
         raise SystemExit("allocation-tolerance must be in 0..=1")
     if not 0.0 <= args.co_p50_relative_tolerance <= 1.0:
         raise SystemExit("CO p50 tolerance must be in 0..=1")
+    if not 0.0 <= args.co_control_p50_max_relative_range <= 1.0:
+        raise SystemExit("CO control p50 range limit must be in 0..=1")
     if not 0.0 <= args.co_achieved_target_tolerance <= 1.0:
         raise SystemExit("CO achieved tolerance must be in 0..=1")
     if args.control_replicates < MINIMUM_CONTROL_REPLICATES:
@@ -692,6 +794,12 @@ def main() -> None:
             "at least "
             f"{MINIMUM_CONTROL_REPLICATES} independent control replicates "
             "are required"
+        )
+    if args.calibration_replicates < MINIMUM_CALIBRATION_REPLICATES:
+        raise SystemExit(
+            "at least "
+            f"{MINIMUM_CALIBRATION_REPLICATES} independent calibration "
+            "replicates are required"
         )
     if not 1 <= args.inject_at_measured_pct <= 99:
         raise SystemExit("inject-at-measured-pct must be in 1..=99")
@@ -811,59 +919,89 @@ def main() -> None:
         arms=arms,
     )
 
-    calibrations: dict[str, dict[str, Any]] = {}
-    own_maxima: dict[str, int] = {}
-    for arm in arms:
-        for language in ("rust", "java"):
-            key = f"{language}-{arm.name}"
-            output = results / f"calibration-{key}.json"
-            calibration_jfr = (
-                results / f"calibration-{key}.jfr"
-                if language == "java"
-                else None
-            )
-            calibration_gc_log = (
-                results / f"calibration-{key}-gc.log"
-                if language == "java"
-                else None
-            )
-            command = calibration_command(
-                language,
-                arm,
-                args,
-                rust_bin=rust_bin,
-                java=java,
-                classes=classes,
-                jfr_path=calibration_jfr,
-                gc_log_path=calibration_gc_log,
-            )
-            command.extend(["--output", str(output)])
-            run(
-                command,
-                cwd=root,
-                log_path=results / f"calibration-{key}.log",
-            )
-            artifact = read_json(output)
-            if not artifact.get("artifact_valid"):
-                raise SystemExit(f"invalid calibration artifact: {output}")
-            own_max = math.floor(float(artifact["own_max"]))
-            if own_max <= 0:
-                raise SystemExit(f"non-positive calibration maximum: {output}")
-            calibrations[key] = {
+    calibration_plan = build_calibration_plan(
+        arms,
+        calibration_replicates=args.calibration_replicates,
+    )
+    calibration_observations: dict[str, list[dict[str, Any]]] = {}
+    for _, arm, language, label in calibration_plan:
+        key = f"{language}-{arm.name}"
+        output = results / f"{label}.json"
+        calibration_jfr = (
+            results / f"{label}.jfr" if language == "java" else None
+        )
+        calibration_gc_log = (
+            results / f"{label}-gc.log" if language == "java" else None
+        )
+        command = calibration_command(
+            language,
+            arm,
+            args,
+            rust_bin=rust_bin,
+            java=java,
+            classes=classes,
+            jfr_path=calibration_jfr,
+            gc_log_path=calibration_gc_log,
+        )
+        command.extend(["--output", str(output)])
+        run(
+            command,
+            cwd=root,
+            log_path=results / f"{label}.log",
+        )
+        artifact = read_json(output)
+        if not artifact.get("artifact_valid"):
+            raise SystemExit(f"invalid calibration artifact: {output}")
+        own_max = math.floor(float(artifact["own_max"]))
+        if own_max <= 0:
+            raise SystemExit(f"non-positive calibration maximum: {output}")
+        calibration_observations.setdefault(key, []).append(
+            {
                 "path": output.name,
                 "own_max": float(artifact["own_max"]),
                 "own_max_floor": own_max,
             }
-            own_maxima[key] = own_max
+        )
+
+    calibrations: dict[str, dict[str, Any]] = {}
+    own_maxima: dict[str, int] = {}
+    for key, observations in calibration_observations.items():
+        selected = min(int(entry["own_max_floor"]) for entry in observations)
+        calibrations[key] = {
+            "selection_rule": "minimum_of_independent_replicates",
+            "replicates": observations,
+            "own_max_floor": selected,
+        }
+        own_maxima[key] = selected
 
     common_max = min(own_maxima.values())
     if common_max <= 0:
         raise SystemExit("global common maximum is not positive")
-    args.inject_sleep_ms = select_inject_sleep_ms(
+    target_rates = [
+        (common_max * load_pct + 50) // 100
+        for load_pct in args.load_levels
+    ]
+    if any(not 0 < target_rate < common_max for target_rate in target_rates):
+        raise SystemExit(
+            "every load must produce a target rate strictly between zero "
+            "and common_max"
+        )
+    maximum_planned_measured_duration_ms = max(
+        (measured * 1_000 + target_rate - 1) // target_rate
+        for target_rate in target_rates
+    )
+    if args.calibration_duration_ms < maximum_planned_measured_duration_ms:
+        raise SystemExit(
+            "calibration-duration-ms must not be shorter than the longest "
+            "planned measured load: "
+            f"{args.calibration_duration_ms} < "
+            f"{maximum_planned_measured_duration_ms}"
+        )
+    args.inject_sleep_us_by_load = select_inject_sleep_us_by_load(
         common_max=common_max,
         load_levels=args.load_levels,
         measured_events=measured,
-        requested_ms=args.inject_sleep_ms,
+        requested_us_by_load=args.inject_sleep_us_by_load,
     )
 
     measurement_plan = build_measurement_plan(
@@ -872,7 +1010,7 @@ def main() -> None:
     )
 
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "protocol": "docs/f5_tail_latency_protocol.md",
         "results_dir": str(results),
         "buffer_size": args.buffer_size,
@@ -887,10 +1025,18 @@ def main() -> None:
         "cpu_list": args.cpu_list,
         "expected_allocation_bytes": args.expected_allocation_bytes,
         "allocation_tolerance": args.allocation_tolerance,
-        "inject_sleep_ms": args.inject_sleep_ms,
+        "inject_sleep_us_by_load": args.inject_sleep_us_by_load,
         "inject_at_measured_pct": args.inject_at_measured_pct,
+        "calibration_replicates": args.calibration_replicates,
+        "calibration_duration_ms": args.calibration_duration_ms,
+        "maximum_planned_measured_duration_ms": (
+            maximum_planned_measured_duration_ms
+        ),
         "control_replicates": args.control_replicates,
         "co_p50_relative_tolerance": args.co_p50_relative_tolerance,
+        "co_control_p50_max_relative_range": (
+            args.co_control_p50_max_relative_range
+        ),
         "co_p50_empirical_tolerance_rule": "control_p50_full_range_ns",
         "co_achieved_target_tolerance": args.co_achieved_target_tolerance,
         "calibrations": calibrations,
@@ -904,6 +1050,9 @@ def main() -> None:
             "current_revision": a_equivalence.get("current_revision"),
         },
         "execution_order": [label for _, _, _, label in measurement_plan],
+        "calibration_execution_order": [
+            label for _, _, _, label in calibration_plan
+        ],
         "host": {
             "system": platform.system(),
             "release": platform.release(),
