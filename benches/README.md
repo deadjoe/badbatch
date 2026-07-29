@@ -158,9 +158,9 @@ arm's minimum, and chooses the minimum of all six conservative maxima. Every
 arm then receives the same absolute 50/70/90% targets, three fresh-process
 controls, and one injected pause counterfactual. After calibration but before
 any tail result is observed, the runner freezes a separate microsecond pause
-for every load, targeting five times the lower total-affected bound while
-remaining inside the protocol's bounds (falling back to the hard lower bound
-if needed). `--inject-sleep-us-by-load 50:U,70:U,90:U` may predeclare
+for every load, targeting `floor(N / 20)` affected samples—half of the 10%
+upper bound, which leaves 2x headroom for observed sleep overshoot.
+`--inject-sleep-us-by-load 50:U,70:U,90:U` may predeclare
 different values, but an out-of-range choice aborts before measurement. Rust
 and Java warmup counts are separate; freeze them from runtime-specific
 steady-state evidence before a formal run while keeping the measured sample

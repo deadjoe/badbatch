@@ -179,10 +179,15 @@ The counterfactual is executable only when:
 ceil(N / 1000) <= A <= floor(N / 10)
 ```
 
-The lower bound gives p99.9 enough affected observations to see the pause. The
-upper bound makes the complete drain-amplified population at least an order of
-magnitude smaller than the measured population, rather than allowing the
-injection to move the body of the distribution.
+The lower bound places p99.9 inside the conservatively estimated affected
+population, but it does not by itself guarantee the separate visibility
+threshold: an arm can drain its consumer backlog faster than the end-to-end
+`common_max` service-rate bound. The automatic selector therefore targets
+`floor(N / 20)`, halfway to the upper bound. This keeps a 2x margin for
+observed sleep overshoot while providing enough depth for the p99.9 signature.
+The upper bound makes the complete drain-amplified population at least an
+order of magnitude smaller than the measured population, rather than allowing
+the injection to move the body of the distribution.
 
 The injection point must also leave enough measured time to drain the pause
 backlog. Conservatively define:

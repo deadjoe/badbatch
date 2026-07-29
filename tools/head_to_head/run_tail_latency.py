@@ -100,7 +100,7 @@ def select_inject_sleep_us_by_load(
 ) -> dict[int, int]:
     minimum_affected = (measured_events + 999) // 1_000
     maximum_affected = measured_events // 10
-    preferred_affected = min(maximum_affected, minimum_affected * 5)
+    preferred_affected = max(minimum_affected, maximum_affected // 2)
     if requested_us_by_load is not None and set(requested_us_by_load) != set(
         load_levels
     ):
