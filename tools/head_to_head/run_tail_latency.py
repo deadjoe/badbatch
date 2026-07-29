@@ -9,6 +9,7 @@ import math
 import os
 import platform
 import shlex
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -22,6 +23,9 @@ PAYLOAD_CLASS = (
 ALLOCATION_EVENTS = (
     "jdk.ObjectAllocationInNewTLAB,jdk.ObjectAllocationOutsideTLAB"
 )
+MINIMUM_CONTROL_REPLICATES = 3
+A_EQUIVALENCE_BASELINE_REV = "36f6abce33925bd37fa898726a47018b6045d154"
+A_EQUIVALENCE_CURRENT_REV = "067f71813ecd24a8df5e1536ab9959d096fceeec"
 
 
 @dataclass(frozen=True)
@@ -106,6 +110,16 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--java-home", type=Path)
     result.add_argument("--lmax-root", type=Path)
     result.add_argument("--rust-bin", type=Path)
+    result.add_argument(
+        "--a-equivalence-dir",
+        required=True,
+        type=Path,
+        help=(
+            "external five-pair adjacent A-equivalence evidence produced at "
+            f"{A_EQUIVALENCE_BASELINE_REV[:7]}.."
+            f"{A_EQUIVALENCE_CURRENT_REV[:7]}"
+        ),
+    )
     result.add_argument("--buffer-size", type=positive_int, default=65_536)
     result.add_argument("--measured-events", type=positive_int, default=1_000_000)
     result.add_argument(
@@ -145,9 +159,14 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--co-p50-relative-tolerance", type=float, default=0.05)
     result.add_argument(
-        "--co-p50-absolute-tolerance-ns",
-        type=nonnegative_int,
-        default=25,
+        "--control-replicates",
+        type=positive_int,
+        default=MINIMUM_CONTROL_REPLICATES,
+        help=(
+            "independent control processes per language/arm; must be at least "
+            f"{MINIMUM_CONTROL_REPLICATES} so the p50 band can use the observed "
+            "control full range"
+        ),
     )
     result.add_argument(
         "--co-achieved-target-tolerance", type=float, default=0.01
@@ -621,25 +640,39 @@ def measurement_command(
 
 def build_measurement_plan(
     arms: list[Arm],
+    control_replicates: int = MINIMUM_CONTROL_REPLICATES,
 ) -> list[tuple[bool, Arm, str, str]]:
     plan: list[tuple[bool, Arm, str, str]] = []
-    for injected in (False, True):
-        phase = "injected" if injected else "control"
+    for replicate in range(1, control_replicates + 1):
+        phase = "control" if replicate == 1 else f"control-r{replicate}"
         for arm_index, arm in enumerate(arms):
             languages = (
                 ("rust", "java")
-                if (arm_index + int(injected)) % 2 == 0
+                if (arm_index + replicate - 1) % 2 == 0
                 else ("java", "rust")
             )
             for language in languages:
                 plan.append(
                     (
-                        injected,
+                        False,
                         arm,
                         language,
                         f"{phase}-{language}-{arm.name}",
                     )
                 )
+    for arm_index, arm in enumerate(arms):
+        languages = (
+            ("java", "rust") if arm_index % 2 == 0 else ("rust", "java")
+        )
+        for language in languages:
+            plan.append(
+                (
+                    True,
+                    arm,
+                    language,
+                    f"injected-{language}-{arm.name}",
+                )
+            )
     return plan
 
 
@@ -654,6 +687,12 @@ def main() -> None:
         raise SystemExit("CO p50 tolerance must be in 0..=1")
     if not 0.0 <= args.co_achieved_target_tolerance <= 1.0:
         raise SystemExit("CO achieved tolerance must be in 0..=1")
+    if args.control_replicates < MINIMUM_CONTROL_REPLICATES:
+        raise SystemExit(
+            "at least "
+            f"{MINIMUM_CONTROL_REPLICATES} independent control replicates "
+            "are required"
+        )
     if not 1 <= args.inject_at_measured_pct <= 99:
         raise SystemExit("inject-at-measured-pct must be in 1..=99")
 
@@ -663,7 +702,41 @@ def main() -> None:
         if args.lmax_root
         else (root / "examples/disruptor").resolve()
     )
-    results = ensure_external_empty(args.results_dir, [root, lmax_root])
+    a_equivalence_source = args.a_equivalence_dir.expanduser().resolve()
+    if not a_equivalence_source.is_dir():
+        raise SystemExit(
+            f"A-equivalence evidence directory missing: {a_equivalence_source}"
+        )
+    results = ensure_external_empty(
+        args.results_dir,
+        [root, lmax_root, a_equivalence_source],
+    )
+    a_equivalence_results = results / "a-equivalence"
+    shutil.copytree(
+        a_equivalence_source,
+        a_equivalence_results,
+        copy_function=shutil.copy2,
+    )
+    run(
+        [
+            sys.executable,
+            str(
+                root
+                / "tools/head_to_head/validate_tail_a_equivalence.py"
+            ),
+            "--results-dir",
+            str(a_equivalence_results),
+            "--expected-baseline-rev",
+            A_EQUIVALENCE_BASELINE_REV,
+            "--expected-current-rev",
+            A_EQUIVALENCE_CURRENT_REV,
+        ],
+        cwd=root,
+        log_path=results / "validation-a-equivalence.log",
+    )
+    a_equivalence = read_json(
+        a_equivalence_results / "a_equivalence_report.json"
+    )
     if measured < 4 * args.buffer_size:
         raise SystemExit(
             "measured events must cover B-4W: "
@@ -793,10 +866,13 @@ def main() -> None:
         requested_ms=args.inject_sleep_ms,
     )
 
-    measurement_plan = build_measurement_plan(arms)
+    measurement_plan = build_measurement_plan(
+        arms,
+        control_replicates=args.control_replicates,
+    )
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "protocol": "docs/f5_tail_latency_protocol.md",
         "results_dir": str(results),
         "buffer_size": args.buffer_size,
@@ -813,12 +889,20 @@ def main() -> None:
         "allocation_tolerance": args.allocation_tolerance,
         "inject_sleep_ms": args.inject_sleep_ms,
         "inject_at_measured_pct": args.inject_at_measured_pct,
+        "control_replicates": args.control_replicates,
         "co_p50_relative_tolerance": args.co_p50_relative_tolerance,
-        "co_p50_absolute_tolerance_ns": args.co_p50_absolute_tolerance_ns,
+        "co_p50_empirical_tolerance_rule": "control_p50_full_range_ns",
         "co_achieved_target_tolerance": args.co_achieved_target_tolerance,
         "calibrations": calibrations,
         "common_max": common_max,
         "preflight": preflight,
+        "a_equivalence": {
+            "path": "a-equivalence/a_equivalence_report.json",
+            "passed": a_equivalence.get("passed"),
+            "pairs": a_equivalence.get("pairs"),
+            "baseline_revision": a_equivalence.get("baseline_revision"),
+            "current_revision": a_equivalence.get("current_revision"),
+        },
         "execution_order": [label for _, _, _, label in measurement_plan],
         "host": {
             "system": platform.system(),

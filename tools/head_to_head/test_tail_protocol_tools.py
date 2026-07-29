@@ -11,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_tail_latency as runner
+import validate_tail_a_equivalence as a_equivalence
 import validate_tail_latency as validator
 
 
@@ -88,6 +89,18 @@ class TailProtocolToolsTest(unittest.TestCase):
                 "control-rust-bw",
                 "control-rust-b4w",
                 "control-java-b4w",
+                "control-r2-java-a",
+                "control-r2-rust-a",
+                "control-r2-rust-bw",
+                "control-r2-java-bw",
+                "control-r2-java-b4w",
+                "control-r2-rust-b4w",
+                "control-r3-rust-a",
+                "control-r3-java-a",
+                "control-r3-java-bw",
+                "control-r3-rust-bw",
+                "control-r3-rust-b4w",
+                "control-r3-java-b4w",
                 "injected-java-a",
                 "injected-rust-a",
                 "injected-rust-bw",
@@ -97,7 +110,11 @@ class TailProtocolToolsTest(unittest.TestCase):
             ],
             [label for _, _, _, label in plan],
         )
-        self.assertEqual([False] * 6 + [True] * 6, [item[0] for item in plan])
+        self.assertEqual([False] * 18 + [True] * 6, [item[0] for item in plan])
+        self.assertEqual(
+            [label for _, _, _, label in plan],
+            validator.expected_measurement_order(3),
+        )
 
     def test_raw_validator_checks_schedule_and_complete_row_count(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -166,13 +183,35 @@ class TailProtocolToolsTest(unittest.TestCase):
         self.assertLess(validator.relative_difference(48.0, 48.0), 0.05)
         self.assertGreater(validator.relative_difference(48.0, 40.0), 0.05)
 
-    def test_p50_equivalence_uses_relative_or_timer_floor_tolerance(self) -> None:
+    def test_a_equivalence_uses_observed_range_overlap(self) -> None:
+        self.assertTrue(
+            a_equivalence.ranges_overlap(
+                [2_500.0, 5_000.0, 9_875.0],
+                [4_709.0, 5_000.0, 7_958.0],
+            )
+        )
+        self.assertFalse(
+            a_equivalence.ranges_overlap(
+                [1.0, 2.0],
+                [3.0, 4.0],
+            )
+        )
+
+    def test_p50_equivalence_uses_relative_or_empirical_control_range(self) -> None:
         self.assertTrue(
             validator.p50_equivalent(
-                108,
+                110,
                 124,
                 relative_tolerance=0.05,
-                absolute_tolerance_ns=25,
+                control_full_range_ns=16,
+            )
+        )
+        self.assertFalse(
+            validator.p50_equivalent(
+                110,
+                124,
+                relative_tolerance=0.05,
+                control_full_range_ns=4,
             )
         )
         self.assertFalse(
@@ -180,7 +219,7 @@ class TailProtocolToolsTest(unittest.TestCase):
                 1_000,
                 1_100,
                 relative_tolerance=0.05,
-                absolute_tolerance_ns=25,
+                control_full_range_ns=25,
             )
         )
 

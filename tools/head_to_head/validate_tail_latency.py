@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 
@@ -14,6 +15,9 @@ ARMS = ("a", "bw", "b4w")
 LANGUAGES = ("rust", "java")
 PHASES = ("control", "injected")
 RAW_HEADER = "sequence,planned_ns,completion_ns,latency_ns"
+MINIMUM_CONTROL_REPLICATES = 3
+A_EQUIVALENCE_BASELINE_REV = "36f6abce33925bd37fa898726a47018b6045d154"
+A_EQUIVALENCE_CURRENT_REV = "067f71813ecd24a8df5e1536ab9959d096fceeec"
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -41,17 +45,36 @@ def relative_difference(left: float, right: float) -> float:
 
 
 def p50_equivalent(
-    control: float,
+    control_median: float,
     injected: float,
     *,
     relative_tolerance: float,
-    absolute_tolerance_ns: int,
+    control_full_range_ns: float,
 ) -> bool:
     allowed_delta = max(
-        float(absolute_tolerance_ns),
-        relative_tolerance * max(abs(control), abs(injected)),
+        control_full_range_ns,
+        relative_tolerance * max(abs(control_median), abs(injected)),
     )
-    return abs(control - injected) <= allowed_delta
+    return abs(control_median - injected) <= allowed_delta
+
+
+def expected_measurement_order(control_replicates: int) -> list[str]:
+    order: list[str] = []
+    for replicate in range(1, control_replicates + 1):
+        phase = "control" if replicate == 1 else f"control-r{replicate}"
+        for arm_index, arm in enumerate(ARMS):
+            languages = (
+                ("rust", "java")
+                if (arm_index + replicate - 1) % 2 == 0
+                else ("java", "rust")
+            )
+            order.extend(f"{phase}-{language}-{arm}" for language in languages)
+    for arm_index, arm in enumerate(ARMS):
+        languages = (
+            ("java", "rust") if arm_index % 2 == 0 else ("rust", "java")
+        )
+        order.extend(f"injected-{language}-{arm}" for language in languages)
+    return order
 
 
 def required_latency_summary(latencies: list[int]) -> dict[str, int]:
@@ -168,7 +191,7 @@ def main() -> None:
         if not condition:
             errors.append(message)
 
-    check(manifest.get("schema_version") == 1, "unsupported run manifest schema")
+    check(manifest.get("schema_version") == 2, "unsupported run manifest schema")
     buffer_size = int(manifest["buffer_size"])
     measured_events = int(manifest["measured_events"])
     warmup_by_language = {
@@ -182,10 +205,9 @@ def main() -> None:
     load_levels = [int(value) for value in manifest["load_levels"]]
     common_max = int(manifest["common_max"])
     allocation_tolerance = float(manifest["allocation_tolerance"])
+    control_replicates = int(manifest["control_replicates"])
     p50_tolerance = float(manifest["co_p50_relative_tolerance"])
-    p50_absolute_tolerance_ns = int(
-        manifest["co_p50_absolute_tolerance_ns"]
-    )
+    p50_empirical_rule = str(manifest["co_p50_empirical_tolerance_rule"])
     achieved_tolerance = float(manifest["co_achieved_target_tolerance"])
     expected_allocation = int(manifest["expected_allocation_bytes"])
     java_heap = str(manifest["java_heap"])
@@ -194,6 +216,60 @@ def main() -> None:
         language: set() for language in LANGUAGES
     }
     java_runtime_identities: set[tuple[str, str, str, tuple[str, ...]]] = set()
+
+    a_equivalence_entry = manifest.get("a_equivalence", {})
+    check(
+        isinstance(a_equivalence_entry, dict),
+        "A-equivalence manifest entry missing",
+    )
+    a_equivalence_path = root / str(
+        a_equivalence_entry.get("path", "")
+    )
+    if a_equivalence_path.is_file():
+        a_equivalence = load_json(a_equivalence_path)
+        check(
+            a_equivalence_entry.get("passed") is True,
+            "A-equivalence manifest status failed",
+        )
+        check(
+            int(a_equivalence_entry.get("pairs", 0))
+            == int(a_equivalence.get("pairs", -1)),
+            "A-equivalence manifest pair count mismatch",
+        )
+        check(a_equivalence.get("passed") is True, "A-equivalence gate failed")
+        check(
+            int(a_equivalence.get("pairs", 0)) >= 5,
+            "A-equivalence has fewer than five pairs",
+        )
+        check(
+            a_equivalence.get("baseline_revision")
+            == A_EQUIVALENCE_BASELINE_REV,
+            "A-equivalence baseline revision mismatch",
+        )
+        check(
+            a_equivalence.get("current_revision") == A_EQUIVALENCE_CURRENT_REV,
+            "A-equivalence current revision mismatch",
+        )
+        check(
+            a_equivalence_entry.get("baseline_revision")
+            == a_equivalence.get("baseline_revision"),
+            "A-equivalence manifest baseline revision mismatch",
+        )
+        check(
+            a_equivalence_entry.get("current_revision")
+            == a_equivalence.get("current_revision"),
+            "A-equivalence manifest current revision mismatch",
+        )
+        check(
+            a_equivalence.get("measurement_apparatus_regression_only") is True,
+            "A-equivalence evidence scope missing",
+        )
+        check(
+            a_equivalence.get("portable_performance_evidence") is False,
+            "A-equivalence portable-performance disclaimer missing",
+        )
+    else:
+        errors.append("A-equivalence report missing")
 
     def record_provenance(
         artifact: dict[str, Any],
@@ -343,6 +419,14 @@ def main() -> None:
         )
     check(measured_events >= 100_000, "fewer than 100000 measured events")
     check(
+        control_replicates >= MINIMUM_CONTROL_REPLICATES,
+        "fewer than three independent control replicates",
+    )
+    check(
+        p50_empirical_rule == "control_p50_full_range_ns",
+        "unsupported empirical p50 tolerance rule",
+    )
+    check(
         measured_events >= 4 * buffer_size,
         "measured event count does not fill B-4W",
     )
@@ -435,196 +519,211 @@ def main() -> None:
         int(preflight.get("bw", {}).get("samples", 0)) > 0,
         "B JFR allocation preflight has no observations",
     )
-    expected_order = [
-        "control-rust-a",
-        "control-java-a",
-        "control-java-bw",
-        "control-rust-bw",
-        "control-rust-b4w",
-        "control-java-b4w",
-        "injected-java-a",
-        "injected-rust-a",
-        "injected-rust-bw",
-        "injected-java-bw",
-        "injected-java-b4w",
-        "injected-rust-b4w",
-    ]
     check(
-        manifest.get("execution_order") == expected_order,
+        manifest.get("execution_order")
+        == expected_measurement_order(control_replicates),
         "execution order is not the frozen balanced order",
     )
 
     artifacts: dict[tuple[str, str, str], dict[str, Any]] = {}
+    control_artifacts: dict[tuple[int, str, str], dict[str, Any]] = {}
     for phase in PHASES:
-        for arm in ARMS:
-            for language in LANGUAGES:
-                label = f"{phase}-{language}-{arm}"
-                path = root / f"{label}.json"
-                artifact = load_json(path)
-                artifacts[(phase, language, arm)] = artifact
-                check(
-                    artifact.get("run_mode") == "measurement",
-                    f"{path.name}: wrong mode",
+        replicates = (
+            range(1, control_replicates + 1)
+            if phase == "control"
+            else range(1, 2)
+        )
+        for replicate in replicates:
+            phase_label = (
+                "control"
+                if phase == "control" and replicate == 1
+                else (
+                    f"control-r{replicate}"
+                    if phase == "control"
+                    else "injected"
                 )
-                check(
-                    artifact.get("language") == language,
-                    f"{path.name}: wrong language",
-                )
-                check(
-                    artifact.get("event_padding") == "none",
-                    f"{path.name}: unmatched event padding",
-                )
-                validate_common_schema(
-                    artifact,
-                    language=language,
-                    label=path.name,
-                )
-                check(
-                    artifact.get("artifact_valid") is True,
-                    f"{path.name}: invalid artifact",
-                )
-                record_provenance(
-                    artifact,
-                    language=language,
-                    label=path.name,
-                )
-                check(
-                    artifact.get("handler_mode")
-                    == ("allocation-free" if arm == "a" else "allocating"),
-                    f"{path.name}: handler mode mismatch",
-                )
-                check(
-                    artifact.get("retention_window")
-                    == expected_retention(arm, buffer_size),
-                    f"{path.name}: retention mismatch",
-                )
-                if language == "java" and arm != "a":
+            )
+            for arm in ARMS:
+                for language in LANGUAGES:
+                    label = f"{phase_label}-{language}-{arm}"
+                    path = root / f"{label}.json"
+                    artifact = load_json(path)
+                    if phase == "control":
+                        control_artifacts[(replicate, language, arm)] = artifact
+                    if phase == "injected" or replicate == 1:
+                        artifacts[(phase, language, arm)] = artifact
                     check(
-                        artifact.get("allocation_measurement_source")
-                        == "jfr_object_allocation",
-                        f"{path.name}: allocation measurement source mismatch",
-                    )
-                check(
-                    int(artifact.get("events_total", -1))
-                    == events_by_language[language],
-                    f"{path.name}: events-total mismatch",
-                )
-                check(
-                    int(artifact.get("warmup_events", -1))
-                    == warmup_by_language[language],
-                    f"{path.name}: warmup mismatch",
-                )
-                check(
-                    math.floor(float(artifact["common_max"])) == common_max,
-                    f"{path.name}: common_max mismatch",
-                )
-                own_max = calibration_maxima.get(f"{language}-{arm}")
-                check(
-                    math.floor(float(artifact["own_max"])) == own_max,
-                    f"{path.name}: own_max mismatch",
-                )
-                loads = artifact.get("loads", [])
-                check(
-                    len(loads) == len(load_levels),
-                    f"{path.name}: load count mismatch",
-                )
-                for index, load_pct in enumerate(load_levels):
-                    if index >= len(loads):
-                        break
-                    load = loads[index]
-                    target_rate = (common_max * load_pct + 50) // 100
-                    check(
-                        int(load.get("load_pct", -1)) == load_pct,
-                        f"{path.name}: load percentage mismatch",
+                        artifact.get("run_mode") == "measurement",
+                        f"{path.name}: wrong mode",
                     )
                     check(
-                        int(load.get("target_rate", -1)) == target_rate,
-                        f"{path.name}: target rate mismatch",
-                    )
-                    check(load.get("valid_run") is True, f"{path.name}: invalid load")
-                    check(load.get("rate_valid") is True, f"{path.name}: rate gate")
-                    check(
-                        load.get("workload_valid") is True,
-                        f"{path.name}: workload gate",
+                        artifact.get("language") == language,
+                        f"{path.name}: wrong language",
                     )
                     check(
-                        int(load.get("latency_ns", {}).get("count", -1))
-                        == measured_events,
-                        f"{path.name}: sample-count summary mismatch",
+                        artifact.get("event_padding") == "none",
+                        f"{path.name}: unmatched event padding",
                     )
-                    check(
-                        int(load.get("measurement_epoch_unix_ns", 0)) > 0,
-                        f"{path.name}: missing wall/monotonic anchor",
-                    )
-                    check(
-                        int(load.get("clock_anchor_uncertainty_ns", -1)) >= 0,
-                        f"{path.name}: invalid clock-anchor uncertainty",
-                    )
-                    workload = load.get("workload", {})
-                    if arm == "a":
-                        check(
-                            int(workload.get("allocations", -1)) == 0,
-                            f"{path.name}: A allocated",
-                        )
-                        check(
-                            int(workload.get("retained_objects", -1)) == 0,
-                            f"{path.name}: A retained objects",
-                        )
-                    else:
-                        retention = expected_retention(arm, buffer_size)
-                        assert retention is not None
-                        check(
-                            int(workload.get("allocations", -1)) == measured_events,
-                            f"{path.name}: B allocation count mismatch",
-                        )
-                        check(
-                            int(workload.get("retained_objects", -1))
-                            == retention,
-                            f"{path.name}: retained object count mismatch",
-                        )
-                        check(
-                            int(workload.get("estimated_logical_live_bytes", -1))
-                            == retention * 32,
-                            f"{path.name}: logical live bytes mismatch",
-                        )
-                        check(
-                            int(workload.get("observed_allocated_live_bytes", -1))
-                            == retention * expected_allocation,
-                            f"{path.name}: observed live bytes mismatch",
-                        )
-                        check(
-                            relative_difference(
-                                float(workload["allocation_payload_bytes"]),
-                                float(expected_allocation),
-                            )
-                            <= allocation_tolerance,
-                            f"{path.name}: allocation bytes outside tolerance",
-                        )
-                    raw = sample_path(root / f"{label}.csv", load_pct)
-                    errors.extend(
-                        validate_raw(
-                            raw,
-                            warmup_events=warmup_by_language[language],
-                            measured_events=measured_events,
-                            target_rate=target_rate,
-                            expected_latency=load.get("latency_ns"),
-                        )
-                    )
-                    if phase == "injected":
-                        pause = load.get("pause_validation", {})
-                        check(
-                            pause.get("valid") is True,
-                            f"{path.name}: injected pause structural gate",
-                        )
-                if language == "java":
-                    expected_jfr = root / f"{label}.jfr"
-                    expected_gc = root / f"{label}-gc.log"
-                    validate_java_runtime(
+                    validate_common_schema(
                         artifact,
+                        language=language,
                         label=path.name,
-                        expected_jfr=expected_jfr,
-                        expected_gc=expected_gc,
                     )
+                    check(
+                        artifact.get("artifact_valid") is True,
+                        f"{path.name}: invalid artifact",
+                    )
+                    record_provenance(
+                        artifact,
+                        language=language,
+                        label=path.name,
+                    )
+                    check(
+                        artifact.get("handler_mode")
+                        == ("allocation-free" if arm == "a" else "allocating"),
+                        f"{path.name}: handler mode mismatch",
+                    )
+                    check(
+                        artifact.get("retention_window")
+                        == expected_retention(arm, buffer_size),
+                        f"{path.name}: retention mismatch",
+                    )
+                    if language == "java" and arm != "a":
+                        check(
+                            artifact.get("allocation_measurement_source")
+                            == "jfr_object_allocation",
+                            f"{path.name}: allocation measurement source mismatch",
+                        )
+                    check(
+                        int(artifact.get("events_total", -1))
+                        == events_by_language[language],
+                        f"{path.name}: events-total mismatch",
+                    )
+                    check(
+                        int(artifact.get("warmup_events", -1))
+                        == warmup_by_language[language],
+                        f"{path.name}: warmup mismatch",
+                    )
+                    check(
+                        math.floor(float(artifact["common_max"])) == common_max,
+                        f"{path.name}: common_max mismatch",
+                    )
+                    own_max = calibration_maxima.get(f"{language}-{arm}")
+                    check(
+                        math.floor(float(artifact["own_max"])) == own_max,
+                        f"{path.name}: own_max mismatch",
+                    )
+                    loads = artifact.get("loads", [])
+                    check(
+                        len(loads) == len(load_levels),
+                        f"{path.name}: load count mismatch",
+                    )
+                    for index, load_pct in enumerate(load_levels):
+                        if index >= len(loads):
+                            break
+                        load = loads[index]
+                        target_rate = (common_max * load_pct + 50) // 100
+                        check(
+                            int(load.get("load_pct", -1)) == load_pct,
+                            f"{path.name}: load percentage mismatch",
+                        )
+                        check(
+                            int(load.get("target_rate", -1)) == target_rate,
+                            f"{path.name}: target rate mismatch",
+                        )
+                        check(load.get("valid_run") is True, f"{path.name}: invalid load")
+                        check(load.get("rate_valid") is True, f"{path.name}: rate gate")
+                        check(
+                            load.get("workload_valid") is True,
+                            f"{path.name}: workload gate",
+                        )
+                        check(
+                            int(load.get("latency_ns", {}).get("count", -1))
+                            == measured_events,
+                            f"{path.name}: sample-count summary mismatch",
+                        )
+                        check(
+                            int(load.get("measurement_epoch_unix_ns", 0)) > 0,
+                            f"{path.name}: missing wall/monotonic anchor",
+                        )
+                        check(
+                            int(load.get("clock_anchor_uncertainty_ns", -1)) >= 0,
+                            f"{path.name}: invalid clock-anchor uncertainty",
+                        )
+                        workload = load.get("workload", {})
+                        if arm == "a":
+                            check(
+                                int(workload.get("allocations", -1)) == 0,
+                                f"{path.name}: A allocated",
+                            )
+                            check(
+                                int(workload.get("retained_objects", -1)) == 0,
+                                f"{path.name}: A retained objects",
+                            )
+                        else:
+                            retention = expected_retention(arm, buffer_size)
+                            assert retention is not None
+                            check(
+                                int(workload.get("allocations", -1))
+                                == measured_events,
+                                f"{path.name}: B allocation count mismatch",
+                            )
+                            check(
+                                int(workload.get("retained_objects", -1))
+                                == retention,
+                                f"{path.name}: retained object count mismatch",
+                            )
+                            check(
+                                int(
+                                    workload.get(
+                                        "estimated_logical_live_bytes", -1
+                                    )
+                                )
+                                == retention * 32,
+                                f"{path.name}: logical live bytes mismatch",
+                            )
+                            check(
+                                int(
+                                    workload.get(
+                                        "observed_allocated_live_bytes", -1
+                                    )
+                                )
+                                == retention * expected_allocation,
+                                f"{path.name}: observed live bytes mismatch",
+                            )
+                            check(
+                                relative_difference(
+                                    float(workload["allocation_payload_bytes"]),
+                                    float(expected_allocation),
+                                )
+                                <= allocation_tolerance,
+                                f"{path.name}: allocation bytes outside tolerance",
+                            )
+                        raw = sample_path(root / f"{label}.csv", load_pct)
+                        errors.extend(
+                            validate_raw(
+                                raw,
+                                warmup_events=warmup_by_language[language],
+                                measured_events=measured_events,
+                                target_rate=target_rate,
+                                expected_latency=load.get("latency_ns"),
+                            )
+                        )
+                        if phase == "injected":
+                            pause = load.get("pause_validation", {})
+                            check(
+                                pause.get("valid") is True,
+                                f"{path.name}: injected pause structural gate",
+                            )
+                    if language == "java":
+                        expected_jfr = root / f"{label}.jfr"
+                        expected_gc = root / f"{label}-gc.log"
+                        validate_java_runtime(
+                            artifact,
+                            label=path.name,
+                            expected_jfr=expected_jfr,
+                            expected_gc=expected_gc,
+                        )
     for language in LANGUAGES:
         check(
             len(provenance_pairs[language]) == 1,
@@ -642,42 +741,78 @@ def main() -> None:
             "Rust and Java artifacts do not share one BadBatch harness revision",
         )
 
+    control_p50_stability: dict[str, dict[str, Any]] = {}
     for arm in ARMS:
         for language in LANGUAGES:
-            control = artifacts.get(("control", language, arm), {})
             injected = artifacts.get(("injected", language, arm), {})
             for index, load_pct in enumerate(load_levels):
-                control_loads = control.get("loads", [])
                 injected_loads = injected.get("loads", [])
-                if index >= len(control_loads) or index >= len(injected_loads):
+                replicate_loads = [
+                    control_artifacts.get((replicate, language, arm), {}).get(
+                        "loads", []
+                    )
+                    for replicate in range(1, control_replicates + 1)
+                ]
+                if (
+                    index >= len(injected_loads)
+                    or any(index >= len(loads) for loads in replicate_loads)
+                ):
                     continue
-                control_load = control_loads[index]
+                control_loads = [loads[index] for loads in replicate_loads]
                 injected_load = injected_loads[index]
-                control_p50 = float(control_load["latency_ns"]["p50"])
+                control_p50s = [
+                    float(load["latency_ns"]["p50"]) for load in control_loads
+                ]
+                control_p50_median = float(median(control_p50s))
+                control_p50_full_range = max(control_p50s) - min(control_p50s)
                 injected_p50 = float(injected_load["latency_ns"]["p50"])
+                allowed_p50_delta = max(
+                    control_p50_full_range,
+                    p50_tolerance
+                    * max(abs(control_p50_median), abs(injected_p50)),
+                )
+                equivalent = p50_equivalent(
+                    control_p50_median,
+                    injected_p50,
+                    relative_tolerance=p50_tolerance,
+                    control_full_range_ns=control_p50_full_range,
+                )
                 check(
-                    p50_equivalent(
-                        control_p50,
-                        injected_p50,
-                        relative_tolerance=p50_tolerance,
-                        absolute_tolerance_ns=p50_absolute_tolerance_ns,
-                    ),
+                    equivalent,
                     f"{language}-{arm}-{load_pct}: injected p50 outside tolerance",
                 )
-                control_ratio = float(control_load["actual_target_ratio"])
+                control_ratios = [
+                    float(load["actual_target_ratio"]) for load in control_loads
+                ]
+                control_ratio_median = float(median(control_ratios))
                 injected_ratio = float(injected_load["actual_target_ratio"])
-                check(
-                    abs(control_ratio - 1.0) <= achieved_tolerance,
-                    f"{language}-{arm}-{load_pct}: control achieved ratio not tight",
-                )
+                for replicate, control_ratio in enumerate(control_ratios, start=1):
+                    check(
+                        abs(control_ratio - 1.0) <= achieved_tolerance,
+                        f"{language}-{arm}-{load_pct}: control-r{replicate} "
+                        "achieved ratio not tight",
+                    )
                 check(
                     abs(injected_ratio - 1.0) <= achieved_tolerance,
                     f"{language}-{arm}-{load_pct}: injected achieved ratio not tight",
                 )
                 check(
-                    injected_ratio + achieved_tolerance >= control_ratio,
+                    injected_ratio + achieved_tolerance >= control_ratio_median,
                     f"{language}-{arm}-{load_pct}: achieved rate materially dropped",
                 )
+                control_p50_stability[f"{language}-{arm}-{load_pct}"] = {
+                    "control_p50_ns": control_p50s,
+                    "control_p50_median_ns": control_p50_median,
+                    "control_p50_min_ns": min(control_p50s),
+                    "control_p50_max_ns": max(control_p50s),
+                    "control_p50_full_range_ns": control_p50_full_range,
+                    "injected_p50_ns": injected_p50,
+                    "injected_minus_control_median_ns": (
+                        injected_p50 - control_p50_median
+                    ),
+                    "allowed_delta_ns": allowed_p50_delta,
+                    "equivalent": equivalent,
+                }
 
     for phase in PHASES:
         for arm in ARMS:
@@ -705,15 +840,17 @@ def main() -> None:
                     )
 
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "passed": not errors,
         "errors": errors,
         "common_max": common_max,
         "calibration_maxima": calibration_maxima,
         "raw_samples_validated_per_load": measured_events,
         "load_levels": load_levels,
+        "control_replicates": control_replicates,
         "co_p50_relative_tolerance": p50_tolerance,
-        "co_p50_absolute_tolerance_ns": p50_absolute_tolerance_ns,
+        "co_p50_empirical_tolerance_rule": p50_empirical_rule,
+        "control_p50_stability": control_p50_stability,
         "co_achieved_target_tolerance": achieved_tolerance,
         "allocation_tolerance": allocation_tolerance,
     }
