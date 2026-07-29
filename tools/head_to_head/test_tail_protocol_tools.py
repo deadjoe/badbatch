@@ -319,14 +319,132 @@ class TailProtocolToolsTest(unittest.TestCase):
             [50, 70, 90],
         )
         self.assertEqual(3, analysis["all_cells"]["positive"])
+        self.assertEqual("decided_cells", analysis["primary_population"])
+        self.assertEqual(3, analysis["primary_summary"]["positive"])
+        self.assertEqual(
+            3,
+            analysis["language_summaries"]["rust"]["all_cells"]["positive"],
+        )
+        self.assertEqual(
+            3,
+            analysis["arm_summaries"]["a"]["all_cells"]["positive"],
+        )
+        self.assertEqual(
+            3,
+            analysis["language_arm_summaries"]["rust-a"]["all_cells"][
+                "positive"
+            ],
+        )
         self.assertEqual(
             ["rust-a"],
             analysis["load_monotonic_nonconstant_groups"],
+        )
+        self.assertEqual(
+            1.0 / 3.0,
+            analysis["load_monotonic_chance_baseline"][
+                "per_group_probability"
+            ],
+        )
+        self.assertEqual(
+            2.0,
+            analysis["load_monotonic_chance_baseline"][
+                "expected_flagged_groups"
+            ],
         )
         self.assertTrue(analysis["requires_residual_observation"])
         self.assertIn(
             "load_monotonic_nonconstant_groups",
             analysis["observations"],
+        )
+        comparison = validator.cross_run_residual_comparison(
+            {
+                "java-b4w-70": {
+                    "injected_minus_control_median_ns": 9.0,
+                    "equivalence_status": "inconclusive_injected_instability",
+                },
+                "java-a-90": {
+                    "injected_minus_control_median_ns": -1.0,
+                    "equivalence_status": "inconclusive_injected_instability",
+                },
+                "java-a-50": {
+                    "injected_minus_control_median_ns": 2.0,
+                    "equivalence_status": "pass",
+                },
+                "java-bw-90": {
+                    "injected_minus_control_median_ns": 20.0,
+                    "equivalence_status": "inconclusive_both_instability",
+                },
+                "rust-a-50": {
+                    "injected_minus_control_median_ns": 0.0,
+                    "equivalence_status": "pass",
+                },
+            },
+            {
+                "java-b4w-70": {
+                    "injected_minus_control_median_ns": 9.0,
+                    "equivalence_status": "fail",
+                },
+                "java-a-90": {
+                    "injected_minus_control_median_ns": 3.0,
+                    "equivalence_status": "inconclusive_injected_instability",
+                },
+                "java-a-50": {
+                    "injected_minus_control_median_ns": 4.0,
+                    "equivalence_status": "pass",
+                },
+                "java-bw-90": {
+                    "injected_minus_control_median_ns": 5_925.0,
+                    "equivalence_status": "inconclusive_both_instability",
+                },
+                "rust-a-50": {
+                    "injected_minus_control_median_ns": 0.0,
+                    "equivalence_status": "pass",
+                },
+            },
+            current_gate_context={
+                "schema_version": 5,
+                "co_p50_relative_tolerance": 0.025,
+                "co_p50_max_relative_range": 0.05,
+            },
+            prior_gate_context={
+                "schema_version": 4,
+                "co_p50_relative_tolerance": 0.05,
+                "co_p50_max_relative_range": 0.05,
+            },
+        )
+        self.assertEqual(
+            ["java-b4w-70"],
+            comparison[
+                "current_inconclusive_exact_nonzero_delta_reproductions"
+            ],
+        )
+        self.assertEqual(
+            ["java-a-50", "java-b4w-70"],
+            comparison["comparable_magnitude_residual_reproductions"],
+        )
+        self.assertEqual(
+            ["java-b4w-70"],
+            comparison[
+                "current_inconclusive_comparable_magnitude_reproductions"
+            ],
+        )
+        self.assertEqual(
+            ["java-a-50", "java-b4w-70", "java-bw-90"],
+            comparison["same_nonzero_direction_cells"],
+        )
+        self.assertNotIn(
+            "rust-a-50",
+            comparison["exact_nonzero_delta_reproductions"],
+        )
+        self.assertIn("quantization", comparison["resolution_limit"])
+        self.assertFalse(comparison["gate_context"]["matches"])
+        self.assertIn(
+            "cannot be attributed directly",
+            comparison["gate_context"]["status_attribution"],
+        )
+        self.assertIn(
+            "gate-independent",
+            comparison["gate_context"]["signed_delta_attribution"],
         )
 
     def test_pause_is_predeclared_per_load_from_total_affected_samples(self) -> None:

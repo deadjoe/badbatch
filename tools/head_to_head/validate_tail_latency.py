@@ -21,6 +21,8 @@ MINIMUM_CALIBRATION_REPLICATES = 3
 MEASUREMENT_ORDER_RULE = "replicate_interleaved_control_then_injected"
 SIGNED_RESIDUAL_RULE = "two_sided_exact_sign_test_and_load_monotonicity"
 SIGNED_RESIDUAL_ALPHA = 0.05
+CROSS_RUN_MAGNITUDE_RATIO_MIN = 0.5
+CROSS_RUN_MAGNITUDE_RATIO_MAX = 2.0
 PAUSE_PRECISION_CANDIDATES_US = (
     10,
     20,
@@ -164,6 +166,35 @@ def signed_residual_analysis(
     p50_results: dict[str, dict[str, Any]],
     load_levels: list[int],
 ) -> dict[str, Any]:
+    def stratified_summary(
+        languages: tuple[str, ...],
+        arms: tuple[str, ...],
+    ) -> dict[str, Any]:
+        entries = [
+            p50_results[key]
+            for language in languages
+            for arm in arms
+            for load in load_levels
+            if (key := f"{language}-{arm}-{load}") in p50_results
+        ]
+        return {
+            "all_cells": signed_delta_summary(
+                [
+                    float(entry["injected_minus_control_median_ns"])
+                    for entry in entries
+                ]
+            ),
+            "decided_cells": signed_delta_summary(
+                [
+                    float(entry["injected_minus_control_median_ns"])
+                    for entry in entries
+                    if not str(entry["equivalence_status"]).startswith(
+                        "inconclusive"
+                    )
+                ]
+            ),
+        }
+
     all_deltas = [
         float(entry["injected_minus_control_median_ns"])
         for entry in p50_results.values()
@@ -216,6 +247,49 @@ def signed_residual_analysis(
 
     all_summary = signed_delta_summary(all_deltas)
     decided_summary = signed_delta_summary(decided_deltas)
+    inconclusive_cells = [
+        {
+            "cell": key,
+            "delta_ns": float(entry["injected_minus_control_median_ns"]),
+            "equivalence_status": str(entry["equivalence_status"]),
+        }
+        for key, entry in sorted(p50_results.items())
+        if str(entry["equivalence_status"]).startswith("inconclusive")
+    ]
+    language_summaries = {
+        language: stratified_summary((language,), ARMS)
+        for language in LANGUAGES
+    }
+    arm_summaries = {
+        arm: stratified_summary(LANGUAGES, (arm,))
+        for arm in ARMS
+    }
+    language_arm_summaries = {
+        f"{language}-{arm}": stratified_summary((language,), (arm,))
+        for language in LANGUAGES
+        for arm in ARMS
+    }
+    monotonic_group_count = len(LANGUAGES) * len(ARMS)
+    monotonic_null_probability = (
+        2.0 / math.factorial(len(load_levels))
+        if len(load_levels) >= 2
+        else None
+    )
+    monotonic_chance_baseline = {
+        "assumption": "independent_continuous_deltas_without_ties",
+        "loads_per_group": len(load_levels),
+        "group_count": monotonic_group_count,
+        "per_group_probability": monotonic_null_probability,
+        "expected_flagged_groups": (
+            monotonic_group_count * monotonic_null_probability
+            if monotonic_null_probability is not None
+            else None
+        ),
+        "interpretation": (
+            "descriptive chance baseline only; integer-nanosecond ties and "
+            "cross-load dependence can change the realized frequency"
+        ),
+    }
     observations: list[str] = []
     if (
         all_summary["nonzero"] > 0
@@ -234,12 +308,136 @@ def signed_residual_analysis(
     return {
         "rule": SIGNED_RESIDUAL_RULE,
         "alpha": SIGNED_RESIDUAL_ALPHA,
+        "primary_population": "decided_cells",
+        "primary_summary": decided_summary,
         "all_cells": all_summary,
         "decided_cells": decided_summary,
+        "inconclusive_cells": inconclusive_cells,
+        "language_summaries": language_summaries,
+        "arm_summaries": arm_summaries,
+        "language_arm_summaries": language_arm_summaries,
         "groups": groups,
         "load_monotonic_nonconstant_groups": monotonic_groups,
+        "load_monotonic_chance_baseline": monotonic_chance_baseline,
         "observations": observations,
         "requires_residual_observation": bool(observations),
+    }
+
+
+def cross_run_residual_comparison(
+    current_results: dict[str, dict[str, Any]],
+    prior_results: dict[str, dict[str, Any]],
+    *,
+    current_gate_context: dict[str, Any],
+    prior_gate_context: dict[str, Any],
+) -> dict[str, Any]:
+    cells: dict[str, dict[str, Any]] = {}
+    exact_nonzero_delta_reproductions: list[str] = []
+    current_inconclusive_exact_nonzero_delta_reproductions: list[str] = []
+    same_nonzero_direction_cells: list[str] = []
+    comparable_magnitude_residual_reproductions: list[str] = []
+    current_inconclusive_comparable_magnitude_reproductions: list[str] = []
+    for key in sorted(current_results.keys() & prior_results.keys()):
+        current = current_results[key]
+        prior = prior_results[key]
+        current_delta = float(current["injected_minus_control_median_ns"])
+        prior_delta = float(prior["injected_minus_control_median_ns"])
+        current_status = str(current["equivalence_status"])
+        prior_status = str(prior["equivalence_status"])
+        exact_nonzero_delta_reproduction = (
+            current_delta != 0.0 and current_delta == prior_delta
+        )
+        same_nonzero_direction = (
+            current_delta != 0.0
+            and prior_delta != 0.0
+            and (current_delta > 0.0) == (prior_delta > 0.0)
+        )
+        magnitude_ratio = (
+            abs(current_delta) / abs(prior_delta)
+            if current_delta != 0.0 and prior_delta != 0.0
+            else None
+        )
+        comparable_magnitude_residual_reproduction = (
+            same_nonzero_direction
+            and magnitude_ratio is not None
+            and CROSS_RUN_MAGNITUDE_RATIO_MIN
+            <= magnitude_ratio
+            <= CROSS_RUN_MAGNITUDE_RATIO_MAX
+        )
+        current_inconclusive = current_status.startswith("inconclusive")
+        if exact_nonzero_delta_reproduction:
+            exact_nonzero_delta_reproductions.append(key)
+        if current_inconclusive and exact_nonzero_delta_reproduction:
+            current_inconclusive_exact_nonzero_delta_reproductions.append(key)
+        if same_nonzero_direction:
+            same_nonzero_direction_cells.append(key)
+        if comparable_magnitude_residual_reproduction:
+            comparable_magnitude_residual_reproductions.append(key)
+        if current_inconclusive and comparable_magnitude_residual_reproduction:
+            current_inconclusive_comparable_magnitude_reproductions.append(
+                key
+            )
+        cells[key] = {
+            "prior_equivalence_status": prior_status,
+            "current_equivalence_status": current_status,
+            "prior_delta_ns": prior_delta,
+            "current_delta_ns": current_delta,
+            "exact_nonzero_delta_reproduction": (
+                exact_nonzero_delta_reproduction
+            ),
+            "same_nonzero_direction": same_nonzero_direction,
+            "current_to_prior_absolute_magnitude_ratio": magnitude_ratio,
+            "comparable_magnitude_residual_reproduction": (
+                comparable_magnitude_residual_reproduction
+            ),
+            "current_inconclusive": current_inconclusive,
+        }
+    gate_context_matches = current_gate_context == prior_gate_context
+    return {
+        "acceptance_effect": "none_descriptive_only",
+        "primary_reproduction_rule": (
+            "both_nonzero_same_direction_and_current_to_prior_absolute_"
+            "magnitude_ratio_inclusive_0.5_to_2.0"
+        ),
+        "magnitude_ratio_bounds": {
+            "minimum_inclusive": CROSS_RUN_MAGNITUDE_RATIO_MIN,
+            "maximum_inclusive": CROSS_RUN_MAGNITUDE_RATIO_MAX,
+        },
+        "resolution_limit": (
+            "for small integer-nanosecond deltas near the 1 ns quantization "
+            "floor, the magnitude-ratio rule has little discrimination "
+            "beyond requiring the same nonzero sign"
+        ),
+        "gate_context": {
+            "current": current_gate_context,
+            "prior": prior_gate_context,
+            "matches": gate_context_matches,
+            "status_attribution": (
+                "gate contexts match; status differences may be compared "
+                "without a known schema/tolerance confound"
+                if gate_context_matches
+                else "gate contexts differ; status differences cannot be "
+                "attributed directly to measurement changes"
+            ),
+            "signed_delta_attribution": (
+                "signed median deltas are gate-independent and remain "
+                "comparable"
+            ),
+        },
+        "cells": cells,
+        "exact_nonzero_delta_reproductions": (
+            exact_nonzero_delta_reproductions
+        ),
+        "current_inconclusive_exact_nonzero_delta_reproductions": (
+            current_inconclusive_exact_nonzero_delta_reproductions
+        ),
+        "same_nonzero_direction_cells": same_nonzero_direction_cells,
+        "comparable_magnitude_residual_reproductions": (
+            comparable_magnitude_residual_reproductions
+        ),
+        "current_inconclusive_comparable_magnitude_reproductions": (
+            current_inconclusive_comparable_magnitude_reproductions
+        ),
     }
 
 
@@ -415,6 +613,14 @@ def expected_retention(arm: str, buffer_size: int) -> int | None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--results-dir", required=True, type=Path)
+    parser.add_argument(
+        "--prior-validation-report",
+        type=Path,
+        help=(
+            "optional prior report for descriptive cross-run signed-residual "
+            "comparison; never changes acceptance"
+        ),
+    )
     args = parser.parse_args()
     root = args.results_dir.expanduser().resolve()
     manifest_path = root / "run_manifest.json"
@@ -1761,6 +1967,39 @@ def main() -> None:
         p50_equivalence_results,
         load_levels,
     )
+    cross_run_comparison = None
+    if args.prior_validation_report is not None:
+        prior_report_path = (
+            args.prior_validation_report.expanduser().resolve()
+        )
+        prior_report = load_json(prior_report_path)
+        prior_p50_results = prior_report.get("p50_equivalence")
+        if not isinstance(prior_p50_results, dict):
+            raise SystemExit(
+                "prior validation report has no p50_equivalence object: "
+                f"{prior_report_path}"
+            )
+        cross_run_comparison = cross_run_residual_comparison(
+            p50_equivalence_results,
+            prior_p50_results,
+            current_gate_context={
+                "schema_version": int(manifest["schema_version"]),
+                "co_p50_relative_tolerance": p50_tolerance,
+                "co_p50_max_relative_range": p50_max_relative_range,
+            },
+            prior_gate_context={
+                "schema_version": int(prior_report["schema_version"]),
+                "co_p50_relative_tolerance": float(
+                    prior_report["co_p50_relative_tolerance"]
+                ),
+                "co_p50_max_relative_range": float(
+                    prior_report["co_p50_max_relative_range"]
+                ),
+            },
+        )
+        cross_run_comparison["prior_validation_report"] = str(
+            prior_report_path
+        )
 
     for phase in PHASES:
         for arm in ARMS:
@@ -1820,6 +2059,7 @@ def main() -> None:
         },
         "p50_equivalence": p50_equivalence_results,
         "p50_signed_residual_analysis": p50_signed_residual_analysis,
+        "p50_cross_run_residual_comparison": cross_run_comparison,
         "co_achieved_target_tolerance": achieved_tolerance,
         "allocation_tolerance": allocation_tolerance,
     }

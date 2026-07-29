@@ -194,12 +194,29 @@ term controls the band. The comparison uses the two medians.
 The formulas, replicate counts, and limits are written to the manifest before
 the first control; override them only before execution. The report also
 surfaces signed positive/negative/zero counts, an exact two-sided sign test, and
-non-constant load-monotonic language/arm deltas; these are residual
-observations, not extra pass/fail gates. More inconclusive Java cells can
-reflect larger JIT/safepoint/scheduling dispersion and are not, by themselves,
-evidence that Java is slower. A cell with sustained-delay-scale control
-medians plus achieved-rate loss is classified as unable to maintain that
-offered load during the measured window, rather than as a tail-latency result.
+per-language and per-arm splits. Non-constant load-monotonic language/arm
+deltas are shown with their no-ties chance baseline: with three loads, any one
+group is monotonic in either direction with probability 1/3 under an
+independent continuous null. Integer-nanosecond ties and cross-load dependence
+can change that baseline. Decided cells are the primary signed population;
+inconclusive cells retain their status and signed delta rather than being
+treated as zero effect. For post-run analysis, pass
+`--prior-validation-report PATH` to the validator to record per-cell old/new
+status and delta, same-direction residuals, and exact nonzero reproductions.
+Its primary reproduction signal excludes zeros and requires the same sign plus
+an absolute old/new magnitude ratio within `[1/2, 2]`. Both reports' schema,
+relative tolerance, and stability limit are printed. Near the 1 ns integer
+quantization floor, the ratio rule has little discrimination beyond the same
+nonzero sign; the report states that limit without inventing an unregistered
+absolute cutoff. When gate contexts differ, status changes are explicitly
+non-attributable to measurement alone, while signed deltas remain
+gate-independent. This comparison is descriptive and cannot alter acceptance.
+These are residual observations, not extra pass/fail gates. More inconclusive
+Java cells can reflect larger JIT/safepoint/scheduling dispersion and are not,
+by themselves, evidence that Java is slower. A cell with sustained-delay-scale
+control medians plus achieved-rate loss is classified as unable to maintain
+that offered load during the measured window, rather than as a tail-latency
+result.
 
 The defaults pin G1 with a fixed 2 GiB heap and preserve JFR plus timestamped
 GC/safepoint logs. Override JVM flags only before execution and keep them with
