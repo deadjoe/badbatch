@@ -107,13 +107,25 @@ class TailProtocolToolsTest(unittest.TestCase):
                 "injected-java-bw",
                 "injected-java-b4w",
                 "injected-rust-b4w",
+                "injected-r2-rust-a",
+                "injected-r2-java-a",
+                "injected-r2-java-bw",
+                "injected-r2-rust-bw",
+                "injected-r2-rust-b4w",
+                "injected-r2-java-b4w",
+                "injected-r3-java-a",
+                "injected-r3-rust-a",
+                "injected-r3-rust-bw",
+                "injected-r3-java-bw",
+                "injected-r3-java-b4w",
+                "injected-r3-rust-b4w",
             ],
             [label for _, _, _, label in plan],
         )
-        self.assertEqual([False] * 18 + [True] * 6, [item[0] for item in plan])
+        self.assertEqual([False] * 18 + [True] * 18, [item[0] for item in plan])
         self.assertEqual(
             [label for _, _, _, label in plan],
-            validator.expected_measurement_order(3),
+            validator.expected_measurement_order(3, 3),
         )
         calibration_plan = runner.build_calibration_plan(arms)
         self.assertEqual(
@@ -211,13 +223,23 @@ class TailProtocolToolsTest(unittest.TestCase):
             )
         )
 
-    def test_p50_equivalence_uses_relative_or_empirical_control_range(self) -> None:
+    def test_p50_equivalence_uses_relative_or_either_empirical_range(self) -> None:
         self.assertTrue(
             validator.p50_equivalent(
                 110,
                 124,
                 relative_tolerance=0.05,
                 control_full_range_ns=16,
+                injected_full_range_ns=4,
+            )
+        )
+        self.assertTrue(
+            validator.p50_equivalent(
+                110,
+                124,
+                relative_tolerance=0.05,
+                control_full_range_ns=4,
+                injected_full_range_ns=16,
             )
         )
         self.assertFalse(
@@ -226,16 +248,17 @@ class TailProtocolToolsTest(unittest.TestCase):
                 124,
                 relative_tolerance=0.05,
                 control_full_range_ns=4,
+                injected_full_range_ns=3,
             )
         )
         self.assertEqual(
             (120.0, 3.0, 0.025, True),
-            validator.control_p50_stability(
+            validator.p50_stability(
                 [120.0, 117.0, 120.0],
                 max_relative_range=0.05,
             ),
         )
-        unstable = validator.control_p50_stability(
+        unstable = validator.p50_stability(
             [134.0, 119.0, 1_905.0],
             max_relative_range=0.05,
         )
@@ -246,6 +269,7 @@ class TailProtocolToolsTest(unittest.TestCase):
                 1_100,
                 relative_tolerance=0.05,
                 control_full_range_ns=25,
+                injected_full_range_ns=25,
             )
         )
 

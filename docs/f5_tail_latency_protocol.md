@@ -231,23 +231,26 @@ first half of the measured region, never near its end.
 
 Acceptance requires all three signals together:
 
-1. Run at least three independent, fresh-process controls for every
-   language/arm/load combination. Record their p50 values, median, minimum,
-   maximum, and full range. Before using dispersion as a tolerance, require
-   `control full range / control median <= 5%`. If that stability prerequisite
-   fails, label p50 equivalence **inconclusive** and retain its GC/safepoint
-   logs; never let a control-side GC spike widen the band. For a stable
-   control, compare the injected p50 with the control median,
-   using the predeclared tolerance rule
-   `max(5% relative difference, control p50 full range in ns)`. The formula and
-   replicate count must be frozen before any control is run; the observed
-   range is then derived only from controls, before the injected result is
-   inspected. There is no unmeasured fixed nanosecond floor.
+1. Run at least three independent, fresh-process controls **and** at least
+   three independent, fresh-process injected runs for every
+   language/arm/load combination. Record each side's p50 values, median,
+   minimum, maximum, and full range. Before using either dispersion as a
+   tolerance, independently require
+   `side full range / abs(side median) <= 5%`. If either side fails that
+   stability prerequisite, label p50 equivalence **inconclusive** and retain
+   its GC/safepoint logs; never let a control- or injected-side spike widen the
+   band. When both sides are stable, compare their medians with the
+   predeclared tolerance rule
+   `max(5% relative difference, control p50 full range in ns,
+   injected p50 full range in ns)`. The formula and both replicate counts must
+   be frozen before any measurement runs. There is no unmeasured fixed
+   nanosecond floor.
 2. Injected-run p99.9 is at least 50% of the pause duration and max is at least
    80% of the pause duration, placing both in the pause's time scale.
 3. Achieved/target remains near 1.0 under injection, within a predeclared tight
    scheduling tolerance and without a material drop from the median control.
-   Every control replicate must independently pass this tight rate gate.
+   Every control and injected replicate must independently pass this tight
+   rate gate, and the material-drop comparison uses the two side medians.
    Merely passing the general 0.95 validity gate is insufficient.
 
 Max alone never establishes coordinated-omission resistance. The expected
@@ -255,10 +258,19 @@ signature is an essentially unchanged median, pause-scale tail and maximum,
 and unchanged offered rate.
 
 The report must retain the signed
-`injected p50 - control median p50` delta at every load. A monotonic or
-load-correlated signed pattern remains a reported residual observation even
-when it lies inside the empirical equivalence band; it must not be relabeled
-as timer noise.
+`injected median p50 - control median p50` delta at every load, both p50
+vectors and dispersions, and both achieved/target vectors and medians. A
+monotonic or load-correlated signed pattern remains a reported residual
+observation even when it lies inside the empirical equivalence band; it must
+not be relabeled as timer noise.
+
+The stability prerequisite measures statistical usability, not implementation
+quality. A runtime with larger JIT, safepoint, or scheduling dispersion can
+therefore produce more inconclusive cells even in the allocation-free arm;
+that is not evidence that the runtime is slower. Conversely, if a control's
+median latency itself reaches the sustained-delay scale and its achieved rate
+drops, label the cell as unable to maintain that offered load in the measured
+window (continuous backlog/overload), not as a tail-latency comparison.
 
 Run this complete counterfactual independently for A, B-W, and B-4W in both
 languages. Each run recomputes the pause-backlog bounds, drain allowance, and

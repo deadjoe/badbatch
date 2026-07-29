@@ -156,8 +156,9 @@ checks the A/B bytecode, uses JFR to verify the Java B payload size, calibrates
 Rust/Java × A/B-W/B-4W in at least three balanced fresh processes, selects each
 arm's minimum, and chooses the minimum of all six conservative maxima. Every
 arm then receives the same absolute 50/70/90% targets, three fresh-process
-controls, and one injected pause counterfactual. After calibration but before
-any tail result is observed, the runner freezes a separate microsecond pause
+controls, and three fresh-process injected pause counterfactuals. After
+calibration but before any tail result is observed, the runner freezes a
+separate microsecond pause
 for every load. Before calibration it automatically measures Rust and Java
 pause-delivery precision under the same CPU/JVM/JFR/GC profile in five fresh
 processes per candidate and selects the first host-local duration whose worst
@@ -179,11 +180,18 @@ provenance, JFR/GC artifact presence, and the predeclared
 control-versus-pause tolerances. It writes `validation_report.json` and exits
 non-zero on any mismatch.
 
-The default p50 equivalence band is the larger of 5% and the full range of the
-three control p50 values, but the empirical range can be used only when
-`full range / control median <= 5%`. An unstable control makes equivalence
-inconclusive instead of widening the band. The formulas and limits are written
-to the manifest before the first control; override them only before execution.
+The default p50 equivalence band is the largest of 5%, the full range of the
+three control p50 values, and the full range of the three injected p50 values.
+Each empirical range can be used only when that side independently satisfies
+`full range / abs(median) <= 5%`; instability on either side makes equivalence
+inconclusive instead of widening the band. The comparison uses the two
+medians. The formulas, replicate counts, and limits are written to the manifest
+before the first control; override them only before execution. More
+inconclusive Java cells can reflect larger JIT/safepoint/scheduling dispersion
+and are not, by themselves, evidence that Java is slower. A cell with
+sustained-delay-scale control medians plus achieved-rate loss is classified as
+unable to maintain that offered load during the measured window, rather than
+as a tail-latency result.
 
 The defaults pin G1 with a fixed 2 GiB heap and preserve JFR plus timestamped
 GC/safepoint logs. Override JVM flags only before execution and keep them with
