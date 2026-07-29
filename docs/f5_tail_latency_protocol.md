@@ -273,8 +273,28 @@ observation even when it lies inside the empirical equivalence band; it must
 not be relabeled as timer noise. The validator therefore reports positive,
 negative, and zero counts plus a two-sided exact sign test over all cells and
 over non-inconclusive cells. It also reports each language/arm's signed deltas
-by load and flags non-constant monotonic sequences. These are residual
-observations, not extra pass/fail gates.
+by load, separates exact sign summaries by language and arm, and flags
+non-constant monotonic sequences. Because three independently continuous load
+values are monotonic in either direction with probability `2 / 3! = 1/3`
+under a no-ties null, the report includes that chance baseline and its expected
+flag count; integer-nanosecond ties and cross-load dependence can change the
+realized frequency. The report treats non-inconclusive cells as the primary
+signed population and lists every inconclusive cell's signed delta separately;
+instability means that the equivalence gate cannot decide, not that the
+observed residual is zero. A post-run comparison may supply a prior validation
+report to record per-cell status and delta, same-direction residuals, and exact
+nonzero delta reproductions across runs. Its primary reproduction signal
+requires both deltas to be nonzero, have the same sign, and have an absolute
+magnitude ratio in the inclusive `[1/2, 2]` band; exact equality is only a
+supplemental fact. For small integer-nanosecond deltas near the 1 ns
+quantization floor, this ratio has little discrimination beyond requiring the
+same nonzero sign; the report records that resolution limit rather than adding
+an unregistered absolute cutoff. The comparison prints each run's schema,
+relative tolerance, and stability limit. If those gate contexts differ, status
+changes cannot be attributed directly to measurement changes, while the signed
+median deltas remain gate-independent. The comparison is descriptive and never
+changes either run's acceptance. These are residual observations, not extra
+pass/fail gates.
 
 The stability prerequisite measures statistical usability, not implementation
 quality. A runtime with larger JIT, safepoint, or scheduling dispersion can

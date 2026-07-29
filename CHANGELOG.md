@@ -29,9 +29,16 @@ jobs cannot silently raise this minimum.
   reachable through the formal validator.
 - **Signed residuals are first-class evidence.** Validation reports now include
   positive/negative/zero delta counts, two-sided exact sign tests, and
-  non-constant load-monotonic language/arm groups. These observations are
-  surfaced even when every affected cell remains within its equivalence band;
-  they do not silently become timer noise or a new acceptance gate.
+  per-language and per-arm splits. Non-constant load-monotonic language/arm
+  groups carry their no-ties chance baseline so a three-load pattern is not
+  presented without its expected false-pattern rate. Decided cells are the
+  primary signed population; inconclusive cells retain their signed deltas,
+  and an optional prior-report comparison records nonzero, same-direction,
+  comparable-magnitude cross-run residuals. The comparison exposes both gate
+  contexts and warns when status changes cannot be attributed to measurement
+  alone. It does not change acceptance. These observations are surfaced even
+  when every affected cell remains within its equivalence band; they do not
+  silently become timer noise or a new acceptance gate.
 - **Manifest schema 5.** The manifest freezes the phase-order and signed
   residual rules before measurement. Schema-4 artifacts remain historical
   evidence for their original instrument revision rather than being
