@@ -120,6 +120,15 @@ class TailProtocolToolsTest(unittest.TestCase):
             [label for _, _, _, label in calibration_plan],
             validator.expected_calibration_order(3),
         )
+        self.assertEqual(
+            [
+                "pause-precision-10us-r1-rust",
+                "pause-precision-10us-r1-java",
+                "pause-precision-10us-r2-java",
+                "pause-precision-10us-r2-rust",
+            ],
+            validator.expected_pause_precision_order([10], 2),
+        )
 
     def test_raw_validator_checks_schedule_and_complete_row_count(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -246,15 +255,19 @@ class TailProtocolToolsTest(unittest.TestCase):
             load_levels=[50, 70, 90],
             measured_events=1_000_000,
             requested_us_by_load=None,
+            minimum_requested_us=1,
+            max_overshoot_ratio=1.0,
         )
-        self.assertEqual({50: 1_667, 70: 715, 90: 186}, selected)
+        self.assertEqual({50: 1_666, 70: 714, 90: 185}, selected)
         self.assertEqual(
-            {50: 499_991, 70: 214_282, 90: 55_555},
+            {50: 500_000, 70: 214_285, 90: 55_555},
             runner.select_inject_sleep_us_by_load(
                 common_max=100_000,
                 load_levels=[50, 70, 90],
                 measured_events=1_000_000,
                 requested_us_by_load=None,
+                minimum_requested_us=1,
+                max_overshoot_ratio=1.0,
             ),
         )
         self.assertEqual(
@@ -279,7 +292,61 @@ class TailProtocolToolsTest(unittest.TestCase):
                 load_levels=[50, 70, 90],
                 measured_events=1_000_000,
                 requested_us_by_load={50: 1, 70: 1, 90: 1},
+                minimum_requested_us=1,
+                max_overshoot_ratio=1.0,
             )
+
+    def test_pause_precision_preflight_sets_an_independent_lower_bound(self) -> None:
+        unstable = runner.summarize_pause_precision(
+            [350_209, 389_625, 356_750, 368_291, 360_334],
+            requested_us=200,
+            max_overshoot_ratio=1.75,
+            max_relative_range=0.10,
+        )
+        self.assertFalse(unstable["passed"])
+        stable = runner.summarize_pause_precision(
+            [808_417, 803_125, 804_209, 808_666, 819_708],
+            requested_us=500,
+            max_overshoot_ratio=1.75,
+            max_relative_range=0.10,
+        )
+        self.assertTrue(stable["passed"])
+        with self.assertRaises(SystemExit):
+            runner.select_inject_sleep_us_by_load(
+                common_max=12_619_000,
+                load_levels=[50, 70, 90],
+                measured_events=262_144,
+                requested_us_by_load=None,
+                minimum_requested_us=200,
+                max_overshoot_ratio=1.75,
+            )
+        selected = runner.select_inject_sleep_us_by_load(
+            common_max=12_619_000,
+            load_levels=[50, 70, 90],
+            measured_events=1_048_576,
+            requested_us_by_load=None,
+            minimum_requested_us=200,
+            max_overshoot_ratio=1.75,
+        )
+        self.assertGreaterEqual(min(selected.values()), 200)
+        with self.assertRaises(SystemExit):
+            runner.select_inject_sleep_us_by_load(
+                common_max=12_619_000,
+                load_levels=[50, 70, 90],
+                measured_events=1_048_576,
+                requested_us_by_load=None,
+                minimum_requested_us=500,
+                max_overshoot_ratio=1.75,
+            )
+        selected = runner.select_inject_sleep_us_by_load(
+            common_max=12_619_000,
+            load_levels=[50, 70, 90],
+            measured_events=2_097_152,
+            requested_us_by_load=None,
+            minimum_requested_us=500,
+            max_overshoot_ratio=1.75,
+        )
+        self.assertGreaterEqual(min(selected.values()), 500)
 
 
 if __name__ == "__main__":

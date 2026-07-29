@@ -158,8 +158,16 @@ arm's minimum, and chooses the minimum of all six conservative maxima. Every
 arm then receives the same absolute 50/70/90% targets, three fresh-process
 controls, and one injected pause counterfactual. After calibration but before
 any tail result is observed, the runner freezes a separate microsecond pause
-for every load, targeting `floor(N / 20)` affected samples—half of the 10%
-upper bound, which leaves 2x headroom for observed sleep overshoot.
+for every load. Before calibration it automatically measures Rust and Java
+pause-delivery precision under the same CPU/JVM/JFR/GC profile in five fresh
+processes per candidate and selects the first host-local duration whose worst
+overshoot is at most 1.75x and whose relative full range is at most 10% in both
+runtimes. The per-load selector
+intersects that independent minimum with the affected bounds, allows at most
+`floor(N / 20)` affected samples under the measured 1.75x overshoot ceiling,
+and retains `floor(N / 10)` as the final observed hard gate. An empty
+intersection fails with the minimum larger `N`; it never falls back to manual
+host tuning.
 `--inject-sleep-us-by-load 50:U,70:U,90:U` may predeclare
 different values, but an out-of-range choice aborts before measurement. Rust
 and Java warmup counts are separate; freeze them from runtime-specific
