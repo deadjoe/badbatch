@@ -234,16 +234,24 @@ Acceptance requires all three signals together:
 1. Run at least three independent, fresh-process controls **and** at least
    three independent, fresh-process injected runs for every
    language/arm/load combination. Record each side's p50 values, median,
-   minimum, maximum, and full range. Before using either dispersion as a
-   tolerance, independently require
+   minimum, maximum, and full range. The two replicate counts must match, and
+   execution is paired by replicate:
+   `control-r1 → injected-r1 → control-r2 → injected-r2 → ...`. Preserve the
+   frozen language alternation inside every phase block. This prevents phase
+   from being perfectly confounded with elapsed host time without increasing
+   the number of processes. Before using either dispersion as a tolerance,
+   independently require
    `side full range / abs(side median) <= 5%`. If either side fails that
    stability prerequisite, label p50 equivalence **inconclusive** and retain
    its GC/safepoint logs; never let a control- or injected-side spike widen the
    band. When both sides are stable, compare their medians with the
    predeclared tolerance rule
-   `max(5% relative difference, control p50 full range in ns,
+   `max(2.5% relative difference, control p50 full range in ns,
    injected p50 full range in ns)`. The formula and both replicate counts must
-   be frozen before any measurement runs. There is no unmeasured fixed
+   be frozen before any measurement runs. The relative floor must be strictly
+   smaller than the stability ceiling; otherwise stable empirical ranges can
+   never affect the result. The validator rejects
+   `relative tolerance >= stability limit`. There is no unmeasured fixed
    nanosecond floor.
 2. Injected-run p99.9 is at least 50% of the pause duration and max is at least
    80% of the pause duration, placing both in the pause's time scale.
@@ -262,7 +270,11 @@ The report must retain the signed
 vectors and dispersions, and both achieved/target vectors and medians. A
 monotonic or load-correlated signed pattern remains a reported residual
 observation even when it lies inside the empirical equivalence band; it must
-not be relabeled as timer noise.
+not be relabeled as timer noise. The validator therefore reports positive,
+negative, and zero counts plus a two-sided exact sign test over all cells and
+over non-inconclusive cells. It also reports each language/arm's signed deltas
+by load and flags non-constant monotonic sequences. These are residual
+observations, not extra pass/fail gates.
 
 The stability prerequisite measures statistical usability, not implementation
 quality. A runtime with larger JIT, safepoint, or scheduling dispersion can
