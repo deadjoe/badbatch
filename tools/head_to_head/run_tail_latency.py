@@ -25,6 +25,7 @@ ALLOCATION_EVENTS = (
     "jdk.ObjectAllocationInNewTLAB,jdk.ObjectAllocationOutsideTLAB"
 )
 MINIMUM_CONTROL_REPLICATES = 3
+MINIMUM_INJECTED_REPLICATES = 3
 MINIMUM_CALIBRATION_REPLICATES = 3
 PAUSE_PRECISION_CANDIDATES_US = (
     10,
@@ -312,12 +313,16 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--co-p50-relative-tolerance", type=float, default=0.05)
     result.add_argument(
+        "--co-p50-max-relative-range",
         "--co-control-p50-max-relative-range",
+        dest="co_p50_max_relative_range",
         type=float,
         default=0.05,
         help=(
-            "control full-range/median stability prerequisite; an unstable "
-            "control makes the p50 equivalence result inconclusive"
+            "per-side full-range/median stability prerequisite; an unstable "
+            "control or injected side makes p50 equivalence inconclusive "
+            "(the old --co-control-p50-max-relative-range spelling remains "
+            "an alias)"
         ),
     )
     result.add_argument(
@@ -328,6 +333,16 @@ def parser() -> argparse.ArgumentParser:
             "independent control processes per language/arm; must be at least "
             f"{MINIMUM_CONTROL_REPLICATES} so the p50 band can use the observed "
             "control full range"
+        ),
+    )
+    result.add_argument(
+        "--injected-replicates",
+        type=positive_int,
+        default=MINIMUM_INJECTED_REPLICATES,
+        help=(
+            "independent injected-pause processes per language/arm; must be "
+            f"at least {MINIMUM_INJECTED_REPLICATES} so both sides contribute "
+            "a measured p50 dispersion"
         ),
     )
     result.add_argument(
@@ -1033,6 +1048,7 @@ def measurement_command(
 def build_measurement_plan(
     arms: list[Arm],
     control_replicates: int = MINIMUM_CONTROL_REPLICATES,
+    injected_replicates: int = MINIMUM_INJECTED_REPLICATES,
 ) -> list[tuple[bool, Arm, str, str]]:
     plan: list[tuple[bool, Arm, str, str]] = []
     for replicate in range(1, control_replicates + 1):
@@ -1052,19 +1068,23 @@ def build_measurement_plan(
                         f"{phase}-{language}-{arm.name}",
                     )
                 )
-    for arm_index, arm in enumerate(arms):
-        languages = (
-            ("java", "rust") if arm_index % 2 == 0 else ("rust", "java")
-        )
-        for language in languages:
-            plan.append(
-                (
-                    True,
-                    arm,
-                    language,
-                    f"injected-{language}-{arm.name}",
-                )
+    for replicate in range(1, injected_replicates + 1):
+        phase = "injected" if replicate == 1 else f"injected-r{replicate}"
+        for arm_index, arm in enumerate(arms):
+            languages = (
+                ("java", "rust")
+                if (arm_index + replicate - 1) % 2 == 0
+                else ("rust", "java")
             )
+            for language in languages:
+                plan.append(
+                    (
+                        True,
+                        arm,
+                        language,
+                        f"{phase}-{language}-{arm.name}",
+                    )
+                )
     return plan
 
 
@@ -1102,14 +1122,20 @@ def main() -> None:
         raise SystemExit("allocation-tolerance must be in 0..=1")
     if not 0.0 <= args.co_p50_relative_tolerance <= 1.0:
         raise SystemExit("CO p50 tolerance must be in 0..=1")
-    if not 0.0 <= args.co_control_p50_max_relative_range <= 1.0:
-        raise SystemExit("CO control p50 range limit must be in 0..=1")
+    if not 0.0 <= args.co_p50_max_relative_range <= 1.0:
+        raise SystemExit("CO p50 range limit must be in 0..=1")
     if not 0.0 <= args.co_achieved_target_tolerance <= 1.0:
         raise SystemExit("CO achieved tolerance must be in 0..=1")
     if args.control_replicates < MINIMUM_CONTROL_REPLICATES:
         raise SystemExit(
             "at least "
             f"{MINIMUM_CONTROL_REPLICATES} independent control replicates "
+            "are required"
+        )
+    if args.injected_replicates < MINIMUM_INJECTED_REPLICATES:
+        raise SystemExit(
+            "at least "
+            f"{MINIMUM_INJECTED_REPLICATES} independent injected replicates "
             "are required"
         )
     if args.calibration_replicates < MINIMUM_CALIBRATION_REPLICATES:
@@ -1339,10 +1365,11 @@ def main() -> None:
     measurement_plan = build_measurement_plan(
         arms,
         control_replicates=args.control_replicates,
+        injected_replicates=args.injected_replicates,
     )
 
     manifest = {
-        "schema_version": 3,
+        "schema_version": 4,
         "protocol": "docs/f5_tail_latency_protocol.md",
         "results_dir": str(results),
         "buffer_size": args.buffer_size,
@@ -1365,11 +1392,12 @@ def main() -> None:
             maximum_planned_measured_duration_ms
         ),
         "control_replicates": args.control_replicates,
+        "injected_replicates": args.injected_replicates,
         "co_p50_relative_tolerance": args.co_p50_relative_tolerance,
-        "co_control_p50_max_relative_range": (
-            args.co_control_p50_max_relative_range
+        "co_p50_max_relative_range": args.co_p50_max_relative_range,
+        "co_p50_empirical_tolerance_rule": (
+            "max_control_and_injected_p50_full_range_ns"
         ),
-        "co_p50_empirical_tolerance_rule": "control_p50_full_range_ns",
         "co_achieved_target_tolerance": args.co_achieved_target_tolerance,
         "calibrations": calibrations,
         "common_max": common_max,

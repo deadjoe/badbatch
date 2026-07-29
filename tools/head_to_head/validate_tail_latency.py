@@ -16,6 +16,7 @@ LANGUAGES = ("rust", "java")
 PHASES = ("control", "injected")
 RAW_HEADER = "sequence,planned_ns,completion_ns,latency_ns"
 MINIMUM_CONTROL_REPLICATES = 3
+MINIMUM_INJECTED_REPLICATES = 3
 MINIMUM_CALIBRATION_REPLICATES = 3
 PAUSE_PRECISION_CANDIDATES_US = (
     10,
@@ -83,27 +84,30 @@ def expected_pause_counts(
 
 def p50_equivalent(
     control_median: float,
-    injected: float,
+    injected_median: float,
     *,
     relative_tolerance: float,
     control_full_range_ns: float,
+    injected_full_range_ns: float,
 ) -> bool:
     allowed_delta = max(
         control_full_range_ns,
-        relative_tolerance * max(abs(control_median), abs(injected)),
+        injected_full_range_ns,
+        relative_tolerance
+        * max(abs(control_median), abs(injected_median)),
     )
-    return abs(control_median - injected) <= allowed_delta
+    return abs(control_median - injected_median) <= allowed_delta
 
 
-def control_p50_stability(
-    control_p50s: list[float],
+def p50_stability(
+    p50s: list[float],
     *,
     max_relative_range: float,
 ) -> tuple[float, float, float, bool]:
-    if not control_p50s:
-        raise ValueError("control p50 samples must not be empty")
-    observed_median = float(median(control_p50s))
-    full_range = max(control_p50s) - min(control_p50s)
+    if not p50s:
+        raise ValueError("p50 samples must not be empty")
+    observed_median = float(median(p50s))
+    full_range = max(p50s) - min(p50s)
     relative_range = (
         full_range / abs(observed_median)
         if observed_median != 0.0
@@ -117,7 +121,10 @@ def control_p50_stability(
     )
 
 
-def expected_measurement_order(control_replicates: int) -> list[str]:
+def expected_measurement_order(
+    control_replicates: int,
+    injected_replicates: int,
+) -> list[str]:
     order: list[str] = []
     for replicate in range(1, control_replicates + 1):
         phase = "control" if replicate == 1 else f"control-r{replicate}"
@@ -128,11 +135,17 @@ def expected_measurement_order(control_replicates: int) -> list[str]:
                 else ("java", "rust")
             )
             order.extend(f"{phase}-{language}-{arm}" for language in languages)
-    for arm_index, arm in enumerate(ARMS):
-        languages = (
-            ("java", "rust") if arm_index % 2 == 0 else ("rust", "java")
-        )
-        order.extend(f"injected-{language}-{arm}" for language in languages)
+    for replicate in range(1, injected_replicates + 1):
+        phase = "injected" if replicate == 1 else f"injected-r{replicate}"
+        for arm_index, arm in enumerate(ARMS):
+            languages = (
+                ("java", "rust")
+                if (arm_index + replicate - 1) % 2 == 0
+                else ("rust", "java")
+            )
+            order.extend(
+                f"{phase}-{language}-{arm}" for language in languages
+            )
     return order
 
 
@@ -283,7 +296,7 @@ def main() -> None:
         if not condition:
             errors.append(message)
 
-    check(manifest.get("schema_version") == 3, "unsupported run manifest schema")
+    check(manifest.get("schema_version") == 4, "unsupported run manifest schema")
     buffer_size = int(manifest["buffer_size"])
     measured_events = int(manifest["measured_events"])
     warmup_by_language = {
@@ -303,10 +316,9 @@ def main() -> None:
         manifest["maximum_planned_measured_duration_ms"]
     )
     control_replicates = int(manifest["control_replicates"])
+    injected_replicates = int(manifest["injected_replicates"])
     p50_tolerance = float(manifest["co_p50_relative_tolerance"])
-    control_p50_max_relative_range = float(
-        manifest["co_control_p50_max_relative_range"]
-    )
+    p50_max_relative_range = float(manifest["co_p50_max_relative_range"])
     p50_empirical_rule = str(manifest["co_p50_empirical_tolerance_rule"])
     achieved_tolerance = float(manifest["co_achieved_target_tolerance"])
     expected_allocation = int(manifest["expected_allocation_bytes"])
@@ -915,6 +927,10 @@ def main() -> None:
         "fewer than three independent control replicates",
     )
     check(
+        injected_replicates >= MINIMUM_INJECTED_REPLICATES,
+        "fewer than three independent injected replicates",
+    )
+    check(
         calibration_replicates >= MINIMUM_CALIBRATION_REPLICATES,
         "fewer than three independent calibration replicates",
     )
@@ -937,8 +953,8 @@ def main() -> None:
         "maximum planned measured duration mismatch",
     )
     check(
-        0.0 <= control_p50_max_relative_range <= 1.0,
-        "invalid control p50 relative-range limit",
+        0.0 <= p50_max_relative_range <= 1.0,
+        "invalid p50 relative-range limit",
     )
     check(
         set(inject_sleep_us_by_load) == set(load_levels),
@@ -978,7 +994,8 @@ def main() -> None:
             f"load {load_pct}: precision overshoot exceeds preferred affected band",
         )
     check(
-        p50_empirical_rule == "control_p50_full_range_ns",
+        p50_empirical_rule
+        == "max_control_and_injected_p50_full_range_ns",
         "unsupported empirical p50 tolerance rule",
     )
     check(
@@ -1120,17 +1137,21 @@ def main() -> None:
     )
     check(
         manifest.get("execution_order")
-        == expected_measurement_order(control_replicates),
+        == expected_measurement_order(
+            control_replicates,
+            injected_replicates,
+        ),
         "execution order is not the frozen balanced order",
     )
 
     artifacts: dict[tuple[str, str, str], dict[str, Any]] = {}
     control_artifacts: dict[tuple[int, str, str], dict[str, Any]] = {}
+    injected_artifacts: dict[tuple[int, str, str], dict[str, Any]] = {}
     for phase in PHASES:
         replicates = (
             range(1, control_replicates + 1)
             if phase == "control"
-            else range(1, 2)
+            else range(1, injected_replicates + 1)
         )
         for replicate in replicates:
             phase_label = (
@@ -1139,7 +1160,11 @@ def main() -> None:
                 else (
                     f"control-r{replicate}"
                     if phase == "control"
-                    else "injected"
+                    else (
+                        "injected"
+                        if replicate == 1
+                        else f"injected-r{replicate}"
+                    )
                 )
             )
             for arm in ARMS:
@@ -1149,7 +1174,9 @@ def main() -> None:
                     artifact = load_json(path)
                     if phase == "control":
                         control_artifacts[(replicate, language, arm)] = artifact
-                    if phase == "injected" or replicate == 1:
+                    else:
+                        injected_artifacts[(replicate, language, arm)] = artifact
+                    if replicate == 1:
                         artifacts[(phase, language, arm)] = artifact
                     check(
                         artifact.get("run_mode") == "measurement",
@@ -1402,59 +1429,104 @@ def main() -> None:
             "Rust and Java artifacts do not share one BadBatch harness revision",
         )
 
-    control_p50_results: dict[str, dict[str, Any]] = {}
+    p50_equivalence_results: dict[str, dict[str, Any]] = {}
     for arm in ARMS:
         for language in LANGUAGES:
-            injected = artifacts.get(("injected", language, arm), {})
             for index, load_pct in enumerate(load_levels):
-                injected_loads = injected.get("loads", [])
-                replicate_loads = [
+                control_replicate_loads = [
                     control_artifacts.get((replicate, language, arm), {}).get(
                         "loads", []
                     )
                     for replicate in range(1, control_replicates + 1)
                 ]
+                injected_replicate_loads = [
+                    injected_artifacts.get((replicate, language, arm), {}).get(
+                        "loads", []
+                    )
+                    for replicate in range(1, injected_replicates + 1)
+                ]
                 if (
-                    index >= len(injected_loads)
-                    or any(index >= len(loads) for loads in replicate_loads)
+                    any(
+                        index >= len(loads)
+                        for loads in (
+                            control_replicate_loads
+                            + injected_replicate_loads
+                        )
+                    )
                 ):
                     continue
-                control_loads = [loads[index] for loads in replicate_loads]
-                injected_load = injected_loads[index]
+                control_loads = [
+                    loads[index] for loads in control_replicate_loads
+                ]
+                injected_loads = [
+                    loads[index] for loads in injected_replicate_loads
+                ]
                 control_p50s = [
                     float(load["latency_ns"]["p50"]) for load in control_loads
+                ]
+                injected_p50s = [
+                    float(load["latency_ns"]["p50"]) for load in injected_loads
                 ]
                 (
                     control_p50_median,
                     control_p50_full_range,
                     control_relative_range,
                     control_stable,
-                ) = control_p50_stability(
+                ) = p50_stability(
                     control_p50s,
-                    max_relative_range=control_p50_max_relative_range,
+                    max_relative_range=p50_max_relative_range,
                 )
-                injected_p50 = float(injected_load["latency_ns"]["p50"])
+                (
+                    injected_p50_median,
+                    injected_p50_full_range,
+                    injected_relative_range,
+                    injected_stable,
+                ) = p50_stability(
+                    injected_p50s,
+                    max_relative_range=p50_max_relative_range,
+                )
                 allowed_p50_delta = max(
                     control_p50_full_range,
+                    injected_p50_full_range,
                     p50_tolerance
-                    * max(abs(control_p50_median), abs(injected_p50)),
+                    * max(
+                        abs(control_p50_median),
+                        abs(injected_p50_median),
+                    ),
                 )
-                equivalent = control_stable and p50_equivalent(
-                    control_p50_median,
-                    injected_p50,
-                    relative_tolerance=p50_tolerance,
-                    control_full_range_ns=control_p50_full_range,
+                equivalent = (
+                    control_stable
+                    and injected_stable
+                    and p50_equivalent(
+                        control_p50_median,
+                        injected_p50_median,
+                        relative_tolerance=p50_tolerance,
+                        control_full_range_ns=control_p50_full_range,
+                        injected_full_range_ns=injected_p50_full_range,
+                    )
                 )
-                if not control_stable:
+                if not control_stable and not injected_stable:
+                    errors.append(
+                        f"{language}-{arm}-{load_pct}: control and injected "
+                        "p50 unstable; equivalence inconclusive"
+                    )
+                    equivalence_status = "inconclusive_both_instability"
+                elif not control_stable:
                     errors.append(
                         f"{language}-{arm}-{load_pct}: control p50 unstable; "
                         "equivalence inconclusive"
                     )
                     equivalence_status = "inconclusive_control_instability"
+                elif not injected_stable:
+                    errors.append(
+                        f"{language}-{arm}-{load_pct}: injected p50 unstable; "
+                        "equivalence inconclusive"
+                    )
+                    equivalence_status = "inconclusive_injected_instability"
                 elif not equivalent:
                     errors.append(
                         f"{language}-{arm}-{load_pct}: "
-                        "injected p50 outside tolerance"
+                        "injected median p50 outside tolerance"
                     )
                     equivalence_status = "fail"
                 else:
@@ -1463,35 +1535,56 @@ def main() -> None:
                     float(load["actual_target_ratio"]) for load in control_loads
                 ]
                 control_ratio_median = float(median(control_ratios))
-                injected_ratio = float(injected_load["actual_target_ratio"])
-                for replicate, control_ratio in enumerate(control_ratios, start=1):
+                injected_ratios = [
+                    float(load["actual_target_ratio"])
+                    for load in injected_loads
+                ]
+                injected_ratio_median = float(median(injected_ratios))
+                for replicate, control_ratio in enumerate(
+                    control_ratios, start=1
+                ):
                     check(
                         abs(control_ratio - 1.0) <= achieved_tolerance,
                         f"{language}-{arm}-{load_pct}: control-r{replicate} "
                         "achieved ratio not tight",
                     )
+                for replicate, injected_ratio in enumerate(
+                    injected_ratios, start=1
+                ):
+                    check(
+                        abs(injected_ratio - 1.0) <= achieved_tolerance,
+                        f"{language}-{arm}-{load_pct}: injected-r{replicate} "
+                        "achieved ratio not tight",
+                    )
                 check(
-                    abs(injected_ratio - 1.0) <= achieved_tolerance,
-                    f"{language}-{arm}-{load_pct}: injected achieved ratio not tight",
-                )
-                check(
-                    injected_ratio + achieved_tolerance >= control_ratio_median,
+                    injected_ratio_median + achieved_tolerance
+                    >= control_ratio_median,
                     f"{language}-{arm}-{load_pct}: achieved rate materially dropped",
                 )
-                control_p50_results[f"{language}-{arm}-{load_pct}"] = {
+                p50_equivalence_results[f"{language}-{arm}-{load_pct}"] = {
                     "control_p50_ns": control_p50s,
                     "control_p50_median_ns": control_p50_median,
                     "control_p50_min_ns": min(control_p50s),
                     "control_p50_max_ns": max(control_p50s),
                     "control_p50_full_range_ns": control_p50_full_range,
                     "control_p50_relative_range": control_relative_range,
-                    "control_stability_limit": (
-                        control_p50_max_relative_range
-                    ),
+                    "injected_p50_ns": injected_p50s,
+                    "injected_p50_median_ns": injected_p50_median,
+                    "injected_p50_min_ns": min(injected_p50s),
+                    "injected_p50_max_ns": max(injected_p50s),
+                    "injected_p50_full_range_ns": injected_p50_full_range,
+                    "injected_p50_relative_range": injected_relative_range,
+                    "p50_stability_limit": p50_max_relative_range,
                     "control_stable": control_stable,
-                    "injected_p50_ns": injected_p50,
+                    "injected_stable": injected_stable,
                     "injected_minus_control_median_ns": (
-                        injected_p50 - control_p50_median
+                        injected_p50_median - control_p50_median
+                    ),
+                    "control_achieved_target_ratios": control_ratios,
+                    "control_achieved_target_median": control_ratio_median,
+                    "injected_achieved_target_ratios": injected_ratios,
+                    "injected_achieved_target_median": (
+                        injected_ratio_median
                     ),
                     "allowed_delta_ns": allowed_p50_delta,
                     "equivalent": equivalent,
@@ -1524,7 +1617,7 @@ def main() -> None:
                     )
 
     report = {
-        "schema_version": 3,
+        "schema_version": 4,
         "passed": not errors,
         "errors": errors,
         "common_max": common_max,
@@ -1538,10 +1631,9 @@ def main() -> None:
         "raw_samples_validated_per_load": measured_events,
         "load_levels": load_levels,
         "control_replicates": control_replicates,
+        "injected_replicates": injected_replicates,
         "co_p50_relative_tolerance": p50_tolerance,
-        "co_control_p50_max_relative_range": (
-            control_p50_max_relative_range
-        ),
+        "co_p50_max_relative_range": p50_max_relative_range,
         "co_p50_empirical_tolerance_rule": p50_empirical_rule,
         "inject_sleep_us_by_load": inject_sleep_us_by_load,
         "pause_precision": {
@@ -1553,7 +1645,7 @@ def main() -> None:
             "attempted_candidates_us": attempted_precision_candidates,
             "candidate_passes": combined_precision_passes,
         },
-        "control_p50_stability": control_p50_results,
+        "p50_equivalence": p50_equivalence_results,
         "co_achieved_target_tolerance": achieved_tolerance,
         "allocation_tolerance": allocation_tolerance,
     }
