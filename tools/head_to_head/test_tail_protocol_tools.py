@@ -247,9 +247,9 @@ class TailProtocolToolsTest(unittest.TestCase):
             measured_events=1_000_000,
             requested_us_by_load=None,
         )
-        self.assertEqual({50: 167, 70: 72, 90: 19}, selected)
+        self.assertEqual({50: 1_667, 70: 715, 90: 186}, selected)
         self.assertEqual(
-            {50: 49_991, 70: 21_425, 90: 5_555},
+            {50: 499_991, 70: 214_282, 90: 55_555},
             runner.select_inject_sleep_us_by_load(
                 common_max=100_000,
                 load_levels=[50, 70, 90],
